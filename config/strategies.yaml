@@ -1,0 +1,10 @@
+strategies:
+  dual_momentum:
+    enabled: true
+    approval_mode: manual
+    signal_expiry_hours: 4
+    parameters:
+      lookback_months: 6
+      top_n: 3
+      rebalance_frequency: month_end
+      fallback_instrument: BIL.ARCA

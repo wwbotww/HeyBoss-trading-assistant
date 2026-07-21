@@ -1,0 +1,52 @@
+# 初始高流动性美股 ETF 池。instrument_id 使用 IB_SIMPLIFIED 规则。
+instruments:
+  - symbol: SPY
+    instrument_id: SPY.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: QQQ
+    instrument_id: QQQ.NASDAQ
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+  - symbol: TLT
+    instrument_id: TLT.NASDAQ
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+  - symbol: GLD
+    instrument_id: GLD.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: IWM
+    instrument_id: IWM.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: EFA
+    instrument_id: EFA.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: EEM
+    instrument_id: EEM.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: VNQ
+    instrument_id: VNQ.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: LQD
+    instrument_id: LQD.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD
+  - symbol: BIL
+    instrument_id: BIL.ARCA
+    exchange: SMART
+    primary_exchange: ARCA
+    currency: USD

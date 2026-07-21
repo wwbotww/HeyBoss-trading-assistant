@@ -1,0 +1,8 @@
+# 所有下单前置风控阈值必须来自本文件，业务代码中不得复制这些数值。
+risk:
+  # 策略最多使用的账户权益；paper 默认大额净值不会放大实际计划仓位。
+  strategy_capital_usd: 10000
+  max_order_notional_usd: 5000
+  max_instrument_weight: 0.25
+  max_daily_new_positions: 3
+  max_gross_exposure: 0.80

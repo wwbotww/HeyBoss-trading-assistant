@@ -1,0 +1,10 @@
+# M2 回测环境参数；策略参数与风控阈值仍分别来自 strategies.yaml 和 risk.yaml。
+backtest:
+  starting_balance_usd: 10000
+  commission_per_share_usd: 0.005
+  slippage_ticks: 1
+  # IBKR 日线 ts_event 在日初；延迟到日末后，订单只能由下一根 Bar 成交。
+  bar_availability_delay_ns: 86399999999999
+  trading_days_per_year: 252
+  risk_free_rate: 0.0
+  report_root: reports/backtests

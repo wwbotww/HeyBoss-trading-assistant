@@ -1,0 +1,16 @@
+# IBKR 历史日线同步配置。MVP 统一使用 NT 原生 LAST/EXTERNAL Bar。
+historical_data:
+  history_years: 5
+  bar_type_suffix: 1-DAY-LAST-EXTERNAL
+  use_regular_trading_hours: true
+  chunk_days: 365
+  request_interval_seconds: 2.0
+  max_attempts: 3
+  retry_backoff_seconds: [2.0, 5.0, 10.0]
+  live_sync_delay_minutes: 30
+  overlap_days: 10
+  request_timeout_seconds: 120
+
+quality:
+  max_absolute_daily_return: 0.25
+  stale_after_days: 5

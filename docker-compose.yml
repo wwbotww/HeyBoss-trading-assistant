@@ -1,0 +1,80 @@
+name: trading-assistant
+
+x-app-service: &app-service
+  build:
+    context: .
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    IB_HOST: ${IB_DOCKER_HOST:-ib-gateway}
+    IB_PORT: ${IB_DOCKER_PORT:-4004}
+  volumes:
+    - ./catalog:/app/catalog
+    - ./data:/app/data
+    - ./reports:/app/reports
+
+x-ib-app-service: &ib-app-service
+  <<: *app-service
+  depends_on:
+    ib-gateway:
+      condition: service_healthy
+  restart: unless-stopped
+  profiles: [application]
+
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:10.45.1f
+    restart: always
+    environment:
+      TWS_USERID: ${TWS_USERID:-}
+      TWS_PASSWORD: ${TWS_PASSWORD:-}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-accept}
+      TIME_ZONE: ${TIME_ZONE:-Etc/UTC}
+      TZ: ${TIME_ZONE:-Etc/UTC}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:59 PM}
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${IB_PORT:-4002}:4004"
+      - "127.0.0.1:5900:5900"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/4002'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  trading-node:
+    <<: *ib-app-service
+    command: ["python", "scripts/run_live.py"]
+    # 启动同步或执行边界异常时失败关闭，禁止自动重放。
+    restart: "no"
+
+  approval-bot:
+    <<: *app-service
+    command: ["python", "-m", "trading_assistant.notify.bot"]
+
+  dashboard:
+    <<: *app-service
+    command:
+      - streamlit
+      - run
+      - src/trading_assistant/dashboard/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s

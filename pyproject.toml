@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trading-assistant"
+version = "0.1.0"
+description = "基于 NautilusTrader 与 IBKR paper 账户的半自动辅助交易平台"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "Proprietary" }
+authors = [{ name = "Trading Assistant Maintainers" }]
+dependencies = [
+  "nautilus_trader[docker,ib]==1.230.0",
+  "pandas>=2.2,<3",
+  "python-telegram-bot>=21,<23",
+  "PyYAML>=6,<7",
+  "SQLAlchemy>=2.0,<3",
+  "streamlit>=1.40,<2",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.15,<2",
+  "pre-commit>=4,<5",
+  "pytest>=8,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+  "types-PyYAML>=6,<7",
+]
+research = [
+  "ipykernel>=6,<8",
+  "jupyterlab>=4,<5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trading_assistant"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ANN",
+  "ASYNC",
+  "B",
+  "C4",
+  "E",
+  "F",
+  "I",
+  "N",
+  "PERF",
+  "PT",
+  "PTH",
+  "RUF",
+  "S",
+  "SIM",
+  "UP",
+  "W",
+]
+ignore = [
+  "S101", # pytest 的 assert 是预期用法。
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["T201"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+show_error_codes = true
+warn_unreachable = true
+mypy_path = "src"
+
+# NautilusTrader 的 wheel 与 pandas 未为全部运行时模块提供 .pyi；
+# 只忽略这些第三方模块缺失的类型文件，项目自身仍保持 strict。
+[[tool.mypy.overrides]]
+module = ["nautilus_trader.*", "pandas", "pandas.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=trading_assistant",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["trading_assistant"]

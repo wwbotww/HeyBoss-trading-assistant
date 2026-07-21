@@ -1,0 +1,5 @@
+live:
+  catalog_lookback_days: 2200
+  approval_poll_interval_seconds: 5
+  notification_poll_interval_seconds: 5
+  portfolio_snapshot_interval_seconds: 30
