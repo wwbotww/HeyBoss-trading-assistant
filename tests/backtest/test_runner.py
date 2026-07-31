@@ -25,9 +25,13 @@ def _write_test_config(project_root: Path) -> None:
         {
             "symbol": symbol,
             "instrument_id": f"{symbol}.ARCA",
+            "data_symbol": f"{symbol}.US",
             "exchange": "SMART",
             "primary_exchange": "ARCA",
             "currency": "USD",
+            "price_precision": 2,
+            "price_increment": "0.01",
+            "lot_size": 1,
         }
         for symbol in ("SPY", "BIL")
     ]
@@ -36,10 +40,13 @@ def _write_test_config(project_root: Path) -> None:
         config / "data.yaml",
         {
             "historical_data": {
+                "provider": "eodhd",
+                "price_basis": "total_return_adjusted",
+                "refresh_mode": "replace",
                 "history_years": 5,
                 "bar_type_suffix": "1-DAY-LAST-EXTERNAL",
                 "use_regular_trading_hours": True,
-                "chunk_days": 365,
+                "request_window_days": None,
                 "request_interval_seconds": 0,
                 "max_attempts": 1,
                 "retry_backoff_seconds": [],

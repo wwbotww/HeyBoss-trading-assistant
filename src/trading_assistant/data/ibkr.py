@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Protocol
 
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersInstrumentProviderConfig,
@@ -17,29 +16,7 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 
-
-class HistoricalBarSource(Protocol):
-    """数据管道使用的最小历史日线接口。"""
-
-    async def connect(self) -> None:
-        """连接数据源。"""
-
-    async def request_instruments(
-        self,
-        instrument_ids: Sequence[InstrumentId],
-    ) -> list[Instrument]:
-        """解析标的定义。"""
-
-    async def request_daily_bars(
-        self,
-        instrument_id: InstrumentId,
-        start: datetime,
-        end: datetime,
-    ) -> list[Bar]:
-        """请求一个标的的完整 RTH 日线。"""
-
-    async def close(self) -> None:
-        """释放数据源连接。"""
+from trading_assistant.data.config import InstrumentSpec
 
 
 class IbkrHistoricalBarSource:
@@ -84,20 +61,22 @@ class IbkrHistoricalBarSource:
 
     async def request_instruments(
         self,
-        instrument_ids: Sequence[InstrumentId],
+        specs: Sequence[InstrumentSpec],
     ) -> list[Instrument]:
         """使用 NT IB_SIMPLIFIED 规则解析标的。"""
         client = self._connected_client()
+        instrument_ids = [InstrumentId.from_str(spec.instrument_id) for spec in specs]
         return await client.request_instruments(instrument_ids=list(instrument_ids))
 
     async def request_daily_bars(
         self,
-        instrument_id: InstrumentId,
+        spec: InstrumentSpec,
         start: datetime,
         end: datetime,
     ) -> list[Bar]:
         """请求标准 1-DAY-LAST-EXTERNAL RTH Bar。"""
         client = self._connected_client()
+        instrument_id = InstrumentId.from_str(spec.instrument_id)
         return await client.request_bars(
             bar_specifications=["1-DAY-LAST"],
             start_date_time=start,

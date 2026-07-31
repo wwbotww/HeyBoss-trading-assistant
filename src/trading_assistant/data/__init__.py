@@ -7,13 +7,16 @@ from trading_assistant.data.config import (
     load_data_config,
     load_instruments,
 )
-from trading_assistant.data.ibkr import HistoricalBarSource, IbkrHistoricalBarSource
+from trading_assistant.data.eodhd import EodhdHistoricalBarSource
+from trading_assistant.data.ibkr import IbkrHistoricalBarSource
 from trading_assistant.data.pipeline import HistoricalDataPipeline, PipelineSummary
 from trading_assistant.data.service import select_instruments, sync_historical_data
+from trading_assistant.data.source import HistoricalBarSource
 
 __all__ = [
     "CatalogRepository",
     "DataPipelineConfig",
+    "EodhdHistoricalBarSource",
     "HistoricalBarSource",
     "HistoricalDataPipeline",
     "IbkrHistoricalBarSource",

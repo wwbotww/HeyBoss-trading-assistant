@@ -95,3 +95,21 @@ class CatalogRepository:
                 self._catalog.write_data(batch)
                 written += len(batch)
         return written
+
+    def replace_bars(self, bars: Sequence[Bar]) -> int:
+        """按 BarType 替换完整序列; 用于会回溯调整的规范行情。"""
+        grouped: dict[str, list[Bar]] = defaultdict(list)
+        for bar in bars:
+            grouped[str(bar.bar_type)].append(bar)
+
+        written = 0
+        for identifier, values in grouped.items():
+            unique = {bar.ts_init: bar for bar in values}
+            incoming = [unique[timestamp] for timestamp in sorted(unique)]
+            existing = self.read_bars(incoming[0].bar_type)
+            if existing == incoming:
+                continue
+            self._catalog.delete_data_range(Bar, identifier=identifier)
+            self._catalog.write_data(incoming)
+            written += len(incoming)
+        return written

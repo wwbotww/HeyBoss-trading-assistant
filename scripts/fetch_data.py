@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 IBKR 串行同步标准 NT 日线到 ParquetDataCatalog。"""
+"""从配置的数据供应商同步标准 NT 日线到 ParquetDataCatalog。"""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validate-only",
         action="store_true",
-        help="validate the local catalog without connecting to IBKR",
+        help="validate the local catalog without connecting to the data provider",
     )
     parser.add_argument(
         "--instruments-config",
@@ -86,7 +86,7 @@ async def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Pip
     try:
         return await sync_historical_data(
             project_root=PROJECT_ROOT,
-            catalog_path=Path(os.getenv("CATALOG_PATH", PROJECT_ROOT / "catalog")),
+            catalog_path=Path(os.getenv("CATALOG_PATH", PROJECT_ROOT / "catalog" / "eodhd")),
             instruments_config_path=args.instruments_config,
             data_config_path=args.data_config,
             start_date=args.start,
@@ -96,6 +96,7 @@ async def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Pip
             ib_host=os.getenv("IB_HOST", "127.0.0.1"),
             ib_port=int(os.getenv("IB_PORT", "4002")),
             ib_client_id=int(os.getenv("IB_DATA_CLIENT_ID", "1201")),
+            eodhd_api_token=os.getenv("EODHD_API_TOKEN"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
     except ValueError as exc:

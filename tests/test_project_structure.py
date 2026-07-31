@@ -83,7 +83,10 @@ def test_configuration_has_required_defaults() -> None:
     strategies = _load_yaml(PROJECT_ROOT / "config" / "strategies.yaml")
 
     assert len(instruments["instruments"]) >= 10
-    assert data["historical_data"]["history_years"] >= 5
+    assert data["historical_data"]["history_years"] >= 1
+    assert data["historical_data"]["provider"] == "eodhd"
+    assert data["historical_data"]["price_basis"] == "total_return_adjusted"
+    assert data["historical_data"]["refresh_mode"] == "replace"
     assert data["historical_data"]["bar_type_suffix"] == "1-DAY-LAST-EXTERNAL"
     assert data["historical_data"]["use_regular_trading_hours"] is True
     assert set(risk["risk"]) == {

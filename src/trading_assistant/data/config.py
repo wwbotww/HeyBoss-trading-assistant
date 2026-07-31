@@ -4,30 +4,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 
 
 @dataclass(frozen=True)
 class InstrumentSpec:
-    """IBKR 标的配置。"""
+    """供应商无关的标的与 NT Instrument 配置。"""
 
     symbol: str
     instrument_id: str
+    data_symbol: str
     exchange: str
     primary_exchange: str
     currency: str
+    price_precision: int
+    price_increment: str
+    lot_size: int
+
+
+HistoricalProvider = Literal["eodhd", "ibkr"]
+PriceBasis = Literal["total_return_adjusted", "split_adjusted"]
+RefreshMode = Literal["replace", "append"]
 
 
 @dataclass(frozen=True)
 class HistoricalDataConfig:
     """历史数据请求与增量同步参数。"""
 
+    provider: HistoricalProvider
+    price_basis: PriceBasis
+    refresh_mode: RefreshMode
     history_years: int
     bar_type_suffix: str
     use_regular_trading_hours: bool
-    chunk_days: int
+    request_window_days: int | None
     request_interval_seconds: float
     max_attempts: int
     retry_backoff_seconds: tuple[float, ...]
@@ -83,13 +95,34 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
             instrument = InstrumentSpec(
                 symbol=str(value["symbol"]),
                 instrument_id=str(value["instrument_id"]),
+                data_symbol=str(value["data_symbol"]),
                 exchange=str(value["exchange"]),
                 primary_exchange=str(value["primary_exchange"]),
                 currency=str(value["currency"]),
+                price_precision=int(value["price_precision"]),
+                price_increment=str(value["price_increment"]),
+                lot_size=int(value["lot_size"]),
             )
-        except KeyError as exc:
-            raise ValueError(f"instruments[{index}] 缺少字段 {exc.args[0]!r}: {path}") from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, KeyError):
+                raise ValueError(
+                    f"instruments[{index}] 缺少字段 {exc.args[0]!r}: {path}",
+                ) from exc
+            raise ValueError(f"instruments[{index}] 字段类型无效: {path}") from exc
         instruments.append(instrument)
+
+        if instrument.price_precision < 0:
+            raise ValueError(f"instruments[{index}].price_precision 不得为负数: {path}")
+        try:
+            price_increment = float(instrument.price_increment)
+        except ValueError as exc:
+            raise ValueError(
+                f"instruments[{index}].price_increment 必须是正数: {path}",
+            ) from exc
+        if price_increment <= 0:
+            raise ValueError(f"instruments[{index}].price_increment 必须是正数: {path}")
+        if instrument.lot_size < 1:
+            raise ValueError(f"instruments[{index}].lot_size 必须大于等于 1: {path}")
 
     instrument_ids = [instrument.instrument_id for instrument in instruments]
     if len(instrument_ids) != len(set(instrument_ids)):
@@ -106,10 +139,17 @@ def load_data_config(path: Path) -> DataPipelineConfig:
 
     try:
         historical_config = HistoricalDataConfig(
+            provider=cast(HistoricalProvider, str(historical["provider"])),
+            price_basis=cast(PriceBasis, str(historical["price_basis"])),
+            refresh_mode=cast(RefreshMode, str(historical["refresh_mode"])),
             history_years=int(historical["history_years"]),
             bar_type_suffix=str(historical["bar_type_suffix"]),
             use_regular_trading_hours=bool(historical["use_regular_trading_hours"]),
-            chunk_days=int(historical["chunk_days"]),
+            request_window_days=(
+                None
+                if historical["request_window_days"] is None
+                else int(historical["request_window_days"])
+            ),
             request_interval_seconds=float(historical["request_interval_seconds"]),
             max_attempts=int(historical["max_attempts"]),
             retry_backoff_seconds=tuple(
@@ -128,10 +168,29 @@ def load_data_config(path: Path) -> DataPipelineConfig:
 
     if historical_config.history_years < 1:
         raise ValueError("history_years 必须大于等于 1")
+    if historical_config.provider not in {"eodhd", "ibkr"}:
+        raise ValueError("provider 只允许 eodhd 或 ibkr")
+    if historical_config.price_basis not in {"total_return_adjusted", "split_adjusted"}:
+        raise ValueError("price_basis 只允许 total_return_adjusted 或 split_adjusted")
+    if historical_config.refresh_mode not in {"replace", "append"}:
+        raise ValueError("refresh_mode 只允许 replace 或 append")
+    if historical_config.provider == "eodhd" and (
+        historical_config.price_basis != "total_return_adjusted"
+        or historical_config.refresh_mode != "replace"
+    ):
+        raise ValueError("EODHD 必须使用 total_return_adjusted 与 replace")
+    if historical_config.provider == "ibkr" and (
+        historical_config.price_basis != "split_adjusted"
+        or historical_config.refresh_mode != "append"
+    ):
+        raise ValueError("IBKR 必须使用 split_adjusted 与 append")
     if historical_config.bar_type_suffix != "1-DAY-LAST-EXTERNAL":
         raise ValueError("M1 只允许 bar_type_suffix=1-DAY-LAST-EXTERNAL")
-    if historical_config.chunk_days < 1:
-        raise ValueError("chunk_days 必须大于等于 1")
+    if (
+        historical_config.request_window_days is not None
+        and historical_config.request_window_days < 1
+    ):
+        raise ValueError("request_window_days 必须为 null 或大于等于 1")
     if historical_config.request_interval_seconds < 0:
         raise ValueError("request_interval_seconds 不得为负数")
     if historical_config.max_attempts < 1:

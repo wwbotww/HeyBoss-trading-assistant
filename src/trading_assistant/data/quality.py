@@ -93,7 +93,7 @@ def detect_historical_revisions(
     existing: list[Bar],
     incoming: list[Bar],
 ) -> tuple[QualityIssue, ...]:
-    """比较重叠区间; 发现供应商修订时只告警、不覆盖。"""
+    """比较重叠区间并报告供应商历史修订。"""
     existing_by_timestamp = {bar.ts_init: bar for bar in existing}
     issues: list[QualityIssue] = []
     for bar in incoming:
@@ -104,7 +104,7 @@ def detect_historical_revisions(
                     "historical_revision_detected",
                     "warning",
                     instrument_id,
-                    "Incoming IBKR bar differs from the stored bar; existing data was preserved.",
+                    "Incoming provider bar differs from the stored bar.",
                     bar.ts_init,
                 ),
             )

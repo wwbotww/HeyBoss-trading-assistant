@@ -1,52 +1,92 @@
-# 初始高流动性美股 ETF 池。instrument_id 使用 IB_SIMPLIFIED 规则。
+# 初始高流动性美股 ETF 池。data_symbol 是历史供应商代码，instrument_id 保持 NT/IBKR 标识。
 instruments:
   - symbol: SPY
     instrument_id: SPY.ARCA
+    data_symbol: SPY.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: QQQ
     instrument_id: QQQ.NASDAQ
+    data_symbol: QQQ.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: TLT
     instrument_id: TLT.NASDAQ
+    data_symbol: TLT.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: GLD
     instrument_id: GLD.ARCA
+    data_symbol: GLD.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: IWM
     instrument_id: IWM.ARCA
+    data_symbol: IWM.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: EFA
     instrument_id: EFA.ARCA
+    data_symbol: EFA.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: EEM
     instrument_id: EEM.ARCA
+    data_symbol: EEM.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: VNQ
     instrument_id: VNQ.ARCA
+    data_symbol: VNQ.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: LQD
     instrument_id: LQD.ARCA
+    data_symbol: LQD.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - symbol: BIL
     instrument_id: BIL.ARCA
+    data_symbol: BIL.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1

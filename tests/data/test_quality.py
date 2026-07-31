@@ -112,7 +112,7 @@ def test_warnings_cover_return_gap_and_staleness() -> None:
     assert not report.has_errors
 
 
-def test_historical_revision_is_reported_without_mutation() -> None:
+def test_historical_revision_is_reported() -> None:
     """重叠时间戳数值变化应报告; 完全相同则不报告。"""
     existing = [make_bar(date(2026, 7, 14), close=101)]
     same = [make_bar(date(2026, 7, 14), close=101)]

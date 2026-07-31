@@ -19,7 +19,8 @@
 | 语言 | Python 3.12+，uv 管理依赖 | 全项目类型注解，mypy strict 通过 |
 | 交易引擎 | `nautilus_trader`（最新稳定版）+ 其 Interactive Brokers 适配器 | 回测与实盘同一套策略代码 |
 | 券商连接 | IB Gateway（Docker 镜像 `ghcr.io/gnzsnz/ib-gateway`，含 IBC 自动登录） | 凭据通过环境变量注入，绝不入库 |
-| 行情存储 | NautilusTrader 原生 ParquetDataCatalog | 目录 `./catalog/` |
+| 历史数据源 | EODHD EOD API | 供应商适配层之后只使用 NT 原生对象；IBKR 历史适配器保留为可切换实现 |
+| 行情存储 | NautilusTrader 原生 ParquetDataCatalog | EODHD 使用独立目录 `./catalog/eodhd/` |
 | 业务存储 | SQLite（通过 SQLAlchemy 2.x）| 存信号、审批记录、订单日志；schema 设计需兼容未来迁移 PostgreSQL |
 | 通知/审批 | `python-telegram-bot` v21+，inline keyboard 实现“确认/否决”按钮 | Bot token 走环境变量 |
 | 看板 | Streamlit | 只读展示，不承担任何交易职能 |
@@ -48,7 +49,7 @@ trading-assistant/
 │   │   ├── momentum.py       #   输入 pandas/polars DataFrame → 输出目标权重
 │   ├── strategies/           # NT Actor 决策层：订阅 Bar→调 signals→发布事件
 │   ├── execution/            # NT Strategy 执行网关：风控→审批→唯一提交订单入口
-│   ├── data/                 # 历史数据拉取（IBKR→catalog）、数据质量校验
+│   ├── data/                 # 供应商适配、历史日线同步与数据质量校验
 │   ├── backtest/             # BacktestNode 环境适配、费用模型与事后报告
 │   ├── live/                 # TradingNode paper-only 环境装配
 │   ├── storage/              # SQLAlchemy models + repository
@@ -80,12 +81,13 @@ trading-assistant/
 
 **M1 — 数据管道**
 
-- `scripts/fetch_data.py`：按 instruments.yaml 从 IBKR 拉取日线历史数据（≥5 年，可分批以规避 IBKR 历史数据限速），写入 ParquetDataCatalog；
-- 数据质量校验：缺口检测、异常值报告；支持增量更新（幂等，可重复运行）。
+- `scripts/fetch_data.py`：按 instruments.yaml 从配置的数据源拉取日线；默认使用 EODHD，免费版为一年历史，升级后通过配置扩展到五年；
+- 历史供应商只实现 `HistoricalBarSource` 适配接口。EODHD 的 `data_symbol` 只用于请求边界，回测、策略和 Catalog 不得依赖 EODHD 响应结构；
+- 数据质量校验：起始覆盖、缺口、异常值与供应商修订报告；同步必须幂等并可重复运行；
 - M1 的规范数据只使用 NautilusTrader 原生 `Instrument`、`Bar`、`BarType` 和 `ParquetDataCatalog`，不定义 `CustomData`、自定义 Bar 或平行历史数据结构；
-- 唯一日线口径为 `1-DAY-LAST-EXTERNAL`、IBKR `TRADES`、RTH。当前策略使用拆股调整后的价格动量，不把股息再投资建模为总回报；
+- 唯一日线口径为 `1-DAY-LAST-EXTERNAL`。EODHD 的原始 OHLC 按 `adjusted_close / close` 同比例转换，形成同时考虑拆股与分红的总回报调整 OHLC；供应商成交量直接使用其已拆股调整的 volume；
 - 回测与后续实盘收盘信号必须先复用同一历史同步管道，再从同一 Catalog 读取相同 `BarType`。M3 MVP 不订阅付费实时行情，执行计划使用 Catalog 最新日线收盘参考价；IBKR 连接只负责账户、持仓、对账与订单状态；
-- 不维护数据 manifest、版本号或内容哈希。同步先检查起始覆盖并回填缺失的早期历史，完整后只请求 10 天重叠区间；发现供应商历史修订时告警但不自动覆盖。
+- 不维护数据 manifest、版本号或内容哈希。EODHD 每个标的一次请求覆盖完整许可历史；完整响应通过质量校验后替换该 `BarType` 的规范序列，以接纳分红和拆股导致的正常回溯调整。旧 IBKR Catalog 与 EODHD Catalog 禁止混写；IBKR 备用适配器仍使用分块、重叠和追加模式。
 
 **M2 — 回测闭环**
 
@@ -93,7 +95,7 @@ trading-assistant/
 - 轮动池排名排除短债兜底标的 BIL；使用六个完整日历月的价格动量。选取动量为正的前 3 名，按目标权重等权；全部为负时仅持有 BIL；数据不足时保持现金；动量并列时按 instrument ID 稳定排序；
 - 初始资金 10,000 USD。目标仓位同时受 `risk.yaml` 的单标的 25% 和总仓位 80% 上限约束；使用整数股，先卖后买且不借入现金；
 - 通过 `BacktestNode` 从 Catalog 读取 M1 的原生 `Bar`，加载与未来实盘相同的 Actor、领域 Event 和执行 Strategy。回测只把审批模式设为 auto，并把最终执行端替换为 `BacktestExchange`；
-- IBKR 历史日线的 `ts_event` 是交易日起点，完整 OHLC 在 `ts_init` 才可用。回测必须通过 NT 原生 `LatencyModel` 把订单激活时间推迟到该 Bar 完整可用之后，禁止使用同一根日线开盘价形成前视偏差；
+- 规范历史日线的 `ts_event` 是交易日起点，完整 OHLC 在当日结束的 `ts_init` 才可用。回测必须通过 NT 原生 `LatencyModel` 把订单激活时间推迟到该 Bar 完整可用之后，禁止使用同一根日线开盘价形成前视偏差；
 - `scripts/run_backtest.py`：佣金通过 NT 官方 `FeeModel` 扩展点按成交股数 × 0.005 USD 计算，再把每笔总佣金按 USD 最小精度取整；不能直接使用 `PerContractFeeModel("0.005 USD")`，因为 NT 会先把单位佣金按 USD 两位精度变成 0.00。成交加入一个最小变动价位滑点；输出年化收益、最大回撤、Sharpe（无风险利率 0、252 交易日）、换手率、成交数、期末净值与现金，并将运行、信号、审批、订单和逐笔成交存入 SQLite；
 - 报告写入 `reports/backtests/<run-id>/`，至少包含 `summary.json`、`fills.csv` 与 `returns.csv`；
 - notebooks 中给出一个回测结果分析示例。
@@ -125,10 +127,11 @@ trading-assistant/
 
 - IB Gateway 不能真正 headless，必须用带 IBC 的 Docker 镜像处理自动登录与每日重启；重连逻辑要处理 Gateway 日常重启导致的断线。
 - NT 要求 Gateway 返回 UTC 时间戳，README 必须包含该设置说明。
-- IBKR 历史数据接口有限速（同时 ≤50 请求等），fetch_data 需串行分批 + 重试退避。
+- EODHD 免费版每天只有 20 次调用且最多返回一年历史；当前 10 个标的一次完整同步约消耗 10 次，升级前每天最多执行一次完整同步。
+- EODHD EOD 原始 OHLC 未调整，`adjusted_close` 同时调整拆股与分红；不得只替换 close，必须按统一因子调整整根 OHLC，并在质量校验后接受历史回溯修订。
 - NT 对“在 TWS/手机端手动操作订单”的状态同步不可靠：README 中明确警告用户不要手动操作本系统管理的仓位。
 - ib Gateway paper 端口为 4002（TWS paper 为 7497），配置默认值用 4002。
-- 所有凭据（IBKR 用户名/密码、Telegram token/chat_id）只经环境变量，`.env` 加入 .gitignore。
+- 所有凭据（IBKR 用户名/密码、EODHD API token、Telegram token/chat_id）只经环境变量，`.env` 加入 .gitignore。
 
 ## 7. 工作方式要求
 

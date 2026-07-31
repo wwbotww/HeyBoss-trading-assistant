@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--catalog-path",
         type=Path,
-        default=Path(os.getenv("CATALOG_PATH", "./catalog")),
+        default=Path(os.getenv("CATALOG_PATH", "./catalog/eodhd")),
     )
     parser.add_argument(
         "--database-url",

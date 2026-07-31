@@ -14,8 +14,8 @@ from trading_assistant.data.pipeline import PipelineSummary
 
 def _instruments() -> tuple[InstrumentSpec, ...]:
     return (
-        InstrumentSpec("SPY", "SPY.ARCA", "SMART", "ARCA", "USD"),
-        InstrumentSpec("QQQ", "QQQ.NASDAQ", "SMART", "NASDAQ", "USD"),
+        InstrumentSpec("SPY", "SPY.ARCA", "SPY.US", "SMART", "ARCA", "USD", 2, "0.01", 1),
+        InstrumentSpec("QQQ", "QQQ.NASDAQ", "QQQ.US", "SMART", "NASDAQ", "USD", 2, "0.01", 1),
     )
 
 
@@ -60,7 +60,7 @@ def test_validate_only_uses_pipeline_without_ib_source(
     assert result is marker
 
 
-def test_sync_constructs_ib_source_and_exact_date_bounds(
+def test_sync_constructs_eodhd_source_and_exact_date_bounds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -81,7 +81,7 @@ def test_sync_constructs_ib_source_and_exact_date_bounds(
             captured["end"] = end
             return marker
 
-    monkeypatch.setattr(service, "IbkrHistoricalBarSource", cast(Any, FakeSource))
+    monkeypatch.setattr(service, "EodhdHistoricalBarSource", cast(Any, FakeSource))
     monkeypatch.setattr(service, "HistoricalDataPipeline", cast(Any, FakePipeline))
     result = asyncio.run(
         service.sync_historical_data(
@@ -91,13 +91,12 @@ def test_sync_constructs_ib_source_and_exact_date_bounds(
             data_config_path=Path.cwd() / "config" / "data.yaml",
             start_date=date(2025, 1, 1),
             end_date=date(2025, 2, 1),
-            ib_host="gateway",
-            ib_port=4004,
-            ib_client_id=7,
+            eodhd_api_token="secret-test-token",  # noqa: S106
         )
     )
     assert result is marker
-    assert captured["host"] == "gateway"
+    assert captured["api_token"] == "secret-test-token"  # noqa: S105
+    assert captured["request_timeout_seconds"] == 120
     assert cast(Any, captured["start"]).date() == date(2025, 1, 1)
     assert cast(Any, captured["end"]).date() == date(2025, 2, 1)
 

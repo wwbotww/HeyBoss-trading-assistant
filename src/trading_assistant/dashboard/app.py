@@ -137,7 +137,7 @@ def main() -> None:
     st.caption("只读运行看板 · 不包含审批、下单或撤单入口")
 
     database_url = os.environ.get("DATABASE_URL", "sqlite:///./data/trading_assistant.db")
-    catalog_path = os.environ.get("CATALOG_PATH", "./catalog")
+    catalog_path = os.environ.get("CATALOG_PATH", "./catalog/eodhd")
     report_root = os.environ.get("REPORT_ROOT", "./reports/backtests")
     account = os.environ.get("TWS_ACCOUNT", "").strip()
     if not account:

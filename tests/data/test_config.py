@@ -17,7 +17,11 @@ def test_load_project_configuration() -> None:
     config = load_data_config(PROJECT_ROOT / "config" / "data.yaml")
 
     assert instruments[0].instrument_id == "SPY.ARCA"
+    assert instruments[0].data_symbol == "SPY.US"
     assert len(instruments) == 10
+    assert config.historical_data.provider == "eodhd"
+    assert config.historical_data.price_basis == "total_return_adjusted"
+    assert config.historical_data.refresh_mode == "replace"
     assert config.historical_data.bar_type_suffix == "1-DAY-LAST-EXTERNAL"
     assert config.historical_data.max_attempts == 3
     assert config.quality.max_absolute_daily_return == 0.25
@@ -49,8 +53,9 @@ def test_invalid_data_config_is_rejected(tmp_path: Path, content: str, message: 
     ("override", "message"),
     [
         ("history_years: 0", "history_years"),
+        ("provider: invalid", "provider"),
         ("bar_type_suffix: 1-HOUR-LAST-EXTERNAL", "bar_type_suffix"),
-        ("chunk_days: 0", "chunk_days"),
+        ("request_window_days: 0", "request_window_days"),
         ("request_interval_seconds: -1", "request_interval_seconds"),
         ("max_attempts: 0", "max_attempts"),
         ("retry_backoff_seconds: [-1, 2]", "retry_backoff_seconds"),
@@ -65,9 +70,12 @@ def test_invalid_historical_values_are_rejected(
 ) -> None:
     """请求、重试和窗口参数必须在有效范围内。"""
     values = {
+        "provider": "provider: eodhd",
+        "price_basis": "price_basis: total_return_adjusted",
+        "refresh_mode": "refresh_mode: replace",
         "history_years": "history_years: 5",
         "bar_type_suffix": "bar_type_suffix: 1-DAY-LAST-EXTERNAL",
-        "chunk_days": "chunk_days: 365",
+        "request_window_days": "request_window_days: null",
         "request_interval_seconds": "request_interval_seconds: 2",
         "max_attempts": "max_attempts: 3",
         "retry_backoff_seconds": "retry_backoff_seconds: [2, 5, 10]",
@@ -78,10 +86,13 @@ def test_invalid_historical_values_are_rejected(
     values[key] = override
     content = f"""
 historical_data:
+  {values["provider"]}
+  {values["price_basis"]}
+  {values["refresh_mode"]}
   {values["history_years"]}
   {values["bar_type_suffix"]}
   use_regular_trading_hours: true
-  {values["chunk_days"]}
+  {values["request_window_days"]}
   {values["request_interval_seconds"]}
   {values["max_attempts"]}
   {values["retry_backoff_seconds"]}
@@ -119,10 +130,13 @@ def test_invalid_quality_values_are_rejected(
     path.write_text(
         f"""
 historical_data:
+  provider: eodhd
+  price_basis: total_return_adjusted
+  refresh_mode: replace
   history_years: 5
   bar_type_suffix: 1-DAY-LAST-EXTERNAL
   use_regular_trading_hours: true
-  chunk_days: 365
+  request_window_days: null
   request_interval_seconds: 2
   max_attempts: 3
   retry_backoff_seconds: [2, 5, 10]
@@ -151,9 +165,13 @@ instruments:
   - &spy
     symbol: SPY
     instrument_id: SPY.ARCA
+    data_symbol: SPY.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
   - *spy
 """,
             "不得重复",

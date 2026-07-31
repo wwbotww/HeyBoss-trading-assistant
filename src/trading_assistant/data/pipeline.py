@@ -1,4 +1,4 @@
-"""IBKR 历史日线同步、质量检查与 Catalog 写入编排。"""
+"""历史日线同步、质量检查与 Catalog 写入编排。"""
 
 from __future__ import annotations
 
@@ -11,17 +11,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.identifiers import InstrumentId
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import DataPipelineConfig, InstrumentSpec
-from trading_assistant.data.ibkr import HistoricalBarSource
 from trading_assistant.data.quality import (
     DataQualityReport,
     QualityIssue,
     detect_historical_revisions,
     validate_daily_bars,
 )
+from trading_assistant.data.source import HistoricalBarSource
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,9 +111,12 @@ class HistoricalDataPipeline:
         """按配置把请求范围切成串行窗口。"""
         if start >= end:
             return ()
+        window_days = self._config.historical_data.request_window_days
+        if window_days is None:
+            return ((start, end),)
         windows: list[tuple[datetime, datetime]] = []
         cursor = start
-        chunk = timedelta(days=self._config.historical_data.chunk_days)
+        chunk = timedelta(days=window_days)
         while cursor < end:
             window_end = min(cursor + chunk, end)
             windows.append((cursor, window_end))
@@ -123,7 +125,7 @@ class HistoricalDataPipeline:
 
     async def _request_with_retry(
         self,
-        instrument_id: InstrumentId,
+        spec: InstrumentSpec,
         start: datetime,
         end: datetime,
     ) -> list[Bar]:
@@ -133,14 +135,14 @@ class HistoricalDataPipeline:
         config = self._config.historical_data
         for attempt in range(config.max_attempts):
             try:
-                return await self._source.request_daily_bars(instrument_id, start, end)
+                return await self._source.request_daily_bars(spec, start, end)
             except (ConnectionError, TimeoutError, RuntimeError) as exc:
                 if attempt + 1 >= config.max_attempts:
                     raise
                 delay = config.retry_backoff_seconds[attempt]
                 LOGGER.warning(
                     "Historical request failed for %s; retrying in %.1fs: %s",
-                    instrument_id,
+                    spec.instrument_id,
                     delay,
                     exc,
                 )
@@ -154,7 +156,7 @@ class HistoricalDataPipeline:
         start: datetime,
         end: datetime,
     ) -> PipelineSummary:
-        """同步标的定义与日线; 校验后幂等追加到 Catalog。"""
+        """同步标的定义与日线; 校验后按配置追加或替换 Catalog。"""
         if self._source is None:
             raise RuntimeError("Historical data source is required for sync")
 
@@ -167,8 +169,7 @@ class HistoricalDataPipeline:
 
         await self._source.connect()
         try:
-            requested_ids = [InstrumentId.from_str(spec.instrument_id) for spec in instruments]
-            loaded = await self._source.request_instruments(requested_ids)
+            loaded = await self._source.request_instruments(instruments)
             self._catalog.write_instruments(loaded)
             loaded_ids = {instrument.id.value for instrument in loaded}
 
@@ -180,7 +181,7 @@ class HistoricalDataPipeline:
                             severity="error",
                             instrument_id=spec.instrument_id,
                             timestamp_ns=None,
-                            message="IBKR did not resolve the configured instrument.",
+                            message="The data source did not resolve the configured instrument.",
                         ),
                     )
                     continue
@@ -196,7 +197,11 @@ class HistoricalDataPipeline:
                 has_start_coverage = (
                     earliest_ns is not None and earliest_ns <= start_coverage_limit_ns
                 )
-                if latest_ns is not None and has_start_coverage:
+                if (
+                    self._config.historical_data.refresh_mode == "append"
+                    and latest_ns is not None
+                    and has_start_coverage
+                ):
                     latest = datetime.fromtimestamp(latest_ns / 1_000_000_000, tz=UTC)
                     overlap_start = latest - timedelta(
                         days=self._config.historical_data.overlap_days,
@@ -209,7 +214,7 @@ class HistoricalDataPipeline:
                     for index, (window_start, window_end) in enumerate(windows):
                         fetched.extend(
                             await self._request_with_retry(
-                                InstrumentId.from_str(spec.instrument_id),
+                                spec,
                                 window_start,
                                 window_end,
                             ),
@@ -237,6 +242,24 @@ class HistoricalDataPipeline:
                 ]
                 bars_fetched += len(fetched)
 
+                coverage_limit_ns = int(
+                    (start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp() * 1_000_000_000,
+                )
+                must_verify_start = (
+                    self._config.historical_data.refresh_mode == "replace" or not has_start_coverage
+                )
+                if must_verify_start and fetched and fetched[0].ts_event > coverage_limit_ns:
+                    issues.append(
+                        QualityIssue(
+                            code="start_coverage_missing",
+                            severity="error",
+                            instrument_id=spec.instrument_id,
+                            timestamp_ns=fetched[0].ts_init,
+                            message="Provider history does not cover the configured start date.",
+                        ),
+                    )
+                    continue
+
                 existing = self._catalog.read_bars(
                     bar_type,
                     start_ns=int(fetch_start.replace(tzinfo=UTC).timestamp() * 1_000_000_000),
@@ -252,7 +275,10 @@ class HistoricalDataPipeline:
                 reports.append(report)
                 if report.has_errors:
                     continue
-                bars_written += self._catalog.append_new_bars(fetched)
+                if self._config.historical_data.refresh_mode == "replace":
+                    bars_written += self._catalog.replace_bars(fetched)
+                else:
+                    bars_written += self._catalog.append_new_bars(fetched)
         finally:
             await self._source.close()
 
@@ -273,7 +299,7 @@ class HistoricalDataPipeline:
         )
 
     def validate_catalog(self, instruments: Sequence[InstrumentSpec]) -> PipelineSummary:
-        """不连接 IBKR; 检查 Catalog 当前全部日线。"""
+        """不连接外部数据源; 检查 Catalog 当前全部日线。"""
         reports: list[DataQualityReport] = []
         now_ns = self._clock_ns()
         for spec in instruments:

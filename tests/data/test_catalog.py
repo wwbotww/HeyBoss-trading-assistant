@@ -58,3 +58,16 @@ def test_catalog_removes_non_serializable_ibkr_info(tmp_path: Path) -> None:
     stored = repository.catalog.instruments(instrument_ids=["SPY.ARCA"])[0]
     assert stored.id == instrument.id
     assert stored.info is None
+
+
+def test_catalog_replaces_complete_bar_series(tmp_path: Path) -> None:
+    """调整价修订时应替换完整 BarType; 完全相同则不重复写入。"""
+    repository = CatalogRepository(tmp_path / "catalog")
+    first = make_bar(date(2026, 7, 13), close=101)
+    second = make_bar(date(2026, 7, 14), close=102)
+    revised = make_bar(date(2026, 7, 13), close=100)
+
+    assert repository.replace_bars([first, second]) == 2
+    assert repository.replace_bars([first, second]) == 0
+    assert repository.replace_bars([revised, second]) == 2
+    assert repository.read_bars(first.bar_type) == [revised, second]

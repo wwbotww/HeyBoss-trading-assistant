@@ -14,8 +14,9 @@
   - [x] 使用真实 paper 凭据打印账户摘要
 - [x] M1 — 数据管道
   - [x] NT 原生 Instrument / Bar / BarType 与 ParquetDataCatalog
-  - [x] IBKR 五年日线串行分批、重试、增量与重叠修订检测
-  - [x] 数据质量报告、幂等重跑与离线校验
+  - [x] EODHD 供应商适配、总回报调整 OHLC 与完整序列替换
+  - [x] IBKR 历史适配器保留为可切换实现
+  - [x] EODHD 免费 token 单标的与全池真实验收
 - [x] M2 — 回测闭环
   - [x] 双动量纯函数与 NT `DualMomentumActor`
   - [x] `TradeSignalEvent` → 风控 → auto 审批 → `ExecutionGatewayStrategy`
@@ -32,9 +33,11 @@
 
 M0 已于 2026-07-16 通过真实 paper 账户验收：NautilusTrader 成功连接本地 Gateway 并打印账户摘要。
 
-M1 已于 2026-07-16 通过真实 IBKR 历史数据验收：10 个 ETF 的五年日线共写入 12,540 根，每个标的 1,254 根；重复同步新增 0 根，离线 Catalog 校验 0 错误。质量警告均为美股休市日候选，需结合交易所日历人工复核。
+原 IBKR 版 M1 已于 2026-07-16 通过五年历史数据验收：10 个 ETF 共写入 12,540 根日线。该 Catalog 作为旧基线保留，不与 EODHD Catalog 混写。EODHD 修订版于 2026-07-27 使用免费 token 完成真实验收：10 个 ETF 各 250 根、合计 2,500 根总回报调整日线，范围为 2025-07-28 至 2026-07-24；全量离线质量检查为 0 错误，100 个警告均对应已核实的美股休市日。
 
 M2 已于 2026-07-17 通过真实 Catalog 验收：统一 NT 链路产生 109 笔成交，所有成交均晚于对应信号，精确佣金合计 6.61 USD，回放期间最低现金为 2,455.74 USD。该次研究结果为年化收益 6.37%、最大回撤 -8.61%、Sharpe 0.74；结果只用于验证实现，不构成收益预期或投资建议。
+
+EODHD 免费版 Catalog 于 2026-07-27 完成两次可复现的回测全链路验收：两次均产生 16 笔成交、佣金 0.79 USD、期末权益 10,138.82 USD，且所有成交严格晚于对应信号、最低现金 2,893.35 USD。因免费历史只有一年、其中前六个月用于动量预热，该结果仅验证数据与执行线路，不具备策略统计意义。
 
 M3 已于 2026-07-20 完成 Telegram + IBKR paper 端到端验收：人工确认、二次风控、NT RiskEngine/ExecutionEngine、IBKR 提交与订单终态通知链路均已贯通。测试订单因当前账户的产品资格限制被 IBKR code 201 拒绝，拒单已被完整审计和通知；这不影响执行链路验收，真实标的池资格另行处理。
 
@@ -71,18 +74,18 @@ NT 原生 Bar → DualMomentumActor → signals 纯函数
 数据侧只有一条标准路径：
 
 ```text
-IBKR 历史接口（TRADES、RTH）
+EODHD EOD JSON / IBKR 历史接口
+          ↓ 供应商适配层
+NT 原生 Equity + Bar（1-DAY-LAST-EXTERNAL）
           ↓
-NT 原生 Instrument + Bar（1-DAY-LAST-EXTERNAL）
-          ↓
-质量检查 + 10 天重叠修订检测
+起始覆盖、OHLC、缺口与修订检查
           ↓
 NT ParquetDataCatalog
           ├── M2 BacktestNode 读取
           └── M3 实盘收盘信号计算前同步并读取
 ```
 
-M1 不定义 `CustomData`、自定义 Bar 或第二套历史数据结构，也不维护 manifest、版本号或内容哈希。回测与后续实盘信号都必须从同一 Catalog 读取相同 `BarType`；实时行情以后只用于执行时的账户、报价与订单状态。当前价格口径用于拆股调整后的价格动量，不是含股息再投资的总回报序列。
+M1 不定义 `CustomData`、自定义 Bar 或第二套历史数据结构，也不维护 manifest、版本号或内容哈希。EODHD 的原始 OHLC 在适配层按 `adjusted_close / close` 同比例调整，生成包含拆股和分红影响的总回报调整 OHLC；转换后只保存 NT 原生对象。回测与后续实盘信号都从同一个 EODHD Catalog 读取相同 `BarType`，而旧 IBKR Catalog 单独保留。
 
 M2 与 M3 复用同一个 `DualMomentumActor`、`TradeSignalEvent`、`ExecutionGatewayStrategy`、仓位计算和应用风控。M2 的差异只有 `BacktestNode`、auto 审批和 `BacktestExchange`；M3 将换成 `TradingNode`、manual/auto 审批与 IBKR 执行客户端。
 
@@ -190,13 +193,20 @@ docker compose down
 
 ## M1 数据同步与验证
 
-先确保 Gateway 已登录 paper 账户，再运行默认全量同步。脚本按 `config/instruments.yaml` 处理 10 个 ETF，默认回溯 `config/data.yaml` 配置的五年区间：
+先在本地 `.env` 填入 EODHD token，并把 Catalog 指向独立目录。不要把 token 发到日志、聊天或提交到 Git：
+
+```dotenv
+EODHD_API_TOKEN=你的_token
+CATALOG_PATH=./catalog/eodhd
+```
+
+默认配置针对免费版：处理 `config/instruments.yaml` 中的 10 个 ETF，并请求最近一年历史。此步骤不需要启动 IB Gateway：
 
 ```bash
 uv run --frozen --env-file .env python scripts/fetch_data.py
 ```
 
-首次运行会把 NT 原生 `Instrument` 与 `Bar` 写入 `CATALOG_PATH`（默认 `./catalog/`）。后续运行先检查最早时间戳是否覆盖目标起点：若只存在近期冒烟数据则自动回填早期历史，否则只请求最后 10 天重叠区间并追加更新的时间戳。若 IBKR 修订已保存的历史 Bar，只在质量报告中告警，不自动覆盖。
+首次运行会把 NT 原生 `Equity` 与 `Bar` 写入 `CATALOG_PATH`。EODHD 每个标的一次请求覆盖完整许可历史；只有起始覆盖和数据质量检查通过后，才替换该标的完整规范序列。这是因为分红或拆股会正常修订既往调整价。免费版每天 20 次调用，当前全池同步一次约消耗 10 次，不要在同一天反复启动完整同步。
 
 可以先对单一标的和较短区间做冒烟测试：
 
@@ -207,13 +217,13 @@ uv run --frozen --env-file .env python scripts/fetch_data.py \
   --end 2026-07-16
 ```
 
-完全不连接 IBKR、只检查本地 Catalog：
+完全不连接外部数据源、只检查本地 Catalog：
 
 ```bash
 uv run --frozen --env-file .env python scripts/fetch_data.py --validate-only
 ```
 
-成功摘要必须满足 `errors=0`。`quality_report` 指向本次 JSON 报告；`missing_business_day_candidate` 是候选休市日警告，不会阻止写入。首次同步后立即重复执行相同命令，`bars_written=0` 即通过幂等性验收。Catalog 和质量报告均为本地运行产物，已被 Git 忽略。
+成功摘要必须满足 `errors=0`。`quality_report` 指向本次 JSON 报告；`missing_business_day_candidate` 是候选休市日警告，不会阻止写入。供应商数据未修订时重复相同命令应得到 `bars_written=0`。免费版只有一年历史，六个月动量预热后可评估的回测区间约剩半年；升级后把 `history_years` 改为 `5` 即可，无需修改代码。
 
 ## M2 回测运行与验证
 
@@ -231,7 +241,7 @@ uv run --frozen --env-file .env python scripts/run_backtest.py
 
 SQLite 的 `backtest_runs`、`signals`、`approvals`、`order_events` 与 `fills` 表保存完整审计链路。默认数据库由 `DATABASE_URL` 指定，报告根目录由 `config/backtest.yaml` 指定，两者都已被 Git 忽略。
 
-IBKR 历史日线的 `ts_event` 位于交易日起点，而完整 OHLC 在 `ts_init` 才可用。回测通过 NT 原生 `LatencyModel` 延迟订单激活，验收测试会断言成交时间严格晚于信号时间，防止用同一日开盘价产生前视偏差。
+规范历史日线的 `ts_event` 位于交易日起点，而完整 OHLC 在当日结束的 `ts_init` 才可用。回测通过 NT 原生 `LatencyModel` 延迟订单激活，验收测试会断言成交时间严格晚于信号时间，防止用同一日开盘价产生前视偏差。
 
 Catalog 中既有 ARCA 也有 NASDAQ instrument ID，而 NT BacktestExchange 按 venue 建立模拟现金账户。每个模拟 venue 提供相同的执行流动性，执行 Strategy 会扣除重复初始余额，报告也只从 10,000 USD 单一组合现金重放。当前 80% 总仓位和 25% 单标的上限保证任一 venue 不会实际使用超过单账户资金；扩大标的或修改风控上限时必须重新验证这一假设。
 
@@ -264,7 +274,7 @@ docker compose logs -f trading-node approval-bot
 
 验收时应观察到以下顺序：
 
-1. live node 完成 M1 增量同步和 IBKR paper 对账；
+1. live node 完成 M1 EODHD 同步和 IBKR paper 对账；
 2. Telegram 收到最新完整月份的计划订单、信号依据、首次风控结果和四小时到期时间；
 3. 未点击时 paper 账户没有新订单；点击否决后状态为 `DENIED` 且没有订单；
 4. 点击确认后 Gateway 将状态原子改为 `PROCESSING`，重新读取账户级持仓并二次风控；
@@ -272,7 +282,7 @@ docker compose logs -f trading-node approval-bot
 
 正常工作流为 `NEW → PENDING → APPROVED → PROCESSING → ORDERS_SUBMITTED`；auto 模式为 `NEW → PROCESSING → ORDERS_SUBMITTED`。如果进程在订单提交边界崩溃，工作流会保留在 `PROCESSING` 并失败关闭，不会自动重试。此时必须先在 IBKR paper 和 SQLite 审计记录中核对是否已有订单，再人工处理。M3 没有常驻月末调度器；需要同步新月末数据和形成下一期信号时重启 `trading-node`。
 
-`trading-node` 明确禁用 Compose 自动重启：启动同步、数据质量检查或订单提交边界出现异常时，容器会保持停止，避免重复请求 IBKR 历史数据或自动重放订单。排查并核对审计记录后，必须由操作者显式重新启动。
+`trading-node` 明确禁用 Compose 自动重启：启动同步、数据质量检查或订单提交边界出现异常时，容器会保持停止，避免重复消耗 EODHD 配额或自动重放订单。排查并核对审计记录后，必须由操作者显式重新启动。
 
 `risk.yaml` 的 `strategy_capital_usd` 是回测与实盘共用的仓位资金基数上限。执行网关使用“账户实际权益与该上限中的较小值”计算目标股数，因此 IBKR paper 默认的大额虚拟净值不会放大计划仓位；单笔、单标的、每日新开仓和总仓位四项限制仍照常执行。
 

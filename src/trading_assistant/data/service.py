@@ -7,8 +7,10 @@ from pathlib import Path
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec, load_data_config, load_instruments
+from trading_assistant.data.eodhd import EodhdHistoricalBarSource
 from trading_assistant.data.ibkr import IbkrHistoricalBarSource
 from trading_assistant.data.pipeline import HistoricalDataPipeline, PipelineSummary
+from trading_assistant.data.source import HistoricalBarSource
 
 
 def select_instruments(
@@ -38,6 +40,7 @@ async def sync_historical_data(
     ib_host: str = "127.0.0.1",
     ib_port: int = 4002,
     ib_client_id: int = 1201,
+    eodhd_api_token: str | None = None,
     log_level: str = "INFO",
 ) -> PipelineSummary:
     """组装并运行唯一的 M1 同步或离线校验管道。"""
@@ -61,14 +64,21 @@ async def sync_historical_data(
     )
     if resolved_start >= resolved_end:
         raise ValueError("start date must be earlier than end date")
-    source = IbkrHistoricalBarSource(
-        host=ib_host,
-        port=ib_port,
-        client_id=ib_client_id,
-        use_regular_trading_hours=data_config.historical_data.use_regular_trading_hours,
-        request_timeout_seconds=data_config.historical_data.request_timeout_seconds,
-        log_level=log_level,
-    )
+    source: HistoricalBarSource
+    if data_config.historical_data.provider == "eodhd":
+        source = EodhdHistoricalBarSource(
+            api_token=eodhd_api_token or "",
+            request_timeout_seconds=data_config.historical_data.request_timeout_seconds,
+        )
+    else:
+        source = IbkrHistoricalBarSource(
+            host=ib_host,
+            port=ib_port,
+            client_id=ib_client_id,
+            use_regular_trading_hours=data_config.historical_data.use_regular_trading_hours,
+            request_timeout_seconds=data_config.historical_data.request_timeout_seconds,
+            log_level=log_level,
+        )
     pipeline = HistoricalDataPipeline(
         config=data_config,
         catalog=catalog,

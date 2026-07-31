@@ -14,6 +14,7 @@ from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
 from tests.data.helpers import make_bar
 from trading_assistant.data import ibkr as ibkr_module
+from trading_assistant.data.config import InstrumentSpec
 from trading_assistant.data.ibkr import IbkrHistoricalBarSource
 
 
@@ -91,11 +92,16 @@ def _source() -> IbkrHistoricalBarSource:
     )
 
 
+def _spec() -> InstrumentSpec:
+    """返回包含供应商代码的测试标的。"""
+    return InstrumentSpec("SPY", "SPY.ARCA", "SPY.US", "SMART", "ARCA", "USD", 2, "0.01", 1)
+
+
 def test_adapter_requires_connection() -> None:
     """连接前不得发起合约或日线请求。"""
     source = _source()
     with pytest.raises(RuntimeError, match="not connected"):
-        asyncio.run(source.request_instruments([InstrumentId.from_str("SPY.ARCA")]))
+        asyncio.run(source.request_instruments([_spec()]))
 
 
 def test_adapter_uses_native_historic_client_and_cleans_up(
@@ -119,10 +125,10 @@ def test_adapter_uses_native_historic_client_and_cleans_up(
     assert client.kwargs["client_id"] == 1201
 
     instrument_id = InstrumentId.from_str("SPY.ARCA")
-    instruments = asyncio.run(source.request_instruments([instrument_id]))
+    instruments = asyncio.run(source.request_instruments([_spec()]))
     bars = asyncio.run(
         source.request_daily_bars(
-            instrument_id,
+            _spec(),
             datetime(2026, 7, 1),
             datetime(2026, 7, 15),
         ),

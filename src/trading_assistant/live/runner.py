@@ -59,7 +59,9 @@ def build_trading_node_config(
         for instrument_id in instrument_ids
     )
     database_url = environ.get("DATABASE_URL", "sqlite:///./data/trading_assistant.db")
-    catalog_path = Path(environ.get("CATALOG_PATH", str(project_root / "catalog"))).resolve()
+    catalog_path = Path(
+        environ.get("CATALOG_PATH", str(project_root / "catalog" / "eodhd")),
+    ).resolve()
     account_id = f"IB-{tws_account}"
     signal_actor = ImportableActorConfig(
         actor_path="trading_assistant.strategies.dual_momentum:DualMomentumActor",
