@@ -36,6 +36,8 @@ class DualMomentumActorConfig(ActorConfig, frozen=True):
     bootstrap_from_catalog: bool = False
     catalog_lookback_days: int = 2_200
     catalog_client_id: str = "CATALOG"
+    bootstrap_bar_types: tuple[str, ...] = ()
+    publish_after_ns: int = 0
 
 
 class DualMomentumActor(Actor):  # type: ignore[misc]
@@ -45,6 +47,7 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         super().__init__(config)
         self._settings = config
         self._expected_instruments = frozenset(config.instrument_ids)
+        self._signal_bar_types = frozenset(config.bar_types)
         self._pending_sessions: dict[int, dict[str, float]] = {}
         self._monthly_closes: dict[str, dict[str, float]] = {}
         self._active_month: str | None = None
@@ -71,6 +74,8 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
             self._ingest_bar(data, publish_transitions=False)
 
     def _ingest_bar(self, bar: Bar, *, publish_transitions: bool) -> None:
+        if str(bar.bar_type) not in self._signal_bar_types:
+            return
         instrument_id = str(bar.bar_type.instrument_id)
         if instrument_id not in self._expected_instruments:
             return
@@ -98,6 +103,7 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
             publish_transitions
             and self._active_month is not None
             and session_month != self._active_month
+            and timestamp_ns >= self._settings.publish_after_ns
         ):
             self._publish_signal(timestamp_ns, self._active_month)
         self._active_month = session_month
@@ -141,9 +147,12 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         """通过 NT DataEngine 向 Catalog 请求策略启动所需历史 Bar。"""
         end = datetime.fromtimestamp(self.clock.timestamp_ns() / 1_000_000_000, tz=UTC)
         start = end - timedelta(days=self._settings.catalog_lookback_days)
-        self._catalog_requests = set(self._settings.bar_types)
+        requested_bar_types = tuple(
+            dict.fromkeys((*self._settings.bar_types, *self._settings.bootstrap_bar_types))
+        )
+        self._catalog_requests = set(requested_bar_types)
         client_id = ClientId(self._settings.catalog_client_id)
-        for value in self._settings.bar_types:
+        for value in requested_bar_types:
             self.request_bars(
                 BarType.from_str(value),
                 start=start,

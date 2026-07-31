@@ -3,9 +3,12 @@ historical_data:
   provider: eodhd
   price_basis: total_return_adjusted
   refresh_mode: replace
-  # 免费版最多返回一年；升级后只需把这里改为 5。
-  history_years: 1
-  bar_type_suffix: 1-DAY-LAST-EXTERNAL
+  # 默认按付费历史路线请求 20 年；供应商实际返回范围仍受当前套餐约束。
+  history_years: 20
+  # INTERNAL 总回报调整价只参与信号；NT matching engine 会忽略 INTERNAL Bar。
+  signal_bar_type_suffix: 1-DAY-LAST-INTERNAL
+  # EXTERNAL 拆股调整价是唯一允许进入撮合和执行参考的日线。
+  execution_bar_type_suffix: 1-DAY-LAST-EXTERNAL
   use_regular_trading_hours: true
   # EODHD 单次请求可覆盖整个许可历史，无需按年分块。
   request_window_days: null
@@ -15,6 +18,7 @@ historical_data:
   live_sync_delay_minutes: 30
   overlap_days: 10
   request_timeout_seconds: 120
+  max_concurrent_requests: 8
 
 quality:
   max_absolute_daily_return: 0.25

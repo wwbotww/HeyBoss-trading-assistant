@@ -14,13 +14,14 @@ from nautilus_trader.model.data import Bar, BarType
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import DataPipelineConfig, InstrumentSpec
+from trading_assistant.data.corporate_actions import CorporateActionRepository, CorporateActions
 from trading_assistant.data.quality import (
     DataQualityReport,
     QualityIssue,
     detect_historical_revisions,
     validate_daily_bars,
 )
-from trading_assistant.data.source import HistoricalBarSource
+from trading_assistant.data.source import HistoricalBarSource, HistoricalDataAuthenticationError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class PipelineSummary:
     instruments_processed: int
     bars_fetched: int
     bars_written: int
+    corporate_actions_written: int
     instrument_reports: tuple[DataQualityReport, ...]
     issues: tuple[QualityIssue, ...]
     report_path: Path
@@ -42,6 +44,26 @@ class PipelineSummary:
         return any(issue.severity == "error" for issue in self.issues) or any(
             report.has_errors for report in self.instrument_reports
         )
+
+
+@dataclass(frozen=True)
+class _FetchContext:
+    """单个标的同步前计算出的本地状态。"""
+
+    spec: InstrumentSpec
+    bar_types: tuple[BarType, ...]
+    fetch_start: datetime
+    has_start_coverage: bool
+
+
+@dataclass(frozen=True)
+class _FetchResult:
+    """单个标的的远端获取结果。"""
+
+    context: _FetchContext
+    bars: tuple[Bar, ...]
+    actions: CorporateActions | None
+    error: Exception | None
 
 
 def _utc_now_ns() -> int:
@@ -65,6 +87,7 @@ class HistoricalDataPipeline:
         catalog: CatalogRepository,
         report_directory: Path,
         source: HistoricalBarSource | None = None,
+        corporate_actions: CorporateActionRepository | None = None,
         clock_ns: Callable[[], int] = _utc_now_ns,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -72,13 +95,23 @@ class HistoricalDataPipeline:
         self._catalog = catalog
         self._report_directory = report_directory
         self._source = source
+        self._corporate_actions = corporate_actions
         self._clock_ns = clock_ns
         self._sleep = sleep
 
     def _bar_type(self, instrument_id: str) -> BarType:
-        """从唯一配置构建标准 NT BarType。"""
-        suffix = self._config.historical_data.bar_type_suffix
+        """返回兼容调用方使用的 execution BarType。"""
+        suffix = self._config.historical_data.execution_bar_type_suffix
         return BarType.from_str(f"{instrument_id}-{suffix}")
+
+    def _bar_types(self, instrument_id: str) -> tuple[BarType, ...]:
+        """返回一个标的需要完整同步的全部规范 BarType。"""
+        config = self._config.historical_data
+        values = (
+            BarType.from_str(f"{instrument_id}-{config.execution_bar_type_suffix}"),
+            BarType.from_str(f"{instrument_id}-{config.signal_bar_type_suffix}"),
+        )
+        return tuple(dict.fromkeys(values))
 
     def _write_report(
         self,
@@ -88,6 +121,7 @@ class HistoricalDataPipeline:
         issues: Sequence[QualityIssue],
         bars_fetched: int,
         bars_written: int,
+        corporate_actions_written: int,
     ) -> Path:
         """写入当前运行的质量报告; 该文件不是数据版本 manifest。"""
         self._report_directory.mkdir(parents=True, exist_ok=True)
@@ -98,6 +132,7 @@ class HistoricalDataPipeline:
             "generated_at_utc": now.isoformat(),
             "bars_fetched": bars_fetched,
             "bars_written": bars_written,
+            "corporate_actions_written": corporate_actions_written,
             "issues": [issue.to_dict() for issue in issues],
             "instruments": [report.to_dict() for report in reports],
         }
@@ -149,6 +184,66 @@ class HistoricalDataPipeline:
                 await self._sleep(delay)
         raise AssertionError("unreachable")
 
+    async def _request_actions_with_retry(
+        self,
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> CorporateActions:
+        """请求公司行动并按相同瞬时故障策略退避重试。"""
+        if self._source is None:
+            raise RuntimeError("Historical data source is required for sync")
+        config = self._config.historical_data
+        for attempt in range(config.max_attempts):
+            try:
+                return await self._source.request_corporate_actions(spec, start, end)
+            except (ConnectionError, TimeoutError, RuntimeError) as exc:
+                if attempt + 1 >= config.max_attempts:
+                    raise
+                delay = config.retry_backoff_seconds[attempt]
+                LOGGER.warning(
+                    "Corporate action request failed for %s; retrying in %.1fs: %s",
+                    spec.instrument_id,
+                    delay,
+                    exc,
+                )
+                await self._sleep(delay)
+        raise AssertionError("unreachable")
+
+    async def _fetch(
+        self,
+        context: _FetchContext,
+        end: datetime,
+        semaphore: asyncio.Semaphore,
+    ) -> _FetchResult:
+        """并发获取单个标的; Catalog 校验和写入仍由主协程串行执行。"""
+        async with semaphore:
+            fetched: list[Bar] = []
+            try:
+                actions = await self._request_actions_with_retry(
+                    context.spec,
+                    context.fetch_start,
+                    end,
+                )
+                windows = self._windows(context.fetch_start, end)
+                for index, (window_start, window_end) in enumerate(windows):
+                    fetched.extend(
+                        await self._request_with_retry(
+                            context.spec,
+                            window_start,
+                            window_end,
+                        ),
+                    )
+                    if index + 1 < len(windows):
+                        await self._sleep(
+                            self._config.historical_data.request_interval_seconds,
+                        )
+            except HistoricalDataAuthenticationError:
+                raise
+            except (ConnectionError, TimeoutError, RuntimeError, ValueError) as exc:
+                return _FetchResult(context, (), None, exc)
+            return _FetchResult(context, tuple(fetched), actions, None)
+
     async def sync(
         self,
         instruments: Sequence[InstrumentSpec],
@@ -164,6 +259,7 @@ class HistoricalDataPipeline:
         issues: list[QualityIssue] = []
         bars_fetched = 0
         bars_written = 0
+        corporate_actions_written = 0
         processed = 0
         now_ns = self._clock_ns()
 
@@ -173,6 +269,7 @@ class HistoricalDataPipeline:
             self._catalog.write_instruments(loaded)
             loaded_ids = {instrument.id.value for instrument in loaded}
 
+            contexts: list[_FetchContext] = []
             for spec in instruments:
                 if spec.instrument_id not in loaded_ids:
                     issues.append(
@@ -187,9 +284,10 @@ class HistoricalDataPipeline:
                     continue
 
                 processed += 1
-                bar_type = self._bar_type(spec.instrument_id)
-                earliest_ns = self._catalog.earliest_bar_timestamp(bar_type)
-                latest_ns = self._catalog.latest_bar_timestamp(bar_type)
+                bar_types = self._bar_types(spec.instrument_id)
+                execution_bar_type = self._bar_type(spec.instrument_id)
+                earliest_ns = self._catalog.earliest_bar_timestamp(execution_bar_type)
+                latest_ns = self._catalog.latest_bar_timestamp(execution_bar_type)
                 fetch_start = start
                 start_coverage_limit_ns = int(
                     (start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp() * 1_000_000_000,
@@ -208,37 +306,43 @@ class HistoricalDataPipeline:
                     )
                     fetch_start = max(start, overlap_start.replace(tzinfo=None))
 
-                fetched: list[Bar] = []
-                try:
-                    windows = self._windows(fetch_start, end)
-                    for index, (window_start, window_end) in enumerate(windows):
-                        fetched.extend(
-                            await self._request_with_retry(
-                                spec,
-                                window_start,
-                                window_end,
-                            ),
-                        )
-                        if index + 1 < len(windows):
-                            await self._sleep(
-                                self._config.historical_data.request_interval_seconds,
-                            )
-                except (ConnectionError, TimeoutError, RuntimeError) as exc:
+                contexts.append(
+                    _FetchContext(
+                        spec=spec,
+                        bar_types=bar_types,
+                        fetch_start=fetch_start,
+                        has_start_coverage=has_start_coverage,
+                    )
+                )
+
+            semaphore = asyncio.Semaphore(self._config.historical_data.max_concurrent_requests)
+            results = await asyncio.gather(
+                *(self._fetch(context, end, semaphore) for context in contexts)
+            )
+            for result in results:
+                context = result.context
+                spec = context.spec
+                if result.error is not None:
                     issues.append(
                         QualityIssue(
                             code="fetch_failed",
                             severity="error",
                             instrument_id=spec.instrument_id,
                             timestamp_ns=None,
-                            message=f"Historical data request failed: {exc}",
+                            message=f"Historical data request failed: {result.error}",
                         ),
                     )
                     continue
 
+                if result.actions is None:
+                    raise AssertionError("successful fetch must include corporate actions")
+                actions = result.actions
+                bar_types = context.bar_types
+                fetched = list(result.bars)
                 fetched = [
                     bar
                     for bar in _deduplicate_bars(fetched)
-                    if bar.bar_type == bar_type and bar.ts_init <= now_ns
+                    if bar.bar_type in bar_types and bar.ts_init <= now_ns
                 ]
                 bars_fetched += len(fetched)
 
@@ -246,39 +350,68 @@ class HistoricalDataPipeline:
                     (start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp() * 1_000_000_000,
                 )
                 must_verify_start = (
-                    self._config.historical_data.refresh_mode == "replace" or not has_start_coverage
+                    self._config.historical_data.refresh_mode == "replace"
+                    or not context.has_start_coverage
                 )
-                if must_verify_start and fetched and fetched[0].ts_event > coverage_limit_ns:
+                first_by_type = {
+                    bar_type: next(
+                        (bar for bar in fetched if bar.bar_type == bar_type),
+                        None,
+                    )
+                    for bar_type in bar_types
+                }
+                if must_verify_start and any(
+                    first is None or first.ts_event > coverage_limit_ns
+                    for first in first_by_type.values()
+                ):
                     issues.append(
                         QualityIssue(
                             code="start_coverage_missing",
                             severity="error",
                             instrument_id=spec.instrument_id,
-                            timestamp_ns=fetched[0].ts_init,
+                            timestamp_ns=min(
+                                (
+                                    first.ts_init
+                                    for first in first_by_type.values()
+                                    if first is not None
+                                ),
+                                default=None,
+                            ),
                             message="Provider history does not cover the configured start date.",
                         ),
                     )
                     continue
 
-                existing = self._catalog.read_bars(
-                    bar_type,
-                    start_ns=int(fetch_start.replace(tzinfo=UTC).timestamp() * 1_000_000_000),
-                )
-                issues.extend(detect_historical_revisions(spec.instrument_id, existing, fetched))
-                report = validate_daily_bars(
-                    spec.instrument_id,
-                    fetched,
-                    bar_type,
-                    self._config.quality,
-                    as_of_ns=now_ns,
-                )
-                reports.append(report)
-                if report.has_errors:
+                start_ns = int(context.fetch_start.replace(tzinfo=UTC).timestamp() * 1_000_000_000)
+                instrument_reports: list[DataQualityReport] = []
+                for bar_type in bar_types:
+                    typed_bars = [bar for bar in fetched if bar.bar_type == bar_type]
+                    existing = self._catalog.read_bars(bar_type, start_ns=start_ns)
+                    issues.extend(
+                        detect_historical_revisions(
+                            spec.instrument_id,
+                            existing,
+                            typed_bars,
+                        )
+                    )
+                    instrument_reports.append(
+                        validate_daily_bars(
+                            spec.instrument_id,
+                            typed_bars,
+                            bar_type,
+                            self._config.quality,
+                            as_of_ns=now_ns,
+                        )
+                    )
+                reports.extend(instrument_reports)
+                if any(report.has_errors for report in instrument_reports):
                     continue
                 if self._config.historical_data.refresh_mode == "replace":
                     bars_written += self._catalog.replace_bars(fetched)
                 else:
                     bars_written += self._catalog.append_new_bars(fetched)
+                if self._corporate_actions is not None:
+                    corporate_actions_written += int(self._corporate_actions.write(actions))
         finally:
             await self._source.close()
 
@@ -288,11 +421,13 @@ class HistoricalDataPipeline:
             issues=issues,
             bars_fetched=bars_fetched,
             bars_written=bars_written,
+            corporate_actions_written=corporate_actions_written,
         )
         return PipelineSummary(
             instruments_processed=processed,
             bars_fetched=bars_fetched,
             bars_written=bars_written,
+            corporate_actions_written=corporate_actions_written,
             instrument_reports=tuple(reports),
             issues=tuple(issues),
             report_path=report_path,
@@ -303,17 +438,17 @@ class HistoricalDataPipeline:
         reports: list[DataQualityReport] = []
         now_ns = self._clock_ns()
         for spec in instruments:
-            bar_type = self._bar_type(spec.instrument_id)
-            bars = self._catalog.read_bars(bar_type)
-            reports.append(
-                validate_daily_bars(
-                    spec.instrument_id,
-                    bars,
-                    bar_type,
-                    self._config.quality,
-                    as_of_ns=now_ns,
-                ),
-            )
+            for bar_type in self._bar_types(spec.instrument_id):
+                bars = self._catalog.read_bars(bar_type)
+                reports.append(
+                    validate_daily_bars(
+                        spec.instrument_id,
+                        bars,
+                        bar_type,
+                        self._config.quality,
+                        as_of_ns=now_ns,
+                    ),
+                )
 
         report_path = self._write_report(
             mode="validate-only",
@@ -321,11 +456,13 @@ class HistoricalDataPipeline:
             issues=(),
             bars_fetched=0,
             bars_written=0,
+            corporate_actions_written=0,
         )
         return PipelineSummary(
             instruments_processed=len(instruments),
             bars_fetched=0,
             bars_written=0,
+            corporate_actions_written=0,
             instrument_reports=tuple(reports),
             issues=(),
             report_path=report_path,

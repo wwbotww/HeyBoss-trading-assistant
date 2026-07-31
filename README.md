@@ -15,12 +15,14 @@
 - [x] M1 — 数据管道
   - [x] NT 原生 Instrument / Bar / BarType 与 ParquetDataCatalog
   - [x] EODHD 供应商适配、总回报调整 OHLC 与完整序列替换
+  - [x] signal/execution 双 BarType、公司行动 sidecar 与受限并发同步
   - [x] IBKR 历史适配器保留为可切换实现
   - [x] EODHD 免费 token 单标的与全池真实验收
 - [x] M2 — 回测闭环
   - [x] 双动量纯函数与 NT `DualMomentumActor`
   - [x] `TradeSignalEvent` → 风控 → auto 审批 → `ExecutionGatewayStrategy`
   - [x] BacktestNode、精确每股佣金、单 Tick 滑点、SQLite 审计与报告
+  - [x] canonical/live 路由、单一 USD 账户、预热边界与 NT 状态报告
 - [x] M3 — 信号、审批与下单
   - [x] TradingNode paper-only 装配与 M1 Catalog 启动同步
   - [x] SQLite 持久化审批状态机、幂等领取与失败关闭
@@ -44,7 +46,7 @@ M3 已于 2026-07-20 完成 Telegram + IBKR paper 端到端验收：人工确认
 ## 架构边界
 
 ```text
-NT 原生 Bar → DualMomentumActor → signals 纯函数
+NT INTERNAL 信号 Bar → DualMomentumActor → signals 纯函数
                          ↓
                  TradeSignalEvent（MessageBus）
                          ↓
@@ -76,7 +78,10 @@ NT 原生 Bar → DualMomentumActor → signals 纯函数
 ```text
 EODHD EOD JSON / IBKR 历史接口
           ↓ 供应商适配层
-NT 原生 Equity + Bar（1-DAY-LAST-EXTERNAL）
+canonical Equity（如 SPY.US）
+  + INTERNAL 总回报信号 Bar
+  + EXTERNAL 拆股调整执行 Bar
+  + corporate-action JSON sidecar
           ↓
 起始覆盖、OHLC、缺口与修订检查
           ↓
@@ -85,9 +90,9 @@ NT ParquetDataCatalog
           └── M3 实盘收盘信号计算前同步并读取
 ```
 
-M1 不定义 `CustomData`、自定义 Bar 或第二套历史数据结构，也不维护 manifest、版本号或内容哈希。EODHD 的原始 OHLC 在适配层按 `adjusted_close / close` 同比例调整，生成包含拆股和分红影响的总回报调整 OHLC；转换后只保存 NT 原生对象。回测与后续实盘信号都从同一个 EODHD Catalog 读取相同 `BarType`，而旧 IBKR Catalog 单独保留。
+M1 不定义 `CustomData`、自定义 Bar 或第二套历史行情结构，也不维护 manifest、版本号或内容哈希。信号价使用 `1-DAY-LAST-INTERNAL` 总回报调整 OHLC；撮合和订单估价使用 `1-DAY-LAST-EXTERNAL` 拆股调整 OHLC。公司行动只保存到固定 sidecar，供 NT 回测模块处理现金分红。Catalog、信号与回测使用 `SPY.US` 形式的 canonical ID；`SPY.ARCA` 等 live ID 只在 IBKR 边界使用。
 
-M2 与 M3 复用同一个 `DualMomentumActor`、`TradeSignalEvent`、`ExecutionGatewayStrategy`、仓位计算和应用风控。M2 的差异只有 `BacktestNode`、auto 审批和 `BacktestExchange`；M3 将换成 `TradingNode`、manual/auto 审批与 IBKR 执行客户端。
+M2 与 M3 复用同一个 `DualMomentumActor`、`TradeSignalEvent`、`ExecutionGatewayStrategy`、仓位计算和应用风控。M2 只创建一个 `US-001` USD 现金账户并使用 identity route；M3 使用 `IB-<账户>` 并在网关将 canonical ID 映射到 IB live ID。
 
 M3 的 `trading-node` 与 `approval-bot` 是两个独立进程，只通过 SQLite 工作流协作。Bot 没有 NT 执行客户端，也没有下单代码；确认按钮只把 `PENDING` 原子改为 `APPROVED`。Gateway 独占领取后重新读取账户级持仓、使用同一 Catalog 最新日线收盘价重算整数股订单并再次风控，之后才调用 NT `submit_order`。M3 不订阅付费实时行情；IBKR 连接用于账户、持仓、对账和订单执行。
 
@@ -200,19 +205,19 @@ EODHD_API_TOKEN=你的_token
 CATALOG_PATH=./catalog/eodhd
 ```
 
-默认配置针对免费版：处理 `config/instruments.yaml` 中的 10 个 ETF，并请求最近一年历史。此步骤不需要启动 IB Gateway：
+默认配置处理 `config/instruments.yaml` 中的显式清单，并按当前付费数据路线请求最多 20 年历史。此步骤不需要启动 IB Gateway；实际可返回范围与调用配额由 EODHD 套餐决定：
 
 ```bash
 uv run --frozen --env-file .env python scripts/fetch_data.py
 ```
 
-首次运行会把 NT 原生 `Equity` 与 `Bar` 写入 `CATALOG_PATH`。EODHD 每个标的一次请求覆盖完整许可历史；只有起始覆盖和数据质量检查通过后，才替换该标的完整规范序列。这是因为分红或拆股会正常修订既往调整价。免费版每天 20 次调用，当前全池同步一次约消耗 10 次，不要在同一天反复启动完整同步。
+首次运行会写入 canonical NT `Equity`、两套 NT `Bar`，并在 `CATALOG_PATH` 同级创建 `<catalog>-actions` sidecar。每个标的会请求 EOD、splits 与 dividends；只有 signal/execution 两套序列同时通过起始覆盖和质量检查，才串行替换 Catalog 并更新 sidecar。`max_concurrent_requests` 限制远端并发，不会并发写 Catalog。
 
 可以先对单一标的和较短区间做冒烟测试：
 
 ```bash
 uv run --frozen --env-file .env python scripts/fetch_data.py \
-  --instrument SPY.ARCA \
+  --instrument SPY.US \
   --start 2026-06-01 \
   --end 2026-07-16
 ```
@@ -223,7 +228,7 @@ uv run --frozen --env-file .env python scripts/fetch_data.py \
 uv run --frozen --env-file .env python scripts/fetch_data.py --validate-only
 ```
 
-成功摘要必须满足 `errors=0`。`quality_report` 指向本次 JSON 报告；`missing_business_day_candidate` 是候选休市日警告，不会阻止写入。供应商数据未修订时重复相同命令应得到 `bars_written=0`。免费版只有一年历史，六个月动量预热后可评估的回测区间约剩半年；升级后把 `history_years` 改为 `5` 即可，无需修改代码。
+成功摘要必须满足 `errors=0`。`quality_report` 指向本次 JSON 报告；`missing_business_day_candidate` 是候选休市日警告，不会阻止写入。供应商数据未修订时重复相同命令应得到 `bars_written=0`，公司行动未变化时 `corporate_actions_written=0`。
 
 ## M2 回测运行与验证
 
@@ -233,23 +238,36 @@ M2 不需要连接 IB Gateway；它直接读取 M1 Catalog，并强制使用 aut
 uv run --frozen --env-file .env python scripts/run_backtest.py
 ```
 
+可用 canonical ID 显式选择股票，并覆盖预热和评估窗口：
+
+```bash
+uv run --frozen --env-file .env python scripts/run_backtest.py \
+  --instrument AAPL.US \
+  --instrument MSFT.US \
+  --data-start 2005-01-01 \
+  --evaluation-start 2007-01-01 \
+  --end 2025-12-31
+```
+
 脚本最后输出一行 JSON。`report_directory` 下包含：
 
-- `summary.json`：年化收益、最大回撤、Sharpe、换手率、成交数、期末权益与现金；
+- `summary.json`：正式评估区间的年化收益、最大回撤、Sharpe、换手率、股息收入、成交数、期末权益与现金，以及 NT 原生统计；
 - `fills.csv`：NT BacktestExchange 的逐笔成交和精确佣金；
-- `returns.csv`：依据 NT 成交和 Catalog 收盘价重放的单账户每日权益、现金与收益率。
+- `returns.csv`：`DividendSimulationModule` 从 NT Account、Position 与执行 Bar 记录的权益、现金、市值和收益率；
+- `orders.csv`、`positions.csv`、`account.csv`：NT `ReportProvider` 生成的原生报告；
+- `nt-equity.json`：SimulationModule 的未加工账户权益快照。
 
-SQLite 的 `backtest_runs`、`signals`、`approvals`、`order_events` 与 `fills` 表保存完整审计链路。默认数据库由 `DATABASE_URL` 指定，报告根目录由 `config/backtest.yaml` 指定，两者都已被 Git 忽略。
+SQLite 的 `backtest_runs`、`signals`、`approvals`、`order_events` 与 `fills` 表保存完整审计链路。回测数据库由 `BACKTEST_DATABASE_URL` 指定；paper/live 进程使用独立的 `LIVE_DATABASE_URL`。报告根目录由 `config/backtest.yaml` 指定，这些运行产物都已被 Git 忽略。
 
 规范历史日线的 `ts_event` 位于交易日起点，而完整 OHLC 在当日结束的 `ts_init` 才可用。回测通过 NT 原生 `LatencyModel` 延迟订单激活，验收测试会断言成交时间严格晚于信号时间，防止用同一日开盘价产生前视偏差。
 
-Catalog 中既有 ARCA 也有 NASDAQ instrument ID，而 NT BacktestExchange 按 venue 建立模拟现金账户。每个模拟 venue 提供相同的执行流动性，执行 Strategy 会扣除重复初始余额，报告也只从 10,000 USD 单一组合现金重放。当前 80% 总仓位和 25% 单标的上限保证任一 venue 不会实际使用超过单账户资金；扩大标的或修改风控上限时必须重新验证这一假设。
+所有回测 Instrument 使用 canonical `*.US` ID，因此 BacktestNode 只创建一个 `US-001` USD CASH 账户。执行网关必须按这个明确账户读取现金和持仓，不再聚合 venue，也没有重复初始余额或现金修正。
 
 研究示例见 `notebooks/backtest_analysis.ipynb`。先运行回测，再把 notebook 第一段的 `REPORT_DIRECTORY` 改为脚本输出目录即可。
 
 ## M3 Telegram 与 IBKR paper 运行验证
 
-M3 当前只允许 paper。`scripts/run_live.py` 每次启动先通过一次性子进程调用 `fetch_data.py` 及其 M1 唯一同步服务，再由同一个 `DualMomentumActor` 通过 NT DataEngine 从 Catalog 请求 `1-DAY-LAST-EXTERNAL` Bar。进程隔离是因为 NT 历史客户端和 `TradingNode` 都会初始化进程级日志器；它不改变 Catalog、Bar 或策略链路。系统只为最新完整日历月建立一个工作流；`paper:<账户>`、策略名和月份组成稳定幂等键，重启不会重复创建或执行同月信号。
+M3 当前只允许 paper。`scripts/run_live.py` 每次启动先通过一次性子进程调用 `fetch_data.py`，再由同一个 `DualMomentumActor` 从 Catalog 请求 `INTERNAL` 信号 Bar；网关另加载 `EXTERNAL` 执行 Bar，并把 canonical ID 映射到配置的 IB live ID。进程隔离是因为 NT 历史客户端和 `TradingNode` 都会初始化进程级日志器；它不改变策略链路。系统只为最新完整日历月建立一个工作流；`paper:<账户>`、策略名和月份组成稳定幂等键，重启不会重复创建或执行同月信号。
 
 先在 `.env` 填写 Telegram BotFather 提供的 token：
 

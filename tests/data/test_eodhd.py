@@ -16,7 +16,18 @@ from trading_assistant.data.eodhd import EodhdHistoricalBarSource
 
 
 def _spec() -> InstrumentSpec:
-    return InstrumentSpec("SPY", "SPY.ARCA", "SPY.US", "SMART", "ARCA", "USD", 2, "0.01", 1)
+    return InstrumentSpec(
+        "SPY",
+        "SPY.US",
+        "SPY.US",
+        "SMART",
+        "ARCA",
+        "USD",
+        4,
+        "0.0100",
+        1,
+        "SPY.ARCA",
+    )
 
 
 def _payload() -> bytes:
@@ -35,13 +46,35 @@ def _payload() -> bytes:
     ).encode()
 
 
+def _route_payload(
+    url: str,
+    *,
+    eod: bytes,
+    splits: bytes = b"[]",
+    dividends: bytes = b"[]",
+) -> bytes:
+    """按 EODHD 端点返回测试响应。"""
+    if "/splits/" in url:
+        return splits
+    if "/div/" in url:
+        return dividends
+    return eod
+
+
 def test_adapter_builds_native_instrument_and_total_return_bars() -> None:
-    """EODHD 字段应在适配边界转换成一致的调整后 NT OHLC。"""
+    """适配器应同时生成拆股执行价与总回报信号价。"""
     requests: list[tuple[str, int]] = []
 
     def transport(url: str, timeout: int) -> bytes:
         requests.append((url, timeout))
-        return _payload()
+        return _route_payload(
+            url,
+            eod=_payload(),
+            splits=b'[{"date":"2026-07-20","split":"2/1"}]',
+            dividends=(
+                b'[{"date":"2026-07-10","value":0.5,"unadjusted_value":1.0,"currency":"USD"}]'
+            ),
+        )
 
     source = EodhdHistoricalBarSource(
         api_token="test-token",  # noqa: S106
@@ -61,19 +94,25 @@ def test_adapter_builds_native_instrument_and_total_return_bars() -> None:
         ),
     )
 
-    assert instruments[0].id.value == "SPY.ARCA"
+    assert instruments[0].id.value == "SPY.US"
     assert instruments[0].price_increment.as_double() == 0.01
-    assert str(bars[0].bar_type) == "SPY.ARCA-1-DAY-LAST-EXTERNAL"
-    assert bars[0].open.as_double() == 95
-    assert bars[0].high.as_double() == 104.5
-    assert bars[0].low.as_double() == 85.5
-    assert bars[0].close.as_double() == 95
+    assert len(bars) == 2
+    assert str(bars[0].bar_type) == "SPY.US-1-DAY-LAST-EXTERNAL"
+    assert bars[0].open.as_double() == 50
+    assert bars[0].high.as_double() == 55
+    assert bars[0].low.as_double() == 45
+    assert bars[0].close.as_double() == 50
     assert bars[0].volume.as_double() == 123456
-    assert bars[0].ts_init > bars[0].ts_event
-    assert "/eod/SPY.US?" in requests[0][0]
-    assert "api_token=test-token" in requests[0][0]
-    assert "order=a" in requests[0][0]
-    assert requests[0][1] == 30
+    assert str(bars[1].bar_type) == "SPY.US-1-DAY-LAST-INTERNAL"
+    assert bars[1].open.as_double() == 95
+    assert bars[1].high.as_double() == 104.5
+    assert bars[1].low.as_double() == 85.5
+    assert bars[1].close.as_double() == 95
+    assert bars[0].ts_event < bars[0].ts_init < bars[1].ts_init
+    assert any("/eod/SPY.US?" in url and "order=a" in url for url, _ in requests)
+    assert any("/splits/SPY.US?" in url for url, _ in requests)
+    assert any("/div/SPY.US?" in url for url, _ in requests)
+    assert all("api_token=test-token" in url and timeout == 30 for url, timeout in requests)
 
     asyncio.run(source.close())
     with pytest.raises(RuntimeError, match="not connected"):
@@ -197,7 +236,7 @@ def test_adapter_validates_timeout_fields_and_requested_dates() -> None:
     source = EodhdHistoricalBarSource(
         api_token="token",  # noqa: S106
         request_timeout_seconds=30,
-        transport=lambda _url, _timeout: outside_payload,
+        transport=lambda url, _timeout: _route_payload(url, eod=outside_payload),
     )
     asyncio.run(source.connect())
     bars = asyncio.run(

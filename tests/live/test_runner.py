@@ -27,6 +27,9 @@ def test_builds_paper_trading_node_from_native_components() -> None:
     assert config.actors[1].config["account_id"] == "IB-DU123"
     assert config.actors[1].config["snapshot_interval_seconds"] == 30
     assert config.strategies[0].config["account_id"] == "IB-DU123"
+    assert config.strategies[0].config["instrument_routes"]["SPY.US"] == "SPY.ARCA"
+    assert config.actors[0].config["bar_types"][0].endswith("1-DAY-LAST-INTERNAL")
+    assert config.actors[0].config["bootstrap_bar_types"][0].endswith("1-DAY-LAST-EXTERNAL")
     assert config.exec_clients["IB"].routing.default is True
     assert str(AccountId(config.strategies[0].config["account_id"])) == "IB-DU123"
 

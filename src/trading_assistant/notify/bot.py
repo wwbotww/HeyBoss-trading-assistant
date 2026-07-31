@@ -235,7 +235,7 @@ def main() -> None:
     live = load_live_settings(project_root / "config" / "live.yaml")
     ApprovalBot(
         token=token,
-        database_url=os.getenv("DATABASE_URL", "sqlite:///./data/trading_assistant.db"),
+        database_url=os.getenv("LIVE_DATABASE_URL", "sqlite:///./data/live.db"),
         chat_id=chat_id,
         workflow_scope=f"paper:{tws_account}",
         poll_interval_seconds=live.notification_poll_interval_seconds,

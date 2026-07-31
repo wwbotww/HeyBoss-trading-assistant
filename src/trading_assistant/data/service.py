@@ -7,6 +7,10 @@ from pathlib import Path
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec, load_data_config, load_instruments
+from trading_assistant.data.corporate_actions import (
+    CorporateActionRepository,
+    corporate_action_path,
+)
 from trading_assistant.data.eodhd import EodhdHistoricalBarSource
 from trading_assistant.data.ibkr import IbkrHistoricalBarSource
 from trading_assistant.data.pipeline import HistoricalDataPipeline, PipelineSummary
@@ -57,6 +61,7 @@ async def sync_historical_data(
         )
         return pipeline.validate_catalog(instruments)
 
+    corporate_actions = CorporateActionRepository(corporate_action_path(catalog_path))
     today = datetime.now(tz=UTC).date()
     resolved_end = end_date or today
     resolved_start = start_date or resolved_end - timedelta(
@@ -69,6 +74,7 @@ async def sync_historical_data(
         source = EodhdHistoricalBarSource(
             api_token=eodhd_api_token or "",
             request_timeout_seconds=data_config.historical_data.request_timeout_seconds,
+            max_concurrent_requests=data_config.historical_data.max_concurrent_requests,
         )
     else:
         source = IbkrHistoricalBarSource(
@@ -84,6 +90,7 @@ async def sync_historical_data(
         catalog=catalog,
         report_directory=report_directory,
         source=source,
+        corporate_actions=corporate_actions,
     )
     return await pipeline.sync(
         instruments,

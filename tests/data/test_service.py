@@ -14,8 +14,21 @@ from trading_assistant.data.pipeline import PipelineSummary
 
 def _instruments() -> tuple[InstrumentSpec, ...]:
     return (
-        InstrumentSpec("SPY", "SPY.ARCA", "SPY.US", "SMART", "ARCA", "USD", 2, "0.01", 1),
-        InstrumentSpec("QQQ", "QQQ.NASDAQ", "QQQ.US", "SMART", "NASDAQ", "USD", 2, "0.01", 1),
+        InstrumentSpec(
+            "SPY", "SPY.US", "SPY.US", "SMART", "ARCA", "USD", 4, "0.0100", 1, "SPY.ARCA"
+        ),
+        InstrumentSpec(
+            "QQQ",
+            "QQQ.US",
+            "QQQ.US",
+            "SMART",
+            "NASDAQ",
+            "USD",
+            4,
+            "0.0100",
+            1,
+            "QQQ.NASDAQ",
+        ),
     )
 
 
@@ -24,10 +37,10 @@ def test_select_instruments_preserves_config_order_and_deduplicates() -> None:
     assert service.select_instruments(configured, ()) == configured
     assert service.select_instruments(
         configured,
-        ("QQQ.NASDAQ", "SPY.ARCA", "QQQ.NASDAQ"),
+        ("QQQ.US", "SPY.US", "QQQ.US"),
     ) == (configured[1], configured[0])
     with pytest.raises(ValueError, match="unknown instrument"):
-        service.select_instruments(configured, ("BAD.ARCA",))
+        service.select_instruments(configured, ("BAD.US",))
 
 
 def test_validate_only_uses_pipeline_without_ib_source(
@@ -41,7 +54,7 @@ def test_validate_only_uses_pipeline_without_ib_source(
             assert "source" not in kwargs
 
         def validate_catalog(self, instruments: object) -> PipelineSummary:
-            assert next(iter(cast(Any, instruments))).instrument_id == "SPY.ARCA"
+            assert next(iter(cast(Any, instruments))).instrument_id == "SPY.US"
             return marker
 
     monkeypatch.setattr(service, "HistoricalDataPipeline", cast(Any, FakePipeline))
@@ -53,7 +66,7 @@ def test_validate_only_uses_pipeline_without_ib_source(
             data_config_path=Path.cwd() / "config" / "data.yaml",
             start_date=None,
             end_date=None,
-            selected_ids=("SPY.ARCA",),
+            selected_ids=("SPY.US",),
             validate_only=True,
         )
     )
@@ -97,6 +110,7 @@ def test_sync_constructs_eodhd_source_and_exact_date_bounds(
     assert result is marker
     assert captured["api_token"] == "secret-test-token"  # noqa: S105
     assert captured["request_timeout_seconds"] == 120
+    assert captured["max_concurrent_requests"] == 8
     assert cast(Any, captured["start"]).date() == date(2025, 1, 1)
     assert cast(Any, captured["end"]).date() == date(2025, 2, 1)
 

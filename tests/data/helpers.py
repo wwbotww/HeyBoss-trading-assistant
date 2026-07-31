@@ -17,6 +17,7 @@ def make_bar(
     day: date,
     *,
     instrument_id: str = "SPY.ARCA",
+    bar_type_suffix: str = "1-DAY-LAST-EXTERNAL",
     open_price: float = 100.0,
     high: float = 102.0,
     low: float = 99.0,
@@ -28,7 +29,7 @@ def make_bar(
     event_ns = utc_ns(day)
     completion_ns = ts_init or event_ns + int(timedelta(days=1).total_seconds() * 1e9) - 1
     return Bar(
-        bar_type=BarType.from_str(f"{instrument_id}-1-DAY-LAST-EXTERNAL"),
+        bar_type=BarType.from_str(f"{instrument_id}-{bar_type_suffix}"),
         open=Price.from_str(f"{open_price:.2f}"),
         high=Price.from_str(f"{high:.2f}"),
         low=Price.from_str(f"{low:.2f}"),

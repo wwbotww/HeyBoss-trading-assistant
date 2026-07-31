@@ -87,7 +87,8 @@ def test_configuration_has_required_defaults() -> None:
     assert data["historical_data"]["provider"] == "eodhd"
     assert data["historical_data"]["price_basis"] == "total_return_adjusted"
     assert data["historical_data"]["refresh_mode"] == "replace"
-    assert data["historical_data"]["bar_type_suffix"] == "1-DAY-LAST-EXTERNAL"
+    assert data["historical_data"]["signal_bar_type_suffix"] == "1-DAY-LAST-INTERNAL"
+    assert data["historical_data"]["execution_bar_type_suffix"] == "1-DAY-LAST-EXTERNAL"
     assert data["historical_data"]["use_regular_trading_hours"] is True
     assert set(risk["risk"]) == {
         "strategy_capital_usd",

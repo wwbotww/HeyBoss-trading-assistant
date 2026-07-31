@@ -1,5 +1,6 @@
 """M2 YAML 配置校验测试。"""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ def test_loads_project_m2_configs() -> None:
     strategy = load_dual_momentum_settings(PROJECT_ROOT / "config" / "strategies.yaml")
     assert backtest.starting_balance_usd == 10000
     assert backtest.bar_availability_delay_ns > 0
+    assert backtest.data_start == date(2000, 1, 1)
+    assert backtest.evaluation_start == date(2002, 1, 1)
     assert risk.strategy_capital_usd == 10000
     assert risk.max_gross_exposure == 0.80
     assert strategy.lookback_months == 6
@@ -33,6 +36,11 @@ def test_loads_project_m2_configs() -> None:
         {"slippage_ticks": 2},
         {"trading_days_per_year": 0},
         {"bar_availability_delay_ns": 0},
+        {"data_start": "bad-date"},
+        {"data_start": None},
+        {"evaluation_start": "bad-date"},
+        {"data_start": "2022-01-01", "evaluation_start": "2021-01-01"},
+        {"end": "2020-01-01"},
     ],
 )
 def test_rejects_invalid_backtest_values(tmp_path: Path, overrides: dict[str, object]) -> None:
@@ -44,6 +52,9 @@ def test_rejects_invalid_backtest_values(tmp_path: Path, overrides: dict[str, ob
         "trading_days_per_year": 252,
         "risk_free_rate": 0,
         "report_root": "reports",
+        "data_start": "2020-01-01",
+        "evaluation_start": "2021-01-01",
+        "end": None,
         **overrides,
     }
     path = tmp_path / "backtest.yaml"

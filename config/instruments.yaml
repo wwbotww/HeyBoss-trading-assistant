@@ -1,92 +1,102 @@
-# 初始高流动性美股 ETF 池。data_symbol 是历史供应商代码，instrument_id 保持 NT/IBKR 标识。
+# 显式美股清单。instrument_id 是规范/回测身份，live_instrument_id 是 IBKR 执行身份。
 instruments:
   - symbol: SPY
-    instrument_id: SPY.ARCA
+    instrument_id: SPY.US
+    live_instrument_id: SPY.ARCA
     data_symbol: SPY.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: QQQ
-    instrument_id: QQQ.NASDAQ
+    instrument_id: QQQ.US
+    live_instrument_id: QQQ.NASDAQ
     data_symbol: QQQ.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: TLT
-    instrument_id: TLT.NASDAQ
+    instrument_id: TLT.US
+    live_instrument_id: TLT.NASDAQ
     data_symbol: TLT.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: GLD
-    instrument_id: GLD.ARCA
+    instrument_id: GLD.US
+    live_instrument_id: GLD.ARCA
     data_symbol: GLD.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: IWM
-    instrument_id: IWM.ARCA
+    instrument_id: IWM.US
+    live_instrument_id: IWM.ARCA
     data_symbol: IWM.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: EFA
-    instrument_id: EFA.ARCA
+    instrument_id: EFA.US
+    live_instrument_id: EFA.ARCA
     data_symbol: EFA.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: EEM
-    instrument_id: EEM.ARCA
+    instrument_id: EEM.US
+    live_instrument_id: EEM.ARCA
     data_symbol: EEM.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: VNQ
-    instrument_id: VNQ.ARCA
+    instrument_id: VNQ.US
+    live_instrument_id: VNQ.ARCA
     data_symbol: VNQ.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: LQD
-    instrument_id: LQD.ARCA
+    instrument_id: LQD.US
+    live_instrument_id: LQD.ARCA
     data_symbol: LQD.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1
   - symbol: BIL
-    instrument_id: BIL.ARCA
+    instrument_id: BIL.US
+    live_instrument_id: BIL.ARCA
     data_symbol: BIL.US
     exchange: SMART
     primary_exchange: ARCA
     currency: USD
-    price_precision: 2
-    price_increment: "0.01"
+    price_precision: 4
+    price_increment: "0.0100"
     lot_size: 1

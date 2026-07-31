@@ -1,17 +1,16 @@
-"""回测成交重放与结果报告。"""
+"""基于 NautilusTrader 账户状态的回测报告。"""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from math import sqrt
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from nautilus_trader.model.data import BarType
 
-from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.storage.repository import FillAudit
 
 
@@ -23,79 +22,40 @@ class BacktestReport:
     report_directory: Path
 
 
-def load_close_prices(
-    catalog: CatalogRepository,
+def load_nt_equity_curve(
+    snapshot_path: Path,
     *,
-    bar_types: tuple[str, ...],
+    evaluation_start: date,
+    end: date | None,
 ) -> pd.DataFrame:
-    """从 M1 Catalog 构建按 UTC 交易日对齐的收盘价矩阵。"""
+    """读取 SimulationModule 输出并裁剪正式评估区间。"""
+    loaded: object = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, list) or not loaded:
+        raise ValueError("NT 权益快照为空")
     records: list[dict[str, object]] = []
-    for value in bar_types:
-        bar_type = BarType.from_str(value)
-        instrument_id = str(bar_type.instrument_id)
-        records.extend(
-            {
-                "timestamp_utc": pd.Timestamp(bar.ts_init, unit="ns", tz="UTC").normalize(),
-                "instrument_id": instrument_id,
-                "close": bar.close.as_double(),
+    for index, item in enumerate(loaded):
+        if not isinstance(item, dict):
+            raise ValueError(f"NT 权益快照第 {index} 行结构无效")
+        session_date = item.get("session_date")
+        if not isinstance(session_date, str):
+            raise ValueError(f"NT 权益快照第 {index} 行缺少 session_date")
+        try:
+            trading_day = date.fromisoformat(session_date)
+            row = {
+                "timestamp_utc": pd.Timestamp(trading_day, tz="UTC"),
+                "equity": float(item["equity"]),
+                "cash": float(item["cash"]),
+                "market_value": float(item["market_value"]),
+                "dividend_cashflow": float(item["dividend_cashflow"]),
             }
-            for bar in catalog.read_bars(bar_type)
-        )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"NT 权益快照第 {index} 行字段无效") from exc
+        if trading_day < evaluation_start or (end is not None and trading_day > end):
+            continue
+        records.append(row)
     if not records:
-        raise ValueError("Catalog 中没有可用于回测报告的 Bar")
-    frame = pd.DataFrame.from_records(records)
-    closes = frame.pivot(index="timestamp_utc", columns="instrument_id", values="close")
-    return closes.sort_index().ffill().dropna()
-
-
-def build_equity_curve(
-    closes: pd.DataFrame,
-    fills: tuple[FillAudit, ...],
-    *,
-    starting_balance_usd: float,
-) -> pd.DataFrame:
-    """以 NT 成交为事实。按每日收盘价重放现金、持仓和权益。"""
-    cash = starting_balance_usd
-    quantities = {str(column): 0.0 for column in closes.columns}
-    ordered_fills = sorted(fills, key=lambda fill: fill.timestamp_utc)
-    fill_index = 0
-    rows: list[dict[str, object]] = []
-
-    for timestamp, prices in closes.iterrows():
-        session_end = pd.Timestamp(timestamp).to_pydatetime()
-        while fill_index < len(ordered_fills):
-            fill = ordered_fills[fill_index]
-            if fill.timestamp_utc.date() > session_end.date():
-                break
-            signed_notional = fill.quantity * fill.price
-            if fill.direction == "BUY":
-                cash -= signed_notional + fill.commission
-                quantities[fill.instrument_id] = (
-                    quantities.get(fill.instrument_id, 0.0) + fill.quantity
-                )
-            elif fill.direction == "SELL":
-                cash += signed_notional - fill.commission
-                quantities[fill.instrument_id] = (
-                    quantities.get(fill.instrument_id, 0.0) - fill.quantity
-                )
-            else:
-                raise ValueError(f"未知成交方向: {fill.direction}")
-            fill_index += 1
-
-        market_value = sum(
-            quantity * float(prices[instrument_id])
-            for instrument_id, quantity in quantities.items()
-            if instrument_id in prices.index
-        )
-        rows.append(
-            {
-                "timestamp_utc": timestamp,
-                "equity": cash + market_value,
-                "cash": cash,
-            }
-        )
-
-    curve = pd.DataFrame.from_records(rows).set_index("timestamp_utc")
+        raise ValueError("正式评估区间内没有 NT 权益快照")
+    curve = pd.DataFrame.from_records(records).set_index("timestamp_utc").sort_index()
     curve["daily_return"] = curve["equity"].pct_change().fillna(0.0)
     return curve
 
@@ -104,19 +64,19 @@ def calculate_summary(
     curve: pd.DataFrame,
     fills: tuple[FillAudit, ...],
     *,
-    starting_balance_usd: float,
     trading_days_per_year: int,
     risk_free_rate: float,
 ) -> dict[str, Any]:
-    """计算 M2 约定的绩效指标。"""
+    """只基于正式区间的 NT 权益状态计算绩效指标。"""
     if curve.empty:
         raise ValueError("权益曲线不能为空")
+    initial_equity = float(curve["equity"].iloc[0])
     final_equity = float(curve["equity"].iloc[-1])
     final_cash = float(curve["cash"].iloc[-1])
+    if initial_equity <= 0:
+        raise ValueError("初始权益必须为正数")
     periods = max(len(curve) - 1, 1)
-    annualized_return = (final_equity / starting_balance_usd) ** (
-        trading_days_per_year / periods
-    ) - 1.0
+    annualized_return = (final_equity / initial_equity) ** (trading_days_per_year / periods) - 1.0
     drawdown = curve["equity"] / curve["equity"].cummax() - 1.0
     daily_returns = curve["daily_return"].iloc[1:]
     daily_rf = risk_free_rate / trading_days_per_year
@@ -135,8 +95,10 @@ def calculate_summary(
         "sharpe_ratio": sharpe,
         "turnover": turnover,
         "fill_count": len(fills),
+        "initial_equity_usd": initial_equity,
         "final_equity_usd": final_equity,
         "final_cash_usd": final_cash,
+        "dividend_income_usd": float(curve["dividend_cashflow"].sum()),
         "total_commission_usd": sum(fill.commission for fill in fills),
         "start_date": str(curve.index[0].date()),
         "end_date": str(curve.index[-1].date()),
@@ -149,9 +111,12 @@ def write_backtest_report(
     curve: pd.DataFrame,
     fills: tuple[FillAudit, ...],
     summary: dict[str, Any],
+    orders: pd.DataFrame,
+    positions: pd.DataFrame,
+    account: pd.DataFrame,
 ) -> BacktestReport:
-    """以稳定文件名写入 JSON 与 CSV 报告。"""
-    report_directory.mkdir(parents=True, exist_ok=False)
+    """写出摘要、NT 原生状态报告与审计成交。"""
+    report_directory.mkdir(parents=True, exist_ok=True)
     (report_directory / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -172,4 +137,7 @@ def write_backtest_report(
         ]
     ).to_csv(report_directory / "fills.csv", index=False)
     curve.reset_index().to_csv(report_directory / "returns.csv", index=False)
+    orders.to_csv(report_directory / "orders.csv")
+    positions.to_csv(report_directory / "positions.csv")
+    account.to_csv(report_directory / "account.csv")
     return BacktestReport(summary=summary, report_directory=report_directory)

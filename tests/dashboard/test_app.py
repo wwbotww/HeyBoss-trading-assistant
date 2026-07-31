@@ -18,7 +18,7 @@ def test_dashboard_starts_with_empty_local_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project_root = Path(__file__).resolve().parents[2]
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/missing.db")
+    monkeypatch.setenv("LIVE_DATABASE_URL", f"sqlite:///{tmp_path}/missing.db")
     monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "missing-catalog"))
     monkeypatch.setenv("REPORT_ROOT", str(tmp_path / "missing-reports"))
     monkeypatch.delenv("TWS_ACCOUNT", raising=False)

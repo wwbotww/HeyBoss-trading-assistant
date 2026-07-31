@@ -22,6 +22,17 @@ class InstrumentSpec:
     price_precision: int
     price_increment: str
     lot_size: int
+    live_instrument_id: str | None = None
+
+    @property
+    def canonical_id(self) -> str:
+        """返回 Catalog、信号和回测共同使用的稳定标识。"""
+        return self.instrument_id
+
+    @property
+    def resolved_live_instrument_id(self) -> str:
+        """返回 IBKR 执行标识; 旧配置默认沿用规范标识。"""
+        return self.live_instrument_id or self.instrument_id
 
 
 HistoricalProvider = Literal["eodhd", "ibkr"]
@@ -37,7 +48,8 @@ class HistoricalDataConfig:
     price_basis: PriceBasis
     refresh_mode: RefreshMode
     history_years: int
-    bar_type_suffix: str
+    signal_bar_type_suffix: str
+    execution_bar_type_suffix: str
     use_regular_trading_hours: bool
     request_window_days: int | None
     request_interval_seconds: float
@@ -46,6 +58,12 @@ class HistoricalDataConfig:
     live_sync_delay_minutes: int
     overlap_days: int
     request_timeout_seconds: int
+    max_concurrent_requests: int
+
+    @property
+    def bar_type_suffix(self) -> str:
+        """兼容只消费执行价的现有调用方。"""
+        return self.execution_bar_type_suffix
 
 
 @dataclass(frozen=True)
@@ -102,6 +120,11 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
                 price_precision=int(value["price_precision"]),
                 price_increment=str(value["price_increment"]),
                 lot_size=int(value["lot_size"]),
+                live_instrument_id=(
+                    None
+                    if value.get("live_instrument_id") is None
+                    else str(value["live_instrument_id"])
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, KeyError):
@@ -127,6 +150,9 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
     instrument_ids = [instrument.instrument_id for instrument in instruments]
     if len(instrument_ids) != len(set(instrument_ids)):
         raise ValueError(f"instrument_id 不得重复: {path}")
+    live_instrument_ids = [instrument.resolved_live_instrument_id for instrument in instruments]
+    if len(live_instrument_ids) != len(set(live_instrument_ids)):
+        raise ValueError(f"live_instrument_id 不得重复: {path}")
 
     return tuple(instruments)
 
@@ -143,7 +169,8 @@ def load_data_config(path: Path) -> DataPipelineConfig:
             price_basis=cast(PriceBasis, str(historical["price_basis"])),
             refresh_mode=cast(RefreshMode, str(historical["refresh_mode"])),
             history_years=int(historical["history_years"]),
-            bar_type_suffix=str(historical["bar_type_suffix"]),
+            signal_bar_type_suffix=str(historical["signal_bar_type_suffix"]),
+            execution_bar_type_suffix=str(historical["execution_bar_type_suffix"]),
             use_regular_trading_hours=bool(historical["use_regular_trading_hours"]),
             request_window_days=(
                 None
@@ -158,6 +185,7 @@ def load_data_config(path: Path) -> DataPipelineConfig:
             live_sync_delay_minutes=int(historical["live_sync_delay_minutes"]),
             overlap_days=int(historical["overlap_days"]),
             request_timeout_seconds=int(historical["request_timeout_seconds"]),
+            max_concurrent_requests=int(historical["max_concurrent_requests"]),
         )
         quality_config = QualityConfig(
             max_absolute_daily_return=float(quality["max_absolute_daily_return"]),
@@ -184,8 +212,18 @@ def load_data_config(path: Path) -> DataPipelineConfig:
         or historical_config.refresh_mode != "append"
     ):
         raise ValueError("IBKR 必须使用 split_adjusted 与 append")
-    if historical_config.bar_type_suffix != "1-DAY-LAST-EXTERNAL":
-        raise ValueError("M1 只允许 bar_type_suffix=1-DAY-LAST-EXTERNAL")
+    if historical_config.execution_bar_type_suffix != "1-DAY-LAST-EXTERNAL":
+        raise ValueError(
+            "execution_bar_type_suffix 必须为 1-DAY-LAST-EXTERNAL",
+        )
+    if historical_config.provider == "eodhd" and (
+        historical_config.signal_bar_type_suffix != "1-DAY-LAST-INTERNAL"
+    ):
+        raise ValueError("EODHD signal_bar_type_suffix 必须为 1-DAY-LAST-INTERNAL")
+    if historical_config.provider == "ibkr" and (
+        historical_config.signal_bar_type_suffix != historical_config.execution_bar_type_suffix
+    ):
+        raise ValueError("IBKR 备用源的 signal/execution BarType 必须一致")
     if (
         historical_config.request_window_days is not None
         and historical_config.request_window_days < 1
@@ -203,6 +241,8 @@ def load_data_config(path: Path) -> DataPipelineConfig:
         raise ValueError("overlap_days 不得为负数")
     if historical_config.request_timeout_seconds < 1:
         raise ValueError("request_timeout_seconds 必须大于等于 1")
+    if historical_config.max_concurrent_requests < 1:
+        raise ValueError("max_concurrent_requests 必须大于等于 1")
     if not 0 < quality_config.max_absolute_daily_return <= 1:
         raise ValueError("max_absolute_daily_return 必须在 (0, 1] 范围内")
     if quality_config.stale_after_days < 1:

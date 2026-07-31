@@ -12,11 +12,12 @@ from nautilus_trader.adapters.interactive_brokers.config import (
 from nautilus_trader.adapters.interactive_brokers.historical.client import (
     HistoricInteractiveBrokersClient,
 )
-from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 
 from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.corporate_actions import CorporateActions
 
 
 class IbkrHistoricalBarSource:
@@ -65,8 +66,21 @@ class IbkrHistoricalBarSource:
     ) -> list[Instrument]:
         """使用 NT IB_SIMPLIFIED 规则解析标的。"""
         client = self._connected_client()
-        instrument_ids = [InstrumentId.from_str(spec.instrument_id) for spec in specs]
-        return await client.request_instruments(instrument_ids=list(instrument_ids))
+        instrument_ids = [InstrumentId.from_str(spec.resolved_live_instrument_id) for spec in specs]
+        resolved = await client.request_instruments(instrument_ids=list(instrument_ids))
+        by_id = {instrument.id.value: instrument for instrument in resolved}
+        canonical: list[Instrument] = []
+        for spec in specs:
+            instrument = by_id.get(spec.resolved_live_instrument_id)
+            if instrument is None:
+                continue
+            values = instrument.to_dict(instrument)
+            values["id"] = spec.canonical_id
+            converted = instrument.__class__.from_dict(values)
+            if not isinstance(converted, Instrument):
+                raise TypeError("IBKR instrument conversion returned an unexpected type")
+            canonical.append(converted)
+        return canonical
 
     async def request_daily_bars(
         self,
@@ -76,8 +90,8 @@ class IbkrHistoricalBarSource:
     ) -> list[Bar]:
         """请求标准 1-DAY-LAST-EXTERNAL RTH Bar。"""
         client = self._connected_client()
-        instrument_id = InstrumentId.from_str(spec.instrument_id)
-        return await client.request_bars(
+        instrument_id = InstrumentId.from_str(spec.resolved_live_instrument_id)
+        bars = await client.request_bars(
             bar_specifications=["1-DAY-LAST"],
             start_date_time=start,
             end_date_time=end,
@@ -86,6 +100,30 @@ class IbkrHistoricalBarSource:
             use_rth=self._use_regular_trading_hours,
             timeout=self._request_timeout_seconds,
         )
+        canonical_bar_type = BarType.from_str(f"{spec.canonical_id}-1-DAY-LAST-EXTERNAL")
+        return [
+            Bar(
+                bar_type=canonical_bar_type,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                ts_event=bar.ts_event,
+                ts_init=bar.ts_init,
+            )
+            for bar in bars
+        ]
+
+    async def request_corporate_actions(
+        self,
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> CorporateActions:
+        """IBKR 备用历史源不提供规范公司行动记录。"""
+        del start, end
+        return CorporateActions(spec.instrument_id, (), ())
 
     async def close(self) -> None:
         """集中处理 NT 1.230.0 历史客户端缺少公开 close 的兼容逻辑。"""

@@ -33,9 +33,7 @@ def main() -> int:
     if not account:
         print("Signal rearm failed: TWS_ACCOUNT is required")
         return 1
-    repository = TradingRepository(
-        os.getenv("DATABASE_URL", "sqlite:///./data/trading_assistant.db")
-    )
+    repository = TradingRepository(os.getenv("LIVE_DATABASE_URL", "sqlite:///./data/live.db"))
     try:
         repository.create_schema()
         workflow = repository.find_signal_workflow(

@@ -1,12 +1,19 @@
 """统一执行网关决策与持久化审批链路测试。"""
 
+from __future__ import annotations
+
 import time
+from datetime import date
 from pathlib import Path
 from typing import cast
 
 import pytest
 from nautilus_trader.common.component import TestClock, TimeEvent
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.identifiers import InstrumentId
 
+from tests.data.helpers import make_bar
 from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.execution.gateway import (
     ExecutionGatewayConfig,
@@ -43,15 +50,120 @@ class _GatewayHarness(ExecutionGatewayStrategy):
         self.executed.append(str(event.id))
 
 
+class _PlanningCache:
+    """为计划计算提供最新执行 Bar。"""
+
+    def __init__(
+        self,
+        bars: dict[str, Bar],
+        positions: tuple[_Position, ...] = (),
+    ) -> None:
+        self._bars = bars
+        self._positions = positions
+
+    def bar(self, bar_type: BarType) -> Bar | None:
+        return self._bars.get(str(bar_type))
+
+    def instrument(self, instrument_id: InstrumentId) -> None:
+        del instrument_id
+        return None
+
+    def positions_open(
+        self,
+        *,
+        instrument_id: InstrumentId,
+        account_id: object,
+    ) -> list[_Position]:
+        del instrument_id, account_id
+        return list(self._positions)
+
+
+class _Position:
+    def __init__(self, signed_qty: float) -> None:
+        self.signed_qty = signed_qty
+
+
+class _PlanningGateway(ExecutionGatewayStrategy):
+    """隔离账户外部依赖, 直接测试 canonical 到 live 的计划映射。"""
+
+    def __init__(
+        self,
+        config: ExecutionGatewayConfig,
+        *,
+        equity: float,
+        quantities: dict[str, int] | None = None,
+        bars: dict[str, Bar] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self.test_clock = TestClock()
+        self.test_clock.set_time(time.time_ns())
+        self.test_cache = _PlanningCache(bars or {})
+        self.equity = equity
+        self.quantities = quantities or {}
+
+    @property
+    def clock(self) -> TestClock:
+        return self.test_clock
+
+    @property
+    def cache(self) -> _PlanningCache:
+        return self.test_cache
+
+    def _portfolio_equity(self, prices: dict[str, float]) -> float:
+        assert prices
+        return self.equity
+
+    def _current_quantity(self, instrument_id: InstrumentId) -> int:
+        return self.quantities.get(str(instrument_id), 0)
+
+
+def _planning_config(
+    tmp_path: Path,
+    *,
+    execution_bar_types: dict[str, str] | None = None,
+    max_order_notional_usd: float = 100_000,
+) -> ExecutionGatewayConfig:
+    return ExecutionGatewayConfig(
+        instrument_routes={"SPY.US": "SPY.ARCA"},
+        execution_bar_types=(
+            {"SPY.US": "SPY.US-1-DAY-LAST-EXTERNAL"}
+            if execution_bar_types is None
+            else execution_bar_types
+        ),
+        approval_mode="auto",
+        database_url=f"sqlite:///{tmp_path}/planning.db",
+        account_id="IB-DU123",
+        strategy_capital_usd=10_000,
+        max_order_notional_usd=max_order_notional_usd,
+        max_instrument_weight=0.25,
+        max_daily_new_positions=3,
+        max_gross_exposure=0.8,
+    )
+
+
+def _planning_event() -> TradeSignalEvent:
+    now_ns = time.time_ns()
+    return TradeSignalEvent(
+        strategy_name="dual_momentum",
+        target_weights=(("SPY.US", 0.25),),
+        rebalance_key="2025-01",
+        reason="momentum",
+        expires_at_ns=now_ns + 3_600_000_000_000,
+        ts_event=now_ns,
+        ts_init=now_ns,
+    )
+
+
 def _gateway(tmp_path: Path, *, approval_mode: str) -> tuple[_GatewayHarness, TradingRepository]:
     repository = TradingRepository(f"sqlite:///{tmp_path}/gateway.db")
     repository.create_schema()
     gateway = _GatewayHarness(
         ExecutionGatewayConfig(
-            instrument_ids=("SPY.ARCA",),
-            bar_type_suffix="1-DAY-LAST-EXTERNAL",
+            instrument_routes={"SPY.US": "SPY.ARCA"},
+            execution_bar_types={"SPY.US": "SPY.US-1-DAY-LAST-EXTERNAL"},
             approval_mode=approval_mode,
             database_url=f"sqlite:///{tmp_path}/gateway.db",
+            account_id="IB-DU123",
             strategy_capital_usd=10_000,
             max_order_notional_usd=100_000,
             max_instrument_weight=0.25,
@@ -67,7 +179,7 @@ def _event(repository: TradingRepository, *, expires_at_ns: int | None = None) -
     now_ns = time.time_ns()
     event = TradeSignalEvent(
         strategy_name="dual_momentum",
-        target_weights=(("SPY.ARCA", 0.25),),
+        target_weights=(("SPY.US", 0.25),),
         rebalance_key=str(now_ns),
         reason="momentum",
         expires_at_ns=expires_at_ns or now_ns + 3_600_000_000_000,
@@ -169,3 +281,175 @@ def test_auto_claims_once_and_initial_failures_never_execute(tmp_path: Path) -> 
     assert repository.get_signal_workflow(str(expired.id)).status == "EXPIRED"  # type: ignore[union-attr]
     assert gateway.executed == [str(event.id)]
     repository.close()
+
+
+def test_plan_uses_canonical_prices_and_routes_live_order(tmp_path: Path) -> None:
+    bar = make_bar(
+        date(2025, 1, 2),
+        instrument_id="SPY.US",
+        close=100,
+    )
+    gateway = _PlanningGateway(
+        _planning_config(tmp_path),
+        equity=10_000,
+        bars={str(bar.bar_type): bar},
+    )
+
+    plan, rejection = gateway._build_plan(_planning_event())
+
+    assert rejection is None
+    assert len(plan) == 1
+    assert plan[0].canonical_id == "SPY.US"
+    assert plan[0].instrument_id == "SPY.ARCA"
+    assert plan[0].side == OrderSide.BUY
+    assert plan[0].quantity == 25
+    assert plan[0].opens_position
+    assert gateway._plan_payload(plan)[0]["asset_id"] == "SPY.US"
+    gateway._record_opened_positions(plan, gateway.clock.timestamp_ns())
+    assert sum(gateway._daily_new_positions.values()) == 1
+
+
+def test_plan_fails_closed_for_missing_inputs_and_risk(tmp_path: Path) -> None:
+    event = _planning_event()
+    missing_type = _PlanningGateway(
+        _planning_config(tmp_path, execution_bar_types={}),
+        equity=10_000,
+    )
+    assert missing_type._build_plan(event)[1] == "missing execution BarType for SPY.US"
+
+    missing_price = _PlanningGateway(_planning_config(tmp_path), equity=10_000)
+    assert missing_price._build_plan(event)[1] == "missing price for SPY.US"
+
+    bar = make_bar(date(2025, 1, 2), instrument_id="SPY.US", close=100)
+    bars = {str(bar.bar_type): bar}
+    no_equity = _PlanningGateway(
+        _planning_config(tmp_path),
+        equity=0,
+        bars=bars,
+    )
+    assert no_equity._build_plan(event)[1] == "non-positive portfolio equity"
+
+    risk_rejected = _PlanningGateway(
+        _planning_config(tmp_path, max_order_notional_usd=100),
+        equity=10_000,
+        bars=bars,
+    )
+    assert "max_order_notional_usd" in str(risk_rejected._build_plan(event)[1])
+
+    unchanged = _PlanningGateway(
+        _planning_config(tmp_path),
+        equity=10_000,
+        quantities={"SPY.ARCA": 25},
+        bars=bars,
+    )
+    assert unchanged._build_plan(event) == ((), None)
+
+    seller = _PlanningGateway(
+        _planning_config(tmp_path),
+        equity=10_000,
+        quantities={"SPY.ARCA": 30},
+        bars=bars,
+    )
+    plan, rejection = seller._build_plan(event)
+    assert rejection is None
+    assert plan[0].side == OrderSide.SELL
+    assert plan[0].quantity == 5
+    assert not plan[0].opens_position
+
+
+class _Money:
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def as_double(self) -> float:
+        return self._value
+
+
+class _Account:
+    def balance_total(self, currency: object) -> _Money:
+        del currency
+        return _Money(5_000)
+
+
+class _Portfolio:
+    def __init__(self, account: _Account | None) -> None:
+        self._account = account
+
+    def account(self, *, account_id: object) -> _Account | None:
+        del account_id
+        return self._account
+
+
+class _PortfolioPlanningGateway(_PlanningGateway):
+    def __init__(
+        self,
+        config: ExecutionGatewayConfig,
+        *,
+        account: _Account | None,
+        quantities: dict[str, int],
+        bars: dict[str, Bar],
+    ) -> None:
+        super().__init__(
+            config,
+            equity=0,
+            quantities=quantities,
+            bars=bars,
+        )
+        self.test_portfolio = _Portfolio(account)
+
+    @property
+    def portfolio(self) -> _Portfolio:
+        return self.test_portfolio
+
+    def _portfolio_equity(self, prices: dict[str, float]) -> float:
+        return ExecutionGatewayStrategy._portfolio_equity(self, prices)
+
+
+def test_portfolio_equity_uses_exact_account_and_live_positions(tmp_path: Path) -> None:
+    bar = make_bar(date(2025, 1, 2), instrument_id="SPY.US", close=100)
+    bars = {str(bar.bar_type): bar}
+    missing = _PortfolioPlanningGateway(
+        _planning_config(tmp_path),
+        account=None,
+        quantities={},
+        bars=bars,
+    )
+    assert missing._portfolio_equity({"SPY.US": 100}) == 0
+
+    gateway = _PortfolioPlanningGateway(
+        _planning_config(tmp_path),
+        account=_Account(),
+        quantities={"SPY.ARCA": 10},
+        bars=bars,
+    )
+    assert gateway._portfolio_equity({"SPY.US": 100}) == 6_000
+    assert gateway._current_quantity(InstrumentId.from_str("SPY.ARCA")) == 10
+    gateway.test_cache = _PlanningCache(bars, (_Position(3), _Position(2)))
+    assert (
+        ExecutionGatewayStrategy._current_quantity(
+            gateway,
+            InstrumentId.from_str("SPY.ARCA"),
+        )
+        == 5
+    )
+
+
+def test_execute_plan_orders_sells_before_buys_and_missing_instrument_fails(
+    tmp_path: Path,
+) -> None:
+    gateway = _PlanningGateway(_planning_config(tmp_path), equity=10_000)
+    event = _planning_event()
+    buy = _PlannedOrder("SPY.US", "SPY.ARCA", OrderSide.BUY, 1, 100, 0.25, True)
+    sell = _PlannedOrder("QQQ.US", "QQQ.NASDAQ", OrderSide.SELL, 1, 100, 0, False)
+    submitted: list[tuple[_PlannedOrder, ...]] = []
+    gateway._submit_orders = lambda _event, plan: submitted.append(plan)  # type: ignore[assignment]
+
+    gateway._execute_plan(event, (buy,))
+    assert submitted == [(buy,)]
+    gateway._execute_plan(event, (buy, sell))
+    assert submitted[-1] == (sell,)
+    assert gateway._pending_buys[str(event.id)][1] == (buy,)
+
+    failing = _PlanningGateway(_planning_config(tmp_path), equity=10_000)
+    with pytest.raises(RuntimeError, match="Instrument not found"):
+        failing._submit_orders(event, (buy,))

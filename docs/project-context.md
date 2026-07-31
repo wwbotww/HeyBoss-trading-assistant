@@ -21,7 +21,7 @@
 | 券商连接 | IB Gateway（Docker 镜像 `ghcr.io/gnzsnz/ib-gateway`，含 IBC 自动登录） | 凭据通过环境变量注入，绝不入库 |
 | 历史数据源 | EODHD EOD API | 供应商适配层之后只使用 NT 原生对象；IBKR 历史适配器保留为可切换实现 |
 | 行情存储 | NautilusTrader 原生 ParquetDataCatalog | EODHD 使用独立目录 `./catalog/eodhd/` |
-| 业务存储 | SQLite（通过 SQLAlchemy 2.x）| 存信号、审批记录、订单日志；schema 设计需兼容未来迁移 PostgreSQL |
+| 业务存储 | SQLite（通过 SQLAlchemy 2.x）| live 与 backtest 使用不同数据库；schema 设计需兼容未来迁移 PostgreSQL |
 | 通知/审批 | `python-telegram-bot` v21+，inline keyboard 实现“确认/否决”按钮 | Bot token 走环境变量 |
 | 看板 | Streamlit | 只读展示，不承担任何交易职能 |
 | 研究 | Jupyter + NT BacktestNode | notebooks 目录独立，不被生产代码 import |
@@ -81,13 +81,16 @@ trading-assistant/
 
 **M1 — 数据管道**
 
-- `scripts/fetch_data.py`：按 instruments.yaml 从配置的数据源拉取日线；默认使用 EODHD，免费版为一年历史，升级后通过配置扩展到五年；
+- `scripts/fetch_data.py`：只按 instruments.yaml 中的显式清单拉取日线；默认使用 EODHD，许可历史长度由配置和 CLI 日期边界控制；
 - 历史供应商只实现 `HistoricalBarSource` 适配接口。EODHD 的 `data_symbol` 只用于请求边界，回测、策略和 Catalog 不得依赖 EODHD 响应结构；
+- 每个标的使用稳定 canonical ID（如 `AAPL.US`）贯穿 Catalog、信号和回测；`live_instrument_id`（如 `AAPL.NASDAQ`）只在 IBKR 合约解析与执行边界使用；
 - 数据质量校验：起始覆盖、缺口、异常值与供应商修订报告；同步必须幂等并可重复运行；
 - M1 的规范数据只使用 NautilusTrader 原生 `Instrument`、`Bar`、`BarType` 和 `ParquetDataCatalog`，不定义 `CustomData`、自定义 Bar 或平行历史数据结构；
-- 唯一日线口径为 `1-DAY-LAST-EXTERNAL`。EODHD 的原始 OHLC 按 `adjusted_close / close` 同比例转换，形成同时考虑拆股与分红的总回报调整 OHLC；供应商成交量直接使用其已拆股调整的 volume；
-- 回测与后续实盘收盘信号必须先复用同一历史同步管道，再从同一 Catalog 读取相同 `BarType`。M3 MVP 不订阅付费实时行情，执行计划使用 Catalog 最新日线收盘参考价；IBKR 连接只负责账户、持仓、对账与订单状态；
+- 同一 EOD 响应生成两种 NT 原生 Bar：`1-DAY-LAST-INTERNAL` 为总回报调整信号价；`1-DAY-LAST-EXTERNAL` 为仅拆股调整执行价。两者共享 canonical Instrument、交易日与成交量，禁止互相替代；
+- EODHD 的 splits/dividends 保存到与 Catalog 同级的固定 JSON sidecar，不引入 manifest 或版本号。历史价格统一折算为当前拆股口径，现金分红保留当前拆股口径的每股金额；
+- 回测与实盘信号必须复用同一 `INTERNAL` BarType；执行网关必须复用同一 `EXTERNAL` BarType。M3 MVP 不订阅付费实时行情；IBKR 连接只负责账户、持仓、对账与订单状态；
 - 不维护数据 manifest、版本号或内容哈希。EODHD 每个标的一次请求覆盖完整许可历史；完整响应通过质量校验后替换该 `BarType` 的规范序列，以接纳分红和拆股导致的正常回溯调整。旧 IBKR Catalog 与 EODHD Catalog 禁止混写；IBKR 备用适配器仍使用分块、重叠和追加模式。
+- EODHD 请求受 `max_concurrent_requests` 限制并复用统一退避重试；远端获取可以并发，Catalog 与 sidecar 写入必须串行。
 
 **M2 — 回测闭环**
 
@@ -95,14 +98,17 @@ trading-assistant/
 - 轮动池排名排除短债兜底标的 BIL；使用六个完整日历月的价格动量。选取动量为正的前 3 名，按目标权重等权；全部为负时仅持有 BIL；数据不足时保持现金；动量并列时按 instrument ID 稳定排序；
 - 初始资金 10,000 USD。目标仓位同时受 `risk.yaml` 的单标的 25% 和总仓位 80% 上限约束；使用整数股，先卖后买且不借入现金；
 - 通过 `BacktestNode` 从 Catalog 读取 M1 的原生 `Bar`，加载与未来实盘相同的 Actor、领域 Event 和执行 Strategy。回测只把审批模式设为 auto，并把最终执行端替换为 `BacktestExchange`；
+- 所有 canonical Instrument 统一使用 `US` venue，回测只创建一个 `US-001` USD CASH 账户；禁止按原交易所创建多账户或使用重复现金修正；
+- 回测显式区分 `data_start`、`evaluation_start` 与 `end`。预热期只更新策略状态，不发布交易信号；绩效和换手率只统计正式评估区间；
 - 规范历史日线的 `ts_event` 是交易日起点，完整 OHLC 在当日结束的 `ts_init` 才可用。回测必须通过 NT 原生 `LatencyModel` 把订单激活时间推迟到该 Bar 完整可用之后，禁止使用同一根日线开盘价形成前视偏差；
+- `DividendSimulationModule` 在除息日按持仓向 NT 模拟账户计入现金，并从 NT Account、Position 与执行 Bar 记录权益快照；报告层禁止根据 fills 另行重放账户；
 - `scripts/run_backtest.py`：佣金通过 NT 官方 `FeeModel` 扩展点按成交股数 × 0.005 USD 计算，再把每笔总佣金按 USD 最小精度取整；不能直接使用 `PerContractFeeModel("0.005 USD")`，因为 NT 会先把单位佣金按 USD 两位精度变成 0.00。成交加入一个最小变动价位滑点；输出年化收益、最大回撤、Sharpe（无风险利率 0、252 交易日）、换手率、成交数、期末净值与现金，并将运行、信号、审批、订单和逐笔成交存入 SQLite；
-- 报告写入 `reports/backtests/<run-id>/`，至少包含 `summary.json`、`fills.csv` 与 `returns.csv`；
+- 报告写入 `reports/backtests/<run-id>/`，包含 `summary.json`、`fills.csv`、`returns.csv`、`orders.csv`、`positions.csv`、`account.csv` 与 `nt-equity.json`；
 - notebooks 中给出一个回测结果分析示例。
 
 **M3 — 信号→审批→下单（本项目的核心）**
 
-- `scripts/run_live.py` 只允许以 paper 模式启动 NT `TradingNode`。启动前复用 M1 同一同步服务更新 Catalog，`DualMomentumActor` 再从 Catalog 请求相同的 `1-DAY-LAST-EXTERNAL` 原生 `Bar` 并产出 `TradeSignalEvent`；M3 不引入常驻数据调度器，需要更新月末数据时重启 live node；
+- `scripts/run_live.py` 只允许以 paper 模式启动 NT `TradingNode`。启动前复用 M1 同一同步服务更新 Catalog，`DualMomentumActor` 从 canonical `1-DAY-LAST-INTERNAL` Bar 产出 `TradeSignalEvent`，执行网关以 canonical `1-DAY-LAST-EXTERNAL` Bar 估价，再将 canonical ID 映射为 IBKR live ID 下单；
 - `trading-node` 与 `approval-bot` 是两个独立进程，以 SQLite 持久化信号工作流作为唯一审批邮箱。工作流按运行作用域、策略名和调仓月份幂等，重启不得重复产生或执行同一调仓信号；
 - approval-bot 服务向指定 Telegram chat 推送卡片（标的、方向、数量、信号理由、当前风控检查结果），附【✅ 确认】【❌ 否决】按钮。Bot 只能原子更新审批状态，禁止直接调用任何下单接口；
 - manual 链路为 `NEW → PENDING → APPROVED → PROCESSING → ORDERS_SUBMITTED`，否决或过期分别进入 `DENIED`、`EXPIRED`；auto 链路为 `NEW → PROCESSING → ORDERS_SUBMITTED`。状态更新使用期望旧状态的原子条件，确保 Bot 与执行网关并发时只能有一个调用方取得处理权；
@@ -127,7 +133,7 @@ trading-assistant/
 
 - IB Gateway 不能真正 headless，必须用带 IBC 的 Docker 镜像处理自动登录与每日重启；重连逻辑要处理 Gateway 日常重启导致的断线。
 - NT 要求 Gateway 返回 UTC 时间戳，README 必须包含该设置说明。
-- EODHD 免费版每天只有 20 次调用且最多返回一年历史；当前 10 个标的一次完整同步约消耗 10 次，升级前每天最多执行一次完整同步。
+- EODHD EOD、splits 与 dividends 是不同请求；调用配额和许可历史长度以当前订阅为准，执行全池同步前必须核对账户套餐。
 - EODHD EOD 原始 OHLC 未调整，`adjusted_close` 同时调整拆股与分红；不得只替换 close，必须按统一因子调整整根 OHLC，并在质量校验后接受历史回溯修订。
 - NT 对“在 TWS/手机端手动操作订单”的状态同步不可靠：README 中明确警告用户不要手动操作本系统管理的仓位。
 - ib Gateway paper 端口为 4002（TWS paper 为 7497），配置默认值用 4002。

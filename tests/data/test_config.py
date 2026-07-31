@@ -16,13 +16,17 @@ def test_load_project_configuration() -> None:
     instruments = load_instruments(PROJECT_ROOT / "config" / "instruments.yaml")
     config = load_data_config(PROJECT_ROOT / "config" / "data.yaml")
 
-    assert instruments[0].instrument_id == "SPY.ARCA"
+    assert instruments[0].instrument_id == "SPY.US"
+    assert instruments[0].resolved_live_instrument_id == "SPY.ARCA"
     assert instruments[0].data_symbol == "SPY.US"
     assert len(instruments) == 10
     assert config.historical_data.provider == "eodhd"
     assert config.historical_data.price_basis == "total_return_adjusted"
     assert config.historical_data.refresh_mode == "replace"
+    assert config.historical_data.signal_bar_type_suffix == "1-DAY-LAST-INTERNAL"
+    assert config.historical_data.execution_bar_type_suffix == "1-DAY-LAST-EXTERNAL"
     assert config.historical_data.bar_type_suffix == "1-DAY-LAST-EXTERNAL"
+    assert config.historical_data.max_concurrent_requests == 8
     assert config.historical_data.max_attempts == 3
     assert config.quality.max_absolute_daily_return == 0.25
 
@@ -54,13 +58,15 @@ def test_invalid_data_config_is_rejected(tmp_path: Path, content: str, message: 
     [
         ("history_years: 0", "history_years"),
         ("provider: invalid", "provider"),
-        ("bar_type_suffix: 1-HOUR-LAST-EXTERNAL", "bar_type_suffix"),
+        ("signal_bar_type_suffix: 1-HOUR-LAST-INTERNAL", "signal_bar_type_suffix"),
+        ("execution_bar_type_suffix: 1-HOUR-LAST-EXTERNAL", "execution_bar_type_suffix"),
         ("request_window_days: 0", "request_window_days"),
         ("request_interval_seconds: -1", "request_interval_seconds"),
         ("max_attempts: 0", "max_attempts"),
         ("retry_backoff_seconds: [-1, 2]", "retry_backoff_seconds"),
         ("overlap_days: -1", "overlap_days"),
         ("request_timeout_seconds: 0", "request_timeout_seconds"),
+        ("max_concurrent_requests: 0", "max_concurrent_requests"),
     ],
 )
 def test_invalid_historical_values_are_rejected(
@@ -74,13 +80,15 @@ def test_invalid_historical_values_are_rejected(
         "price_basis": "price_basis: total_return_adjusted",
         "refresh_mode": "refresh_mode: replace",
         "history_years": "history_years: 5",
-        "bar_type_suffix": "bar_type_suffix: 1-DAY-LAST-EXTERNAL",
+        "signal_bar_type_suffix": "signal_bar_type_suffix: 1-DAY-LAST-INTERNAL",
+        "execution_bar_type_suffix": "execution_bar_type_suffix: 1-DAY-LAST-EXTERNAL",
         "request_window_days": "request_window_days: null",
         "request_interval_seconds": "request_interval_seconds: 2",
         "max_attempts": "max_attempts: 3",
         "retry_backoff_seconds": "retry_backoff_seconds: [2, 5, 10]",
         "overlap_days": "overlap_days: 10",
         "request_timeout_seconds": "request_timeout_seconds: 120",
+        "max_concurrent_requests": "max_concurrent_requests: 8",
     }
     key = override.split(":", maxsplit=1)[0]
     values[key] = override
@@ -90,7 +98,8 @@ historical_data:
   {values["price_basis"]}
   {values["refresh_mode"]}
   {values["history_years"]}
-  {values["bar_type_suffix"]}
+  {values["signal_bar_type_suffix"]}
+  {values["execution_bar_type_suffix"]}
   use_regular_trading_hours: true
   {values["request_window_days"]}
   {values["request_interval_seconds"]}
@@ -99,6 +108,7 @@ historical_data:
   live_sync_delay_minutes: 30
   {values["overlap_days"]}
   {values["request_timeout_seconds"]}
+  {values["max_concurrent_requests"]}
 quality:
   max_absolute_daily_return: 0.25
   stale_after_days: 5
@@ -134,7 +144,8 @@ historical_data:
   price_basis: total_return_adjusted
   refresh_mode: replace
   history_years: 5
-  bar_type_suffix: 1-DAY-LAST-EXTERNAL
+  signal_bar_type_suffix: 1-DAY-LAST-INTERNAL
+  execution_bar_type_suffix: 1-DAY-LAST-EXTERNAL
   use_regular_trading_hours: true
   request_window_days: null
   request_interval_seconds: 2
@@ -143,6 +154,7 @@ historical_data:
   live_sync_delay_minutes: 30
   overlap_days: 10
   request_timeout_seconds: 120
+  max_concurrent_requests: 8
 quality:
   {max_return}
   {stale}
@@ -164,7 +176,8 @@ quality:
 instruments:
   - &spy
     symbol: SPY
-    instrument_id: SPY.ARCA
+    instrument_id: SPY.US
+    live_instrument_id: SPY.ARCA
     data_symbol: SPY.US
     exchange: SMART
     primary_exchange: ARCA

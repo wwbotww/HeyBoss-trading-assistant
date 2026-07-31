@@ -8,3 +8,7 @@ backtest:
   trading_days_per_year: 252
   risk_free_rate: 0.0
   report_root: reports/backtests
+  # data_start 到 evaluation_start 仅用于策略预热，不计入绩效区间。
+  data_start: 2000-01-01
+  evaluation_start: 2002-01-01
+  end: null

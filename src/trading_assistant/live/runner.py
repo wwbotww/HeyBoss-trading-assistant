@@ -52,13 +52,18 @@ def build_trading_node_config(
     risk = load_risk_limits(project_root / "config" / "risk.yaml")
     live = load_live_settings(project_root / "config" / "live.yaml")
     instruments = load_instruments(project_root / "config" / "instruments.yaml")
-    instrument_ids = tuple(sorted(item.instrument_id for item in instruments))
-    native_ids = frozenset(InstrumentId.from_str(value) for value in instrument_ids)
-    bar_types = tuple(
-        f"{instrument_id}-{data.historical_data.bar_type_suffix}"
-        for instrument_id in instrument_ids
+    canonical_ids = tuple(sorted(item.canonical_id for item in instruments))
+    live_routes = {item.canonical_id: item.resolved_live_instrument_id for item in instruments}
+    native_ids = frozenset(InstrumentId.from_str(value) for value in live_routes.values())
+    signal_bar_types = tuple(
+        f"{instrument_id}-{data.historical_data.signal_bar_type_suffix}"
+        for instrument_id in canonical_ids
     )
-    database_url = environ.get("DATABASE_URL", "sqlite:///./data/trading_assistant.db")
+    execution_bar_types = {
+        instrument_id: (f"{instrument_id}-{data.historical_data.execution_bar_type_suffix}")
+        for instrument_id in canonical_ids
+    }
+    database_url = environ.get("LIVE_DATABASE_URL", "sqlite:///./data/live.db")
     catalog_path = Path(
         environ.get("CATALOG_PATH", str(project_root / "catalog" / "eodhd")),
     ).resolve()
@@ -67,8 +72,8 @@ def build_trading_node_config(
         actor_path="trading_assistant.strategies.dual_momentum:DualMomentumActor",
         config_path="trading_assistant.strategies.dual_momentum:DualMomentumActorConfig",
         config={
-            "bar_types": list(bar_types),
-            "instrument_ids": list(instrument_ids),
+            "bar_types": list(signal_bar_types),
+            "instrument_ids": list(canonical_ids),
             "lookback_months": strategy.lookback_months,
             "top_n": strategy.top_n,
             "fallback_instrument": strategy.fallback_instrument,
@@ -78,6 +83,7 @@ def build_trading_node_config(
             "stream_bars": False,
             "bootstrap_from_catalog": True,
             "catalog_lookback_days": live.catalog_lookback_days,
+            "bootstrap_bar_types": list(execution_bar_types.values()),
         },
     )
     portfolio_actor = ImportableActorConfig(
@@ -94,8 +100,8 @@ def build_trading_node_config(
         strategy_path="trading_assistant.execution.gateway:ExecutionGatewayStrategy",
         config_path="trading_assistant.execution.gateway:ExecutionGatewayConfig",
         config={
-            "instrument_ids": list(instrument_ids),
-            "bar_type_suffix": data.historical_data.bar_type_suffix,
+            "instrument_routes": live_routes,
+            "execution_bar_types": execution_bar_types,
             "approval_mode": strategy.approval_mode,
             "database_url": database_url,
             "strategy_capital_usd": risk.strategy_capital_usd,

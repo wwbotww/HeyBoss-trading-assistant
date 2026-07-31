@@ -10,6 +10,11 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.model.instruments import Instrument
 
 from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.corporate_actions import CorporateActions
+
+
+class HistoricalDataAuthenticationError(ValueError):
+    """历史供应商凭据无效。"""
 
 
 class HistoricalBarSource(Protocol):
@@ -31,6 +36,14 @@ class HistoricalBarSource(Protocol):
         end: datetime,
     ) -> list[Bar]:
         """请求一个标的的完整日线。"""
+
+    async def request_corporate_actions(
+        self,
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> CorporateActions:
+        """请求拆股和现金分红; 不支持时返回空记录。"""
 
     async def close(self) -> None:
         """释放数据源连接。"""

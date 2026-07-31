@@ -46,24 +46,24 @@ def gateway_decision(
 class ExecutionGatewayConfig(StrategyConfig, frozen=True):
     """执行网关配置。"""
 
-    instrument_ids: tuple[str, ...]
-    bar_type_suffix: str
+    instrument_routes: dict[str, str]
+    execution_bar_types: dict[str, str]
     approval_mode: str
     database_url: str
+    account_id: str
     strategy_capital_usd: float
     max_order_notional_usd: float
     max_instrument_weight: float
     max_daily_new_positions: int
     max_gross_exposure: float
-    cash_adjustment_usd: float = 0.0
     backtest_run_id: str | None = None
     signal_topic: str = TRADE_SIGNAL_TOPIC
     approval_poll_interval_seconds: int = 5
-    account_id: str | None = None
 
 
 @dataclass(frozen=True)
 class _PlannedOrder:
+    canonical_id: str
     instrument_id: str
     side: OrderSide
     quantity: int
@@ -236,6 +236,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
     def _plan_payload(plan: tuple[_PlannedOrder, ...]) -> tuple[dict[str, Any], ...]:
         return tuple(
             {
+                "asset_id": item.canonical_id,
                 "instrument_id": item.instrument_id,
                 "side": "BUY" if item.side == OrderSide.BUY else "SELL",
                 "quantity": item.quantity,
@@ -255,12 +256,17 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         target_weights = apply_weight_limits(requested, self._limits)
         prices: dict[str, float] = {}
         current_quantities: dict[str, int] = {}
-        for value in self._settings.instrument_ids:
-            bar = self.cache.bar(BarType.from_str(f"{value}-{self._settings.bar_type_suffix}"))
+        for canonical_id, execution_id in self._settings.instrument_routes.items():
+            bar_type = self._settings.execution_bar_types.get(canonical_id)
+            if bar_type is None:
+                return (), f"missing execution BarType for {canonical_id}"
+            bar = self.cache.bar(BarType.from_str(bar_type))
             if bar is None:
-                return (), f"missing price for {value}"
-            prices[value] = bar.close.as_double()
-            current_quantities[value] = self._current_quantity(InstrumentId.from_str(value))
+                return (), f"missing price for {canonical_id}"
+            prices[canonical_id] = bar.close.as_double()
+            current_quantities[canonical_id] = self._current_quantity(
+                InstrumentId.from_str(execution_id)
+            )
 
         equity = self._portfolio_equity(prices)
         if equity <= 0:
@@ -275,11 +281,11 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             if weight > 0 and current_quantities.get(instrument_id, 0) == 0
         )
         planned: list[_PlannedOrder] = []
-        for instrument_id in self._settings.instrument_ids:
-            price = prices[instrument_id]
-            weight = target_weights.get(instrument_id, 0.0)
+        for canonical_id, execution_id in self._settings.instrument_routes.items():
+            price = prices[canonical_id]
+            weight = target_weights.get(canonical_id, 0.0)
             target_quantity = floor(equity * weight / price)
-            delta = target_quantity - current_quantities[instrument_id]
+            delta = target_quantity - current_quantities[canonical_id]
             if delta == 0:
                 continue
             notional = abs(delta) * price
@@ -291,53 +297,41 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 limits=self._limits,
             )
             if rejection is not None:
-                return (), f"{instrument_id}: {rejection}"
+                return (), f"{canonical_id}: {rejection}"
             planned.append(
                 _PlannedOrder(
-                    instrument_id=instrument_id,
+                    canonical_id=canonical_id,
+                    instrument_id=execution_id,
                     side=OrderSide.BUY if delta > 0 else OrderSide.SELL,
                     quantity=abs(delta),
                     price=price,
                     target_weight=weight,
-                    opens_position=(delta > 0 and current_quantities[instrument_id] == 0),
+                    opens_position=(delta > 0 and current_quantities[canonical_id] == 0),
                 )
             )
-        planned.sort(key=lambda item: (item.side != OrderSide.SELL, item.instrument_id))
+        planned.sort(key=lambda item: (item.side != OrderSide.SELL, item.canonical_id))
         return tuple(planned), None
 
     def _portfolio_equity(self, prices: dict[str, float]) -> float:
         currency = Currency.from_str("USD")
-        accounts: dict[str, Any] = {}
-        if self._settings.account_id is not None:
-            account = self.portfolio.account(
-                account_id=AccountId(self._settings.account_id),
-            )
-            if account is not None:
-                accounts[str(account.id)] = account
-        else:
-            for value in self._settings.instrument_ids:
-                instrument_id = InstrumentId.from_str(value)
-                account = self.portfolio.account(venue=instrument_id.venue)
-                if account is not None:
-                    accounts[str(account.id)] = account
-        cash = sum(account.balance_total(currency).as_double() for account in accounts.values())
+        account = self.portfolio.account(account_id=AccountId(self._settings.account_id))
+        if account is None:
+            return 0.0
+        cash = account.balance_total(currency).as_double()
         positions_value = sum(
-            self._current_quantity(InstrumentId.from_str(value)) * prices[value]
-            for value in self._settings.instrument_ids
+            self._current_quantity(InstrumentId.from_str(execution_id)) * prices[canonical_id]
+            for canonical_id, execution_id in self._settings.instrument_routes.items()
         )
-        account_equity = float(cash - self._settings.cash_adjustment_usd + positions_value)
+        account_equity = float(cash + positions_value)
         return effective_strategy_equity(
             account_equity_usd=account_equity,
             strategy_capital_usd=self._settings.strategy_capital_usd,
         )
 
     def _current_quantity(self, instrument_id: InstrumentId) -> int:
-        account_id = (
-            AccountId(self._settings.account_id) if self._settings.account_id is not None else None
-        )
         positions = self.cache.positions_open(
             instrument_id=instrument_id,
-            account_id=account_id,
+            account_id=AccountId(self._settings.account_id),
         )
         return round(sum(float(position.signed_qty) for position in positions))
 

@@ -76,6 +76,7 @@ def _print_summary(summary: PipelineSummary) -> None:
     print(f"instruments_processed={summary.instruments_processed}")
     print(f"bars_fetched={summary.bars_fetched}")
     print(f"bars_written={summary.bars_written}")
+    print(f"corporate_actions_written={summary.corporate_actions_written}")
     print(f"warnings={warning_count}")
     print(f"errors={error_count}")
     print(f"quality_report={summary.report_path}")

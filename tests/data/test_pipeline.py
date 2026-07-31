@@ -21,6 +21,7 @@ from trading_assistant.data.config import (
     InstrumentSpec,
     QualityConfig,
 )
+from trading_assistant.data.corporate_actions import CorporateActionRepository, CorporateActions
 from trading_assistant.data.pipeline import HistoricalDataPipeline
 
 
@@ -44,7 +45,16 @@ class FakeSource:
     ) -> list[Instrument]:
         if not self.resolve:
             return []
-        return [TestInstrumentProvider.equity("SPY", "ARCA")]
+        return [TestInstrumentProvider.equity("SPY", "US")]
+
+    async def request_corporate_actions(
+        self,
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> CorporateActions:
+        del start, end
+        return CorporateActions(spec.instrument_id, (), ())
 
     async def request_daily_bars(
         self,
@@ -74,7 +84,8 @@ def _config(*, request_window_days: int | None = 365, max_attempts: int = 3) -> 
             price_basis="split_adjusted",
             refresh_mode="append",
             history_years=5,
-            bar_type_suffix="1-DAY-LAST-EXTERNAL",
+            signal_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
             use_regular_trading_hours=True,
             request_window_days=request_window_days,
             request_interval_seconds=0,
@@ -83,6 +94,7 @@ def _config(*, request_window_days: int | None = 365, max_attempts: int = 3) -> 
             live_sync_delay_minutes=30,
             overlap_days=10,
             request_timeout_seconds=120,
+            max_concurrent_requests=2,
         ),
         quality=QualityConfig(max_absolute_daily_return=0.25, stale_after_days=5),
     )
@@ -90,7 +102,18 @@ def _config(*, request_window_days: int | None = 365, max_attempts: int = 3) -> 
 
 def _spec() -> InstrumentSpec:
     """返回测试标的配置。"""
-    return InstrumentSpec("SPY", "SPY.ARCA", "SPY.US", "SMART", "ARCA", "USD", 2, "0.01", 1)
+    return InstrumentSpec(
+        "SPY",
+        "SPY.US",
+        "SPY.US",
+        "SMART",
+        "ARCA",
+        "USD",
+        4,
+        "0.0100",
+        1,
+        "SPY.ARCA",
+    )
 
 
 def _replace_config() -> DataPipelineConfig:
@@ -103,6 +126,7 @@ def _replace_config() -> DataPipelineConfig:
             provider="eodhd",
             price_basis="total_return_adjusted",
             refresh_mode="replace",
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
             request_window_days=None,
         ),
     )
@@ -121,6 +145,7 @@ def _pipeline(
         catalog=catalog,
         report_directory=tmp_path / "reports",
         source=source,
+        corporate_actions=CorporateActionRepository(tmp_path / "catalog-actions"),
         clock_ns=lambda: utc_ns(date(2026, 7, 20)),
         sleep=no_sleep,
     )
@@ -130,8 +155,8 @@ def _pipeline(
 def test_pipeline_sync_is_chunked_retried_and_idempotent(tmp_path: Path) -> None:
     """同步应串行分块、重试; 并在第二次运行时写入零条。"""
     bars = [
-        make_bar(date(2026, 7, 13)),
-        make_bar(date(2026, 7, 14), close=102),
+        make_bar(date(2026, 7, 13), instrument_id="SPY.US"),
+        make_bar(date(2026, 7, 14), instrument_id="SPY.US", close=102),
     ]
     source = FakeSource(bars, failures=1)
     pipeline, catalog = _pipeline(tmp_path, source, config=_config(request_window_days=2))
@@ -142,6 +167,7 @@ def test_pipeline_sync_is_chunked_retried_and_idempotent(tmp_path: Path) -> None
     assert first.bars_written == 2
     assert first.bars_fetched == 2
     assert first.instruments_processed == 1
+    assert first.corporate_actions_written == 1
     assert first.report_path.exists()
     assert source.connect_count == source.close_count == 1
     assert len(source.requests) == 4  # 首个窗口重试一次; 加上后续两个窗口。
@@ -183,9 +209,10 @@ def test_pipeline_reports_missing_instrument_and_fetch_failure(tmp_path: Path) -
 
 def test_pipeline_filters_incomplete_bars_and_validates_offline(tmp_path: Path) -> None:
     """未来完成时间的 Bar 不得入库; 离线检查应复用相同规则。"""
-    complete = make_bar(date(2026, 7, 14))
+    complete = make_bar(date(2026, 7, 14), instrument_id="SPY.US")
     incomplete = make_bar(
         date(2026, 7, 20),
+        instrument_id="SPY.US",
         ts_init=utc_ns(date(2026, 7, 21)),
     )
     source = FakeSource([complete, incomplete])
@@ -203,10 +230,24 @@ def test_pipeline_filters_incomplete_bars_and_validates_offline(tmp_path: Path) 
 
 def test_pipeline_replaces_adjusted_history_after_validation(tmp_path: Path) -> None:
     """EODHD 修订应告警并替换完整序列; 不与旧供应商数据混合。"""
-    stored = make_bar(date(2026, 7, 13), close=101)
-    revised = make_bar(date(2026, 7, 13), close=100)
-    latest = make_bar(date(2026, 7, 14), close=102)
-    source = FakeSource([revised, latest])
+    stored = make_bar(date(2026, 7, 13), instrument_id="SPY.US", close=101)
+    revised = make_bar(date(2026, 7, 13), instrument_id="SPY.US", close=100)
+    latest = make_bar(date(2026, 7, 14), instrument_id="SPY.US", close=102)
+    signal_revised = make_bar(
+        date(2026, 7, 13),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        low=94,
+        close=95,
+    )
+    signal_latest = make_bar(
+        date(2026, 7, 14),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        low=96,
+        close=97,
+    )
+    source = FakeSource([revised, signal_revised, latest, signal_latest])
     pipeline, catalog = _pipeline(tmp_path, source, config=_replace_config())
     assert catalog.append_new_bars([stored]) == 1
 
@@ -214,10 +255,11 @@ def test_pipeline_replaces_adjusted_history_after_validation(tmp_path: Path) -> 
         pipeline.sync([_spec()], start=datetime(2026, 7, 10), end=datetime(2026, 7, 15)),
     )
 
-    assert result.bars_written == 2
+    assert result.bars_written == 4
     assert len(source.requests) == 1
     assert {issue.code for issue in result.issues} == {"historical_revision_detected"}
     assert catalog.read_bars(stored.bar_type) == [revised, latest]
+    assert catalog.read_bars(signal_revised.bar_type) == [signal_revised, signal_latest]
 
 
 def test_pipeline_backfills_when_catalog_only_contains_recent_history(
@@ -226,12 +268,13 @@ def test_pipeline_backfills_when_catalog_only_contains_recent_history(
     """近期冒烟数据不得让全量同步跳过更早的目标历史。"""
     old = make_bar(
         date(2025, 1, 2),
+        instrument_id="SPY.US",
         open_price=90,
         high=91,
         low=89,
         close=90,
     )
-    recent = make_bar(date(2026, 7, 14), close=102)
+    recent = make_bar(date(2026, 7, 14), instrument_id="SPY.US", close=102)
     source = FakeSource([old, recent])
     pipeline, catalog = _pipeline(tmp_path, source, config=_config(request_window_days=800))
     assert catalog.append_new_bars([recent]) == 1

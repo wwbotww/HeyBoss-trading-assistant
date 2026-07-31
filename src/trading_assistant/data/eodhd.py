@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from http.client import HTTPResponse
 from typing import cast
@@ -19,6 +19,12 @@ from nautilus_trader.model.instruments import Equity, Instrument
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.corporate_actions import (
+    CorporateActions,
+    DividendAction,
+    SplitAction,
+)
+from trading_assistant.data.source import HistoricalDataAuthenticationError
 
 HttpTransport = Callable[[str, int], bytes]
 
@@ -39,7 +45,9 @@ def _download(url: str, timeout_seconds: int) -> bytes:
             return response.read()
     except HTTPError as exc:
         if exc.code in {401, 403}:
-            raise ValueError("EODHD authentication failed; check EODHD_API_TOKEN") from None
+            raise HistoricalDataAuthenticationError(
+                "EODHD authentication failed; check EODHD_API_TOKEN"
+            ) from None
         if exc.code == 429 or exc.code >= 500:
             raise RuntimeError(f"EODHD temporary HTTP failure: status={exc.code}") from None
         raise ValueError(f"EODHD request was rejected: status={exc.code}") from None
@@ -67,6 +75,35 @@ def _price(value: Decimal, precision: int) -> Price:
     return Price.from_str(f"{value:.{precision}f}")
 
 
+def _date_field(row: dict[str, object], index: int) -> datetime:
+    """读取 EODHD ISO 日期。"""
+    value = row.get("date")
+    if not isinstance(value, str):
+        raise ValueError(f"EODHD row {index} has invalid 'date'")
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ValueError(f"EODHD row {index} has invalid 'date'") from exc
+
+
+def _split_ratio(value: object, index: int) -> Decimal:
+    """解析 EODHD 的 `4/1` 或 `4:1` 拆股比例。"""
+    if not isinstance(value, str):
+        raise ValueError(f"EODHD split row {index} has invalid 'split'")
+    separator = "/" if "/" in value else ":"
+    parts = value.split(separator)
+    if len(parts) != 2:
+        raise ValueError(f"EODHD split row {index} has invalid 'split'")
+    try:
+        numerator = Decimal(parts[0])
+        denominator = Decimal(parts[1])
+    except InvalidOperation as exc:
+        raise ValueError(f"EODHD split row {index} has invalid 'split'") from exc
+    if not numerator.is_finite() or not denominator.is_finite() or min(numerator, denominator) <= 0:
+        raise ValueError(f"EODHD split row {index} has invalid 'split'")
+    return numerator / denominator
+
+
 class EodhdHistoricalBarSource:
     """使用 EODHD EOD API 生成总回报调整后的 NT 日线。"""
 
@@ -75,6 +112,7 @@ class EodhdHistoricalBarSource:
         *,
         api_token: str,
         request_timeout_seconds: int,
+        max_concurrent_requests: int = 1,
         transport: HttpTransport = _download,
         base_url: str = "https://eodhd.com/api",
     ) -> None:
@@ -83,10 +121,14 @@ class EodhdHistoricalBarSource:
             raise ValueError("EODHD_API_TOKEN is required for the EODHD data provider")
         if request_timeout_seconds < 1:
             raise ValueError("request_timeout_seconds must be positive")
+        if max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be positive")
         self._api_token = token
         self._request_timeout_seconds = request_timeout_seconds
         self._transport = transport
         self._base_url = base_url.rstrip("/")
+        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+        self._actions: dict[str, CorporateActions] = {}
         self._connected = False
 
     async def connect(self) -> None:
@@ -126,6 +168,9 @@ class EodhdHistoricalBarSource:
     ) -> list[Bar]:
         """请求 EOD JSON; 把单一 adjusted_close 转成一致的调整后 OHLC。"""
         self._require_connected()
+        actions = self._actions.get(spec.instrument_id)
+        if actions is None:
+            actions = await self.request_corporate_actions(spec, start, end)
         query = urlencode(
             {
                 "api_token": self._api_token,
@@ -138,22 +183,64 @@ class EodhdHistoricalBarSource:
         )
         symbol = quote(spec.data_symbol, safe=".-")
         url = f"{self._base_url}/eod/{symbol}?{query}"
-        payload = await asyncio.to_thread(
-            self._transport,
-            url,
-            self._request_timeout_seconds,
+        payload = await self._request(url)
+        return self._parse_bars(spec, payload, actions=actions, start=start, end=end)
+
+    async def request_corporate_actions(
+        self,
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> CorporateActions:
+        """请求完整拆股和现金分红, 并缓存供拆股调整 OHLC 使用。"""
+        self._require_connected()
+        query = urlencode(
+            {
+                "api_token": self._api_token,
+                "fmt": "json",
+                "from": start.date().isoformat(),
+                "to": end.date().isoformat(),
+            },
         )
-        return self._parse_bars(spec, payload, start=start, end=end)
+        symbol = quote(spec.data_symbol, safe=".-")
+        split_url = f"{self._base_url}/splits/{symbol}?{query}"
+        dividend_url = f"{self._base_url}/div/{symbol}?{query}"
+        split_payload, dividend_payload = await asyncio.gather(
+            self._request(split_url),
+            self._request(dividend_url),
+        )
+        actions = CorporateActions(
+            instrument_id=spec.instrument_id,
+            dividends=self._parse_dividends(
+                spec,
+                dividend_payload,
+                start=start,
+                end=end,
+            ),
+            splits=self._parse_splits(split_payload, start=start, end=end),
+        )
+        self._actions[spec.instrument_id] = actions
+        return actions
+
+    async def _request(self, url: str) -> bytes:
+        """限制所有 EODHD HTTP 请求的实际并发数。"""
+        async with self._request_slots:
+            return await asyncio.to_thread(
+                self._transport,
+                url,
+                self._request_timeout_seconds,
+            )
 
     def _parse_bars(
         self,
         spec: InstrumentSpec,
         payload: bytes,
         *,
+        actions: CorporateActions,
         start: datetime,
         end: datetime,
     ) -> list[Bar]:
-        """严格校验响应结构并构造 NT Bar。"""
+        """严格校验响应并构造 signal INTERNAL 与 execution EXTERNAL Bar。"""
         try:
             decoded = cast(object, json.loads(payload))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -161,19 +248,14 @@ class EodhdHistoricalBarSource:
         if not isinstance(decoded, list):
             raise ValueError("EODHD EOD response must be a JSON array")
 
-        bar_type = BarType.from_str(f"{spec.instrument_id}-1-DAY-LAST-EXTERNAL")
+        signal_bar_type = BarType.from_str(f"{spec.instrument_id}-1-DAY-LAST-INTERNAL")
+        execution_bar_type = BarType.from_str(f"{spec.instrument_id}-1-DAY-LAST-EXTERNAL")
         bars: list[Bar] = []
         for index, item in enumerate(decoded):
             if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
                 raise ValueError(f"EODHD row {index} must be an object")
             row = cast(dict[str, object], item)
-            date_value = row.get("date")
-            if not isinstance(date_value, str):
-                raise ValueError(f"EODHD row {index} has invalid 'date'")
-            try:
-                trading_day = datetime.strptime(date_value, "%Y-%m-%d").date()
-            except ValueError as exc:
-                raise ValueError(f"EODHD row {index} has invalid 'date'") from exc
+            trading_day = _date_field(row, index).date()
             if not start.date() <= trading_day <= end.date():
                 continue
 
@@ -188,36 +270,145 @@ class EodhdHistoricalBarSource:
             if volume < 0 or volume != volume.to_integral_value():
                 raise ValueError(f"EODHD row {index} has invalid 'volume'")
 
-            factor = adjusted_close / raw_close
-            open_price = _price(raw_open * factor, spec.price_precision)
-            close_price = _price(adjusted_close, spec.price_precision)
-            high_price = max(
-                _price(raw_high * factor, spec.price_precision),
-                open_price,
-                close_price,
+            total_return_factor = adjusted_close / raw_close
+            signal_open = _price(raw_open * total_return_factor, spec.price_precision)
+            signal_close = _price(adjusted_close, spec.price_precision)
+            signal_high = max(
+                _price(raw_high * total_return_factor, spec.price_precision),
+                signal_open,
+                signal_close,
             )
-            low_price = min(
-                _price(raw_low * factor, spec.price_precision),
-                open_price,
-                close_price,
+            signal_low = min(
+                _price(raw_low * total_return_factor, spec.price_precision),
+                signal_open,
+                signal_close,
+            )
+            split_factor = self._split_price_factor(trading_day, actions.splits)
+            execution_open = _price(raw_open * split_factor, spec.price_precision)
+            execution_close = _price(raw_close * split_factor, spec.price_precision)
+            execution_high = max(
+                _price(raw_high * split_factor, spec.price_precision),
+                execution_open,
+                execution_close,
+            )
+            execution_low = min(
+                _price(raw_low * split_factor, spec.price_precision),
+                execution_open,
+                execution_close,
             )
             event_time = datetime.combine(trading_day, time.min, tzinfo=UTC)
             ts_event = int(event_time.timestamp() * 1_000_000_000)
-            ts_init = int((event_time + timedelta(days=1)).timestamp() * 1_000_000_000) - 1
-            bars.append(
-                Bar(
-                    bar_type=bar_type,
-                    open=open_price,
-                    high=high_price,
-                    low=low_price,
-                    close=close_price,
-                    volume=Quantity.from_int(int(volume)),
-                    ts_event=ts_event,
-                    ts_init=ts_init,
-                ),
+            session_end = int((event_time + timedelta(days=1)).timestamp() * 1_000_000_000)
+            bars.extend(
+                (
+                    Bar(
+                        bar_type=execution_bar_type,
+                        open=execution_open,
+                        high=execution_high,
+                        low=execution_low,
+                        close=execution_close,
+                        volume=Quantity.from_int(int(volume)),
+                        ts_event=ts_event,
+                        ts_init=session_end - 2,
+                    ),
+                    Bar(
+                        bar_type=signal_bar_type,
+                        open=signal_open,
+                        high=signal_high,
+                        low=signal_low,
+                        close=signal_close,
+                        volume=Quantity.from_int(int(volume)),
+                        ts_event=ts_event,
+                        ts_init=session_end - 1,
+                    ),
+                )
             )
         return bars
 
+    @staticmethod
+    def _split_price_factor(trading_day: date, splits: tuple[SplitAction, ...]) -> Decimal:
+        """把原始历史价格转换为当前拆股口径。"""
+        factor = Decimal(1)
+        for split in splits:
+            if split.ex_date > trading_day:
+                factor /= split.ratio
+        return factor
+
+    def _parse_splits(
+        self,
+        payload: bytes,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[SplitAction, ...]:
+        """解析 EODHD splits JSON。"""
+        decoded = self._json_array(payload, "splits")
+        actions: list[SplitAction] = []
+        for index, item in enumerate(decoded):
+            row = self._object_row(item, index, "split")
+            ex_date = _date_field(row, index).date()
+            if start.date() <= ex_date <= end.date():
+                actions.append(
+                    SplitAction(
+                        ex_date=ex_date,
+                        ratio=_split_ratio(row.get("split"), index),
+                    )
+                )
+        return tuple(sorted(actions, key=lambda item: item.ex_date))
+
+    def _parse_dividends(
+        self,
+        spec: InstrumentSpec,
+        payload: bytes,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[DividendAction, ...]:
+        """解析拆股调整后的每股分红值。"""
+        decoded = self._json_array(payload, "dividends")
+        actions: list[DividendAction] = []
+        for index, item in enumerate(decoded):
+            row = self._object_row(item, index, "dividend")
+            ex_date = _date_field(row, index).date()
+            if not start.date() <= ex_date <= end.date():
+                continue
+            value = _decimal_field(row, "value")
+            unadjusted_raw = row.get("unadjusted_value", row.get("unadjustedValue"))
+            unadjusted = (
+                None
+                if unadjusted_raw is None
+                else _decimal_field({"value": unadjusted_raw}, "value")
+            )
+            currency = row.get("currency", spec.currency)
+            if value < 0 or not isinstance(currency, str) or not currency:
+                raise ValueError(f"EODHD dividend row {index} has invalid fields")
+            actions.append(
+                DividendAction(
+                    ex_date=ex_date,
+                    value=value,
+                    unadjusted_value=unadjusted,
+                    currency=currency,
+                )
+            )
+        return tuple(sorted(actions, key=lambda item: item.ex_date))
+
+    @staticmethod
+    def _json_array(payload: bytes, label: str) -> list[object]:
+        try:
+            decoded = cast(object, json.loads(payload))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f"EODHD returned invalid {label} JSON") from exc
+        if not isinstance(decoded, list):
+            raise ValueError(f"EODHD {label} response must be a JSON array")
+        return cast(list[object], decoded)
+
+    @staticmethod
+    def _object_row(item: object, index: int, label: str) -> dict[str, object]:
+        if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
+            raise ValueError(f"EODHD {label} row {index} must be an object")
+        return cast(dict[str, object], item)
+
     async def close(self) -> None:
         """结束无状态 HTTP 数据源生命周期。"""
+        self._actions.clear()
         self._connected = False
