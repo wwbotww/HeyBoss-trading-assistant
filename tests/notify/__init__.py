@@ -1,1 +1,1 @@
-"""M3 Telegram 通知测试。"""
+"""Telegram 通知测试。"""

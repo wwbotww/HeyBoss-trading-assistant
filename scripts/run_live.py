@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""启动 M3 IBKR paper TradingNode。"""
+"""启动 IBKR paper TradingNode。"""
 
 from __future__ import annotations
 

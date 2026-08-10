@@ -55,7 +55,7 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         self._catalog_requests: set[str] = set()
 
     def on_start(self) -> None:
-        """建立审计仓储并订阅 M1 的原生日线 BarType。"""
+        """建立审计仓储并订阅规范 Catalog 的原生日线 BarType。"""
         self._repository = TradingRepository(self._settings.database_url)
         self._repository.create_schema()
         if self._settings.stream_bars:

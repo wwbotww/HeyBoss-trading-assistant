@@ -1,4 +1,4 @@
-"""M4 Streamlit 只读运行看板。"""
+"""Streamlit 只读运行看板。"""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def _render_signals(frame: pd.DataFrame) -> None:
     visible = frame[frame["status"].isin(selected)]
     if focus_rejected:
         visible = visible[visible["status"].isin(("DENIED", "RISK_REJECTED", "EXPIRED"))]
-    st.caption("收益使用信号时点最近收盘价, 并从同一 M1 Catalog 取后续第 N 个交易日收盘价。")
+    st.caption("收益使用信号时点最近收盘价, 并从同一 Catalog 取后续第 N 个交易日收盘价。")
     st.dataframe(
         visible,
         width="stretch",

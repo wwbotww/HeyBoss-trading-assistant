@@ -11,7 +11,7 @@ import yaml
 
 @dataclass(frozen=True)
 class RiskLimits:
-    """MVP 风控阈值。"""
+    """应用风控阈值。"""
 
     strategy_capital_usd: float
     max_order_notional_usd: float

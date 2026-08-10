@@ -1,4 +1,4 @@
-"""M2 YAML 配置校验测试。"""
+"""回测 YAML 配置校验测试。"""
 
 from datetime import date
 from pathlib import Path
@@ -8,7 +8,7 @@ import yaml
 
 from trading_assistant.backtest.config import load_backtest_settings
 from trading_assistant.risk.config import load_risk_limits
-from trading_assistant.strategies.config import load_dual_momentum_settings
+from trading_assistant.strategies.config import load_active_strategy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,14 +18,15 @@ def test_loads_project_m2_configs() -> None:
         PROJECT_ROOT / "config" / "backtest.yaml", project_root=PROJECT_ROOT
     )
     risk = load_risk_limits(PROJECT_ROOT / "config" / "risk.yaml")
-    strategy = load_dual_momentum_settings(PROJECT_ROOT / "config" / "strategies.yaml")
+    strategy = load_active_strategy(PROJECT_ROOT / "config" / "strategies.yaml")
     assert backtest.starting_balance_usd == 10000
     assert backtest.bar_availability_delay_ns > 0
     assert backtest.data_start == date(2000, 1, 1)
     assert backtest.evaluation_start == date(2002, 1, 1)
     assert risk.strategy_capital_usd == 10000
     assert risk.max_gross_exposure == 0.80
-    assert strategy.lookback_months == 6
+    assert strategy.name == "dual_momentum"
+    assert strategy.settings.lookback_months == 6
 
 
 @pytest.mark.parametrize(
@@ -71,4 +72,19 @@ def test_rejects_missing_config_mappings(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="必须是映射"):
         load_risk_limits(path)
     with pytest.raises(ValueError, match="必须是映射"):
-        load_dual_momentum_settings(path)
+        load_active_strategy(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"strategies": {"dual_momentum": {}}},
+        {"active_strategy": "missing", "strategies": {"dual_momentum": {}}},
+        {"active_strategy": "unknown", "strategies": {"unknown": {}}},
+    ],
+)
+def test_rejects_invalid_active_strategy(tmp_path: Path, value: object) -> None:
+    path = tmp_path / "strategies.yaml"
+    path.write_text(yaml.safe_dump(value), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"active_strategy|活动策略|不支持"):
+        load_active_strategy(path)

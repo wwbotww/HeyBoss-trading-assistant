@@ -5,7 +5,7 @@ from __future__ import annotations
 from nautilus_trader.core.message import Event
 from nautilus_trader.core.uuid import UUID4
 
-TRADE_SIGNAL_TOPIC = "events.trade_signal.dual_momentum"
+TRADE_SIGNAL_TOPIC = "events.trade_signal"
 
 
 class TradeSignalEvent(Event):  # type: ignore[misc]

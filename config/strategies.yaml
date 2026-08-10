@@ -1,6 +1,7 @@
+active_strategy: dual_momentum
+
 strategies:
   dual_momentum:
-    enabled: true
     approval_mode: manual
     signal_expiry_hours: 4
     parameters:

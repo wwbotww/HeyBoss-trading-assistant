@@ -100,7 +100,7 @@ class HistoricalDataPipeline:
         self._sleep = sleep
 
     def _bar_type(self, instrument_id: str) -> BarType:
-        """返回兼容调用方使用的 execution BarType。"""
+        """返回增量边界检查使用的 execution BarType。"""
         suffix = self._config.historical_data.execution_bar_type_suffix
         return BarType.from_str(f"{instrument_id}-{suffix}")
 

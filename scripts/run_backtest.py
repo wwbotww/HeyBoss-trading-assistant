@@ -1,4 +1,4 @@
-"""运行 M2 双动量回测。"""
+"""运行配置中唯一活动策略的回测。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _date(value: str) -> date:
 
 def parse_args() -> argparse.Namespace:
     """解析路径覆盖参数。"""
-    parser = argparse.ArgumentParser(description="Run the M2 dual-momentum backtest")
+    parser = argparse.ArgumentParser(description="Run the configured strategy backtest")
     parser.add_argument(
         "--catalog-path",
         type=Path,

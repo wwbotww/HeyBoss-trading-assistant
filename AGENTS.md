@@ -2,7 +2,7 @@
 
 `docs/project-context.md` 是本项目的需求与架构事实来源。开始任何实现前必须完整阅读该文件。
 
-- 严格按 M0 → M4 顺序推进；每个里程碑编码前先向用户提交文件清单、关键接口和验收方式，获得确认后再修改代码。
+- 每个里程碑编码前先向用户提交文件清单、关键接口和验收方式，获得确认后再修改代码。
 - `signals/` 只能包含无 IO、无全局状态、无 NautilusTrader 依赖的纯函数。
 - 唯一下单链路是 TradeSignalEvent → execution → risk → approval → NautilusTrader 执行客户端。
 - 凭据只允许来自环境变量，禁止提交 `.env`、数据库、catalog 数据或账户信息。

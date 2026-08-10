@@ -1,4 +1,4 @@
-# M2 回测环境参数；策略参数与风控阈值仍分别来自 strategies.yaml 和 risk.yaml。
+# 回测环境参数；策略参数与风控阈值仍分别来自 strategies.yaml 和 risk.yaml。
 backtest:
   starting_balance_usd: 10000
   commission_per_share_usd: 0.005

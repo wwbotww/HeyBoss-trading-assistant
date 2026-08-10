@@ -1,4 +1,4 @@
-"""M4 Dashboard 的只读数据装配与事后收益计算。"""
+"""Dashboard 的只读数据装配与事后收益计算。"""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class AuditViews:
 
 @dataclass(frozen=True)
 class BacktestReportView:
-    """一个可浏览的 M2 回测报告目录。"""
+    """一个可浏览的回测报告目录。"""
 
     run_id: str
     summary: dict[str, Any]
@@ -127,7 +127,7 @@ def signal_review_frame(
     bar_type_suffix: str,
     horizons: tuple[int, ...] = (5, 10, 20),
 ) -> pd.DataFrame:
-    """用同一 M1 Catalog 计算信号后的第 N 个可用交易日收益。"""
+    """用同一 Catalog 计算信号后的第 N 个可用交易日收益。"""
     if not reviews:
         return pd.DataFrame(columns=SIGNAL_COLUMNS)
     catalog = CatalogRepository(catalog_path)
@@ -187,7 +187,7 @@ def _forward_returns(
 
 
 def load_backtest_reports(report_root: Path) -> tuple[BacktestReportView, ...]:
-    """只读加载 M2 生成的稳定 JSON/CSV 报告。"""
+    """只读加载回测生成的稳定 JSON/CSV 报告。"""
     if not report_root.exists():
         return ()
     reports: list[BacktestReportView] = []

@@ -1,4 +1,4 @@
-"""供 CLI 与 live node 共同调用的 M1 历史同步服务。"""
+"""供 CLI 与 live node 共同调用的历史同步服务。"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ async def sync_historical_data(
     eodhd_api_token: str | None = None,
     log_level: str = "INFO",
 ) -> PipelineSummary:
-    """组装并运行唯一的 M1 同步或离线校验管道。"""
+    """组装并运行唯一的同步或离线校验管道。"""
     data_config = load_data_config(data_config_path)
     configured = load_instruments(instruments_config_path)
     instruments = select_instruments(configured, selected_ids)

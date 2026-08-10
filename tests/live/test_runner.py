@@ -22,6 +22,7 @@ def test_builds_paper_trading_node_from_native_components() -> None:
     )
     assert tuple(config.exec_clients) == ("IB",)
     assert len(config.actors) == 2
+    assert config.actors[0].config["strategy_name"] == "dual_momentum"
     assert config.actors[0].config["bootstrap_from_catalog"] is True
     assert config.actors[0].config["stream_bars"] is False
     assert config.actors[1].config["account_id"] == "IB-DU123"

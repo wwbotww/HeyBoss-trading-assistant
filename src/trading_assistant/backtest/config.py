@@ -1,4 +1,4 @@
-"""M2 回测环境配置加载。"""
+"""回测环境配置加载。"""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def load_backtest_settings(path: Path, *, project_root: Path) -> BacktestSetting
     if float(settings.commission_per_share_usd) < 0:
         raise ValueError("commission_per_share_usd 不得为负数")
     if settings.slippage_ticks != 1:
-        raise ValueError("M2 的 NT OneTickSlippageFillModel 只支持 slippage_ticks=1")
+        raise ValueError("NT OneTickSlippageFillModel 只支持 slippage_ticks=1")
     if settings.bar_availability_delay_ns < 1:
         raise ValueError("bar_availability_delay_ns 必须大于等于 1")
     if settings.trading_days_per_year < 1:

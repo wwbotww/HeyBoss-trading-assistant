@@ -1,4 +1,4 @@
-"""M1 YAML 配置加载测试。"""
+"""历史数据 YAML 配置加载测试。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ def test_load_project_configuration() -> None:
     assert config.historical_data.refresh_mode == "replace"
     assert config.historical_data.signal_bar_type_suffix == "1-DAY-LAST-INTERNAL"
     assert config.historical_data.execution_bar_type_suffix == "1-DAY-LAST-EXTERNAL"
-    assert config.historical_data.bar_type_suffix == "1-DAY-LAST-EXTERNAL"
     assert config.historical_data.max_concurrent_requests == 8
     assert config.historical_data.max_attempts == 3
     assert config.quality.max_absolute_daily_return == 0.25

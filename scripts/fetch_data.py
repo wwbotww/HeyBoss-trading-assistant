@@ -83,7 +83,7 @@ def _print_summary(summary: PipelineSummary) -> None:
 
 
 async def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> PipelineSummary:
-    """从 CLI 配置组装并运行 M1 管道。"""
+    """从 CLI 配置组装并运行历史数据管道。"""
     try:
         return await sync_historical_data(
             project_root=PROJECT_ROOT,

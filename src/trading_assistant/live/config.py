@@ -1,4 +1,4 @@
-"""M3 live 进程的非敏感 YAML 配置。"""
+"""paper 进程的非敏感 YAML 配置。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class LiveSettings:
 
 
 def load_live_settings(path: Path) -> LiveSettings:
-    """加载并校验 M3 非敏感配置。"""
+    """加载并校验 paper 非敏感配置。"""
     root: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(root, dict) or not isinstance(root.get("live"), dict):
         raise ValueError(f"配置项 'live' 必须是映射: {path}")

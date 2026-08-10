@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from trading_assistant.storage.repository import TradingRepository
-from trading_assistant.strategies.config import load_dual_momentum_settings
+from trading_assistant.strategies.config import load_active_strategy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,17 +36,17 @@ def main() -> int:
     repository = TradingRepository(os.getenv("LIVE_DATABASE_URL", "sqlite:///./data/live.db"))
     try:
         repository.create_schema()
+        strategy = load_active_strategy(PROJECT_ROOT / "config" / "strategies.yaml")
         workflow = repository.find_signal_workflow(
             scope=f"paper:{account}",
-            strategy_name="dual_momentum",
+            strategy_name=strategy.name,
             rebalance_key=str(args.rebalance_key),
         )
         if workflow is None:
             print("Signal rearm failed: workflow not found")
             return 1
         now_ns = time.time_ns()
-        strategy = load_dual_momentum_settings(PROJECT_ROOT / "config" / "strategies.yaml")
-        expires_at_ns = now_ns + strategy.signal_expiry_hours * 3_600_000_000_000
+        expires_at_ns = now_ns + strategy.settings.signal_expiry_hours * 3_600_000_000_000
         if not repository.rearm_terminal_signal(
             workflow.event_id,
             reason=str(args.reason),

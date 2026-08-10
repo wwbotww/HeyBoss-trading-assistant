@@ -1,4 +1,4 @@
-"""CLI 与 live node 共用的 M1 服务测试。"""
+"""CLI 与 live node 共用的历史同步服务测试。"""
 
 import asyncio
 from datetime import date

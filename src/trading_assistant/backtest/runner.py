@@ -36,7 +36,8 @@ from trading_assistant.data.corporate_actions import corporate_action_path
 from trading_assistant.data.service import select_instruments
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.storage.repository import TradingRepository
-from trading_assistant.strategies.config import load_dual_momentum_settings
+from trading_assistant.strategies.config import ConfiguredStrategy, load_active_strategy
+from trading_assistant.strategies.runtime import StrategyRuntimeContext, build_strategy_actor
 
 
 def _new_run_id(now: datetime) -> str:
@@ -93,10 +94,9 @@ def _build_run_config(
     snapshot_path: Path,
     corporate_action_directory: Path,
     settings: BacktestSettings,
-    strategy_path: Path,
+    strategy: ConfiguredStrategy,
     risk_path: Path,
 ) -> BacktestRunConfig:
-    strategy = load_dual_momentum_settings(strategy_path)
     risk = load_risk_limits(risk_path)
     signal_bar_types = tuple(
         f"{instrument_id}-{signal_bar_type_suffix}" for instrument_id in instrument_ids
@@ -108,22 +108,21 @@ def _build_run_config(
     all_bar_types = tuple(dict.fromkeys((*signal_bar_types, *execution_bar_types.values())))
     if any(not instrument_id.endswith(".US") for instrument_id in instrument_ids):
         raise ValueError("回测 canonical instrument_id 必须统一使用 US venue")
-    actor = ImportableActorConfig(
-        actor_path="trading_assistant.strategies.dual_momentum:DualMomentumActor",
-        config_path="trading_assistant.strategies.dual_momentum:DualMomentumActorConfig",
-        config={
-            "bar_types": list(signal_bar_types),
-            "instrument_ids": list(instrument_ids),
-            "lookback_months": strategy.lookback_months,
-            "top_n": strategy.top_n,
-            "fallback_instrument": strategy.fallback_instrument,
-            "signal_expiry_hours": strategy.signal_expiry_hours,
-            "database_url": database_url,
-            "signal_scope": f"backtest:{run_id}",
-            "publish_after_ns": int(
+    actor = build_strategy_actor(
+        strategy,
+        StrategyRuntimeContext(
+            instrument_ids=instrument_ids,
+            signal_bar_types=signal_bar_types,
+            database_url=database_url,
+            signal_scope=f"backtest:{run_id}",
+            stream_bars=True,
+            bootstrap_from_catalog=False,
+            bootstrap_bar_types=(),
+            catalog_lookback_days=0,
+            publish_after_ns=int(
                 datetime.combine(evaluation_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000
             ),
-        },
+        ),
     )
     execution = ImportableStrategyConfig(
         strategy_path="trading_assistant.execution.gateway:ExecutionGatewayStrategy",
@@ -222,7 +221,7 @@ def run_backtest(
     evaluation_start: date | None = None,
     end: date | None = None,
 ) -> BacktestReport:
-    """执行 M2 回测并写出审计记录与报告。"""
+    """执行活动策略回测并写出审计记录与报告。"""
     now = datetime.now(UTC)
     run_id = _new_run_id(now)
     configured = load_instruments(project_root / "config" / "instruments.yaml")
@@ -232,6 +231,7 @@ def run_backtest(
     settings = load_backtest_settings(
         project_root / "config" / "backtest.yaml", project_root=project_root
     )
+    strategy = load_active_strategy(project_root / "config" / "strategies.yaml")
     effective_data_start = data_start or settings.data_start
     effective_evaluation_start = evaluation_start or settings.evaluation_start
     effective_end = end if end is not None else settings.end
@@ -267,7 +267,7 @@ def run_backtest(
         snapshot_path=snapshot_path,
         corporate_action_directory=corporate_action_path(catalog_path),
         settings=settings,
-        strategy_path=project_root / "config" / "strategies.yaml",
+        strategy=strategy,
         risk_path=project_root / "config" / "risk.yaml",
     )
     node = BacktestNode([run_config])
@@ -302,7 +302,7 @@ def run_backtest(
         summary.update(
             {
                 "run_id": run_id,
-                "strategy": "dual_momentum",
+                "strategy": strategy.name,
                 "signal_bar_type_suffix": (data_config.historical_data.signal_bar_type_suffix),
                 "execution_bar_type_suffix": (
                     data_config.historical_data.execution_bar_type_suffix

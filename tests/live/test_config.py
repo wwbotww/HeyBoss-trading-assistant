@@ -1,4 +1,4 @@
-"""M3 live YAML 配置测试。"""
+"""paper YAML 配置测试。"""
 
 from pathlib import Path
 

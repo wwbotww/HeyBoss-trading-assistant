@@ -1,4 +1,4 @@
-"""M1 同步后装配并运行 NT 原生 TradingNode。"""
+"""同步历史数据后装配并运行 NT 原生 TradingNode。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,8 @@ from nautilus_trader.model.identifiers import InstrumentId
 from trading_assistant.data.config import load_data_config, load_instruments
 from trading_assistant.live.config import load_live_settings
 from trading_assistant.risk.config import load_risk_limits
-from trading_assistant.strategies.config import load_dual_momentum_settings
+from trading_assistant.strategies.config import load_active_strategy
+from trading_assistant.strategies.runtime import StrategyRuntimeContext, build_strategy_actor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,12 +44,12 @@ def build_trading_node_config(
 ) -> TradingNodeConfig:
     """从 YAML 与环境变量构建 paper-only NT TradingNode 配置。"""
     if environ.get("TRADING_MODE", "paper") != "paper":
-        raise ValueError("M3 only permits TRADING_MODE=paper")
+        raise ValueError("Only TRADING_MODE=paper is supported")
     tws_account = environ.get("TWS_ACCOUNT", "").strip()
     if not tws_account:
         raise ValueError("TWS_ACCOUNT is required")
     data = load_data_config(project_root / "config" / "data.yaml")
-    strategy = load_dual_momentum_settings(project_root / "config" / "strategies.yaml")
+    strategy = load_active_strategy(project_root / "config" / "strategies.yaml")
     risk = load_risk_limits(project_root / "config" / "risk.yaml")
     live = load_live_settings(project_root / "config" / "live.yaml")
     instruments = load_instruments(project_root / "config" / "instruments.yaml")
@@ -68,23 +69,19 @@ def build_trading_node_config(
         environ.get("CATALOG_PATH", str(project_root / "catalog" / "eodhd")),
     ).resolve()
     account_id = f"IB-{tws_account}"
-    signal_actor = ImportableActorConfig(
-        actor_path="trading_assistant.strategies.dual_momentum:DualMomentumActor",
-        config_path="trading_assistant.strategies.dual_momentum:DualMomentumActorConfig",
-        config={
-            "bar_types": list(signal_bar_types),
-            "instrument_ids": list(canonical_ids),
-            "lookback_months": strategy.lookback_months,
-            "top_n": strategy.top_n,
-            "fallback_instrument": strategy.fallback_instrument,
-            "signal_expiry_hours": strategy.signal_expiry_hours,
-            "database_url": database_url,
-            "signal_scope": f"paper:{tws_account}",
-            "stream_bars": False,
-            "bootstrap_from_catalog": True,
-            "catalog_lookback_days": live.catalog_lookback_days,
-            "bootstrap_bar_types": list(execution_bar_types.values()),
-        },
+    signal_actor = build_strategy_actor(
+        strategy,
+        StrategyRuntimeContext(
+            instrument_ids=canonical_ids,
+            signal_bar_types=signal_bar_types,
+            database_url=database_url,
+            signal_scope=f"paper:{tws_account}",
+            stream_bars=False,
+            bootstrap_from_catalog=True,
+            bootstrap_bar_types=tuple(execution_bar_types.values()),
+            catalog_lookback_days=live.catalog_lookback_days,
+            publish_after_ns=0,
+        ),
     )
     portfolio_actor = ImportableActorConfig(
         actor_path="trading_assistant.live.portfolio_snapshot:PortfolioSnapshotActor",
@@ -102,7 +99,7 @@ def build_trading_node_config(
         config={
             "instrument_routes": live_routes,
             "execution_bar_types": execution_bar_types,
-            "approval_mode": strategy.approval_mode,
+            "approval_mode": strategy.settings.approval_mode,
             "database_url": database_url,
             "strategy_capital_usd": risk.strategy_capital_usd,
             "max_order_notional_usd": risk.max_order_notional_usd,
@@ -133,7 +130,7 @@ def build_trading_node_config(
 
 
 def sync_live_catalog(*, project_root: Path, environ: Mapping[str, str]) -> None:
-    """在隔离进程中调用 M1 CLI, 避免重复初始化 NT 全局日志器。"""
+    """在隔离进程中调用历史同步 CLI, 避免重复初始化 NT 全局日志器。"""
     command = [sys.executable, str(project_root / "scripts" / "fetch_data.py")]
     try:
         subprocess.run(  # noqa: S603 -- 命令仅由解释器与项目内固定脚本组成。
@@ -151,7 +148,7 @@ def run_live(*, project_root: Path, environ: Mapping[str, str] | None = None) ->
     """同步 Catalog 后运行 TradingNode 并等待停止信号。"""
     values = dict(os.environ if environ is None else environ)
     if values.get("TRADING_MODE", "paper") != "paper":
-        raise ValueError("M3 only permits TRADING_MODE=paper")
+        raise ValueError("Only TRADING_MODE=paper is supported")
 
     # 历史客户端和 TradingNode 都会初始化 NT 的进程级日志器, 必须进程隔离。
     sync_live_catalog(project_root=project_root, environ=values)

@@ -60,11 +60,6 @@ class HistoricalDataConfig:
     request_timeout_seconds: int
     max_concurrent_requests: int
 
-    @property
-    def bar_type_suffix(self) -> str:
-        """兼容只消费执行价的现有调用方。"""
-        return self.execution_bar_type_suffix
-
 
 @dataclass(frozen=True)
 class QualityConfig:
@@ -76,7 +71,7 @@ class QualityConfig:
 
 @dataclass(frozen=True)
 class DataPipelineConfig:
-    """M1 数据管道完整配置。"""
+    """历史数据管道完整配置。"""
 
     historical_data: HistoricalDataConfig
     quality: QualityConfig

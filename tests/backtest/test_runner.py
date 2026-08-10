@@ -70,9 +70,9 @@ def _write_test_config(project_root: Path) -> None:
     _write_yaml(
         config / "strategies.yaml",
         {
+            "active_strategy": "dual_momentum",
             "strategies": {
                 "dual_momentum": {
-                    "enabled": True,
                     "approval_mode": "manual",
                     "signal_expiry_hours": 4,
                     "parameters": {
@@ -82,7 +82,7 @@ def _write_test_config(project_root: Path) -> None:
                         "fallback_instrument": "BIL.US",
                     },
                 }
-            }
+            },
         },
     )
     _write_yaml(

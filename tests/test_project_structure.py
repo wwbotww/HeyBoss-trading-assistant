@@ -1,4 +1,4 @@
-"""M0 项目骨架与硬性架构约束测试。"""
+"""项目骨架与硬性架构约束测试。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def test_package_version() -> None:
 
 
 def test_required_modules_exist() -> None:
-    """M0 应建立需求文档中约定的模块边界。"""
+    """项目应保持事实源约定的模块边界。"""
     required_modules = {
         "signals",
         "strategies",
@@ -76,7 +76,7 @@ def test_execution_gateway_is_the_only_submit_order_caller() -> None:
 
 
 def test_configuration_has_required_defaults() -> None:
-    """四类配置应包含后续里程碑依赖的关键字段。"""
+    """核心配置应包含运行依赖的关键字段。"""
     instruments = _load_yaml(PROJECT_ROOT / "config" / "instruments.yaml")
     data = _load_yaml(PROJECT_ROOT / "config" / "data.yaml")
     risk = _load_yaml(PROJECT_ROOT / "config" / "risk.yaml")
@@ -97,7 +97,9 @@ def test_configuration_has_required_defaults() -> None:
         "max_daily_new_positions",
         "max_gross_exposure",
     }
+    assert strategies["active_strategy"] == "dual_momentum"
     assert strategies["strategies"]["dual_momentum"]["approval_mode"] in {"manual", "auto"}
+    assert "enabled" not in strategies["strategies"]["dual_momentum"]
 
 
 def test_local_secrets_are_ignored() -> None:

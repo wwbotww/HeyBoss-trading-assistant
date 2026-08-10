@@ -1,1 +1,1 @@
-"""M3 live 装配测试。"""
+"""paper TradingNode 装配测试。"""
