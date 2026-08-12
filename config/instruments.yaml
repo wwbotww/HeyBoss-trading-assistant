@@ -10,6 +10,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 1993-01-29
   - symbol: QQQ
     instrument_id: QQQ.US
     live_instrument_id: QQQ.NASDAQ
@@ -20,6 +21,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 1999-03-10
   - symbol: TLT
     instrument_id: TLT.US
     live_instrument_id: TLT.NASDAQ
@@ -30,6 +32,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2002-07-30
   - symbol: GLD
     instrument_id: GLD.US
     live_instrument_id: GLD.ARCA
@@ -40,6 +43,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2004-11-18
   - symbol: IWM
     instrument_id: IWM.US
     live_instrument_id: IWM.ARCA
@@ -50,6 +54,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2000-05-26
   - symbol: EFA
     instrument_id: EFA.US
     live_instrument_id: EFA.ARCA
@@ -60,6 +65,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2001-08-27
   - symbol: EEM
     instrument_id: EEM.US
     live_instrument_id: EEM.ARCA
@@ -70,6 +76,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2003-04-14
   - symbol: VNQ
     instrument_id: VNQ.US
     live_instrument_id: VNQ.ARCA
@@ -80,6 +87,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2004-09-29
   - symbol: LQD
     instrument_id: LQD.US
     live_instrument_id: LQD.ARCA
@@ -90,6 +98,7 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2002-07-30
   - symbol: BIL
     instrument_id: BIL.US
     live_instrument_id: BIL.ARCA
@@ -100,3 +109,4 @@ instruments:
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
+    first_trading_date: 2007-05-30

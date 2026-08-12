@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 from nautilus_trader.model.data import Bar, BarType
@@ -52,7 +52,9 @@ class _FetchContext:
 
     spec: InstrumentSpec
     bar_types: tuple[BarType, ...]
+    coverage_start: datetime
     fetch_start: datetime
+    fetch_end: datetime
     has_start_coverage: bool
 
 
@@ -213,7 +215,6 @@ class HistoricalDataPipeline:
     async def _fetch(
         self,
         context: _FetchContext,
-        end: datetime,
         semaphore: asyncio.Semaphore,
     ) -> _FetchResult:
         """并发获取单个标的; Catalog 校验和写入仍由主协程串行执行。"""
@@ -223,9 +224,9 @@ class HistoricalDataPipeline:
                 actions = await self._request_actions_with_retry(
                     context.spec,
                     context.fetch_start,
-                    end,
+                    context.fetch_end,
                 )
-                windows = self._windows(context.fetch_start, end)
+                windows = self._windows(context.fetch_start, context.fetch_end)
                 for index, (window_start, window_end) in enumerate(windows):
                     fetched.extend(
                         await self._request_with_retry(
@@ -243,6 +244,41 @@ class HistoricalDataPipeline:
             except (ConnectionError, TimeoutError, RuntimeError, ValueError) as exc:
                 return _FetchResult(context, (), None, exc)
             return _FetchResult(context, tuple(fetched), actions, None)
+
+    @staticmethod
+    def _effective_window(
+        spec: InstrumentSpec,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[datetime, datetime] | None:
+        """把全局请求窗口收窄到标的显式生命周期。"""
+        interval = spec.effective_trading_interval(start.date(), end.date())
+        if interval is None:
+            return None
+        first, last = interval
+        if last is None:
+            raise AssertionError("bounded sync window must have an end date")
+        effective_start = (
+            start
+            if first == start.date()
+            else datetime.combine(first, time.min, tzinfo=start.tzinfo)
+        )
+        effective_end = (
+            end if last == end.date() else datetime.combine(last, time.max, tzinfo=end.tzinfo)
+        )
+        return effective_start, effective_end
+
+    @staticmethod
+    def _quality_as_of_ns(spec: InstrumentSpec, now_ns: int) -> int:
+        """退市标的在最后交易日之后不再被误报为陈旧。"""
+        if spec.last_trading_date is None:
+            return now_ns
+        lifecycle_end = datetime.combine(
+            spec.last_trading_date + timedelta(days=1),
+            time.min,
+            tzinfo=UTC,
+        )
+        return min(now_ns, int(lifecycle_end.timestamp() * 1_000_000_000))
 
     async def sync(
         self,
@@ -284,13 +320,18 @@ class HistoricalDataPipeline:
                     continue
 
                 processed += 1
+                effective_window = self._effective_window(spec, start, end)
+                if effective_window is None:
+                    continue
+                coverage_start, fetch_end = effective_window
                 bar_types = self._bar_types(spec.instrument_id)
                 execution_bar_type = self._bar_type(spec.instrument_id)
                 earliest_ns = self._catalog.earliest_bar_timestamp(execution_bar_type)
                 latest_ns = self._catalog.latest_bar_timestamp(execution_bar_type)
-                fetch_start = start
+                fetch_start = coverage_start
                 start_coverage_limit_ns = int(
-                    (start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp() * 1_000_000_000,
+                    (coverage_start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp()
+                    * 1_000_000_000,
                 )
                 has_start_coverage = (
                     earliest_ns is not None and earliest_ns <= start_coverage_limit_ns
@@ -304,20 +345,25 @@ class HistoricalDataPipeline:
                     overlap_start = latest - timedelta(
                         days=self._config.historical_data.overlap_days,
                     )
-                    fetch_start = max(start, overlap_start.replace(tzinfo=None))
+                    fetch_start = max(
+                        coverage_start,
+                        overlap_start.replace(tzinfo=coverage_start.tzinfo),
+                    )
 
                 contexts.append(
                     _FetchContext(
                         spec=spec,
                         bar_types=bar_types,
+                        coverage_start=coverage_start,
                         fetch_start=fetch_start,
+                        fetch_end=fetch_end,
                         has_start_coverage=has_start_coverage,
                     )
                 )
 
             semaphore = asyncio.Semaphore(self._config.historical_data.max_concurrent_requests)
             results = await asyncio.gather(
-                *(self._fetch(context, end, semaphore) for context in contexts)
+                *(self._fetch(context, semaphore) for context in contexts)
             )
             for result in results:
                 context = result.context
@@ -347,7 +393,8 @@ class HistoricalDataPipeline:
                 bars_fetched += len(fetched)
 
                 coverage_limit_ns = int(
-                    (start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp() * 1_000_000_000,
+                    (context.coverage_start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp()
+                    * 1_000_000_000,
                 )
                 must_verify_start = (
                     self._config.historical_data.refresh_mode == "replace"
@@ -400,7 +447,7 @@ class HistoricalDataPipeline:
                             typed_bars,
                             bar_type,
                             self._config.quality,
-                            as_of_ns=now_ns,
+                            as_of_ns=self._quality_as_of_ns(spec, now_ns),
                         )
                     )
                 reports.extend(instrument_reports)
@@ -446,7 +493,7 @@ class HistoricalDataPipeline:
                         bars,
                         bar_type,
                         self._config.quality,
-                        as_of_ns=now_ns,
+                        as_of_ns=self._quality_as_of_ns(spec, now_ns),
                     ),
                 )
 

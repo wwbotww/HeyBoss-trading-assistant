@@ -35,6 +35,7 @@ class FakeSource:
         self.connect_count = 0
         self.close_count = 0
         self.requests: list[tuple[datetime, datetime]] = []
+        self.action_requests: list[tuple[datetime, datetime]] = []
 
     async def connect(self) -> None:
         self.connect_count += 1
@@ -53,7 +54,7 @@ class FakeSource:
         start: datetime,
         end: datetime,
     ) -> CorporateActions:
-        del start, end
+        self.action_requests.append((start, end))
         return CorporateActions(spec.instrument_id, (), ())
 
     async def request_daily_bars(
@@ -315,3 +316,61 @@ def test_pipeline_requires_source_and_handles_empty_window(tmp_path: Path) -> No
     )
     assert result.has_errors
     assert source.requests == []
+
+
+def test_pipeline_uses_explicit_instrument_lifecycle(tmp_path: Path) -> None:
+    """上市日晚于全局起点时应从上市日校验覆盖且不误报缺失。"""
+    first_session = date(2026, 7, 13)
+    bars = [
+        make_bar(first_session, instrument_id="SPY.US"),
+        make_bar(date(2026, 7, 14), instrument_id="SPY.US", close=102),
+        make_bar(
+            first_session,
+            instrument_id="SPY.US",
+            bar_type_suffix="1-DAY-LAST-INTERNAL",
+        ),
+        make_bar(
+            date(2026, 7, 14),
+            instrument_id="SPY.US",
+            bar_type_suffix="1-DAY-LAST-INTERNAL",
+            close=102,
+        ),
+    ]
+    source = FakeSource(bars)
+    pipeline, _ = _pipeline(tmp_path, source, config=_replace_config())
+    spec = replace(_spec(), first_trading_date=first_session)
+
+    result = asyncio.run(
+        pipeline.sync([spec], start=datetime(2020, 1, 1), end=datetime(2026, 7, 15))
+    )
+
+    assert not result.has_errors
+    assert source.requests[0][0].date() == first_session
+    assert source.action_requests[0][0].date() == first_session
+
+
+def test_pipeline_skips_lifecycle_without_window_and_caps_delisted_staleness(
+    tmp_path: Path,
+) -> None:
+    """生命周期无交集时不请求; 退市后离线检查不持续报告陈旧。"""
+    source = FakeSource([])
+    pipeline, catalog = _pipeline(tmp_path, source)
+    future = replace(_spec(), first_trading_date=date(2027, 1, 1))
+    result = asyncio.run(
+        pipeline.sync(
+            [future],
+            start=datetime(2026, 1, 1),
+            end=datetime(2026, 12, 31),
+        )
+    )
+    assert not result.has_errors
+    assert source.requests == []
+    assert source.action_requests == []
+
+    last_session = date(2026, 7, 10)
+    bar = make_bar(last_session, instrument_id="SPY.US")
+    assert catalog.append_new_bars([bar]) == 1
+    delisted = replace(_spec(), last_trading_date=last_session)
+    offline = pipeline.validate_catalog([delisted])
+    issues = [issue.code for report in offline.instrument_reports for issue in report.issues]
+    assert "stale_data" not in issues

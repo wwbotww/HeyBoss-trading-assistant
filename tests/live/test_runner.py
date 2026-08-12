@@ -1,17 +1,57 @@
 """TradingNode paper-only 离线装配测试。"""
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import yaml
+from nautilus_trader.model.data import CustomData
 from nautilus_trader.model.identifiers import AccountId
 
+from trading_assistant.data.catalog import CatalogRepository
+from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.live import runner
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _patchtst_project(
+    tmp_path: Path,
+    *,
+    source_kind: str | None,
+    batch_size: int = 1,
+) -> Path:
+    """构造只用于 TradingNode 装配的因子策略项目配置。"""
+    shutil.copytree(PROJECT_ROOT / "config", tmp_path / "config")
+    strategy_path = tmp_path / "config" / "strategies.yaml"
+    values = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
+    assert isinstance(values, dict)
+    values["active_strategy"] = "patchtst_e3"
+    strategy_path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+    catalog_path = tmp_path / "catalog"
+    if source_kind is not None:
+        score = FactorScoreData(
+            canonical_id="SPY.US",
+            security_id="eodhd:isin:SPY",
+            asof_date="2025-01-02",
+            score=1.0,
+            eligible=True,
+            batch_id="delivery:2025-01-02",
+            batch_size=batch_size,
+            delivery_id="d" * 64,
+            model_release_id="r" * 64,
+            source_kind=source_kind,
+            ts_event=1,
+            ts_init=1,
+        )
+        CatalogRepository(catalog_path).catalog.write_data([CustomData(FACTOR_DATA_TYPE, score)])
+    return catalog_path
 
 
 def test_builds_paper_trading_node_from_native_components() -> None:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = PROJECT_ROOT
     config = runner.build_trading_node_config(
         project_root=project_root,
         environ={
@@ -33,6 +73,54 @@ def test_builds_paper_trading_node_from_native_components() -> None:
     assert config.actors[0].config["bootstrap_bar_types"][0].endswith("1-DAY-LAST-EXTERNAL")
     assert config.exec_clients["IB"].routing.default is True
     assert str(AccountId(config.strategies[0].config["account_id"])) == "IB-DU123"
+
+
+def test_builds_patchtst_actor_only_from_complete_production_factors(
+    tmp_path: Path,
+) -> None:
+    catalog_path = _patchtst_project(tmp_path, source_kind="signal_inference")
+    config = runner.build_trading_node_config(
+        project_root=tmp_path,
+        environ={
+            "TRADING_MODE": "paper",
+            "TWS_ACCOUNT": "DU123",
+            "CATALOG_PATH": str(catalog_path),
+        },
+    )
+    assert config.actors[0].actor_path.endswith(":PatchTSTFactorActor")
+    assert config.actors[0].config["bootstrap_from_catalog"] is True
+    assert config.actors[0].config["stream_data"] is False
+    assert config.actors[0].config["allow_evaluation_predictions"] is False
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "batch_size", "message"),
+    [
+        (None, 1, "no FactorScoreData"),
+        ("evaluation_predictions", 1, "requires signal_inference"),
+        ("signal_inference", 2, "incomplete"),
+    ],
+)
+def test_patchtst_paper_preflight_rejects_unsafe_factor_catalog(
+    tmp_path: Path,
+    source_kind: str | None,
+    batch_size: int,
+    message: str,
+) -> None:
+    catalog_path = _patchtst_project(
+        tmp_path,
+        source_kind=source_kind,
+        batch_size=batch_size,
+    )
+    with pytest.raises(ValueError, match=message):
+        runner.build_trading_node_config(
+            project_root=tmp_path,
+            environ={
+                "TRADING_MODE": "paper",
+                "TWS_ACCOUNT": "DU123",
+                "CATALOG_PATH": str(catalog_path),
+            },
+        )
 
 
 @pytest.mark.parametrize(

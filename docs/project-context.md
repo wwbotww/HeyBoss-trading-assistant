@@ -12,7 +12,7 @@
 - 交易频率：日线和月度调仓，不做日内高频；
 - 标的：`config/instruments.yaml` 中显式声明的美元计价美股/ETF；
 - 历史数据：EODHD EOD API，IBKR 历史适配器作为可切换备用实现；
-- 当前策略：双动量 ETF 轮动；
+- 可用策略：双动量 ETF 轮动、PatchTST E3 因子策略；默认活动策略为双动量；
 - 策略运行方式：每次 backtest/live 只允许一个活动策略；
 - 审批方式：Telegram manual 或配置为 auto；
 - 运行形态：本地 Python 或 Docker Compose；
@@ -27,6 +27,7 @@
 | 语言与依赖 | Python 3.12+、uv |
 | 交易引擎 | NautilusTrader 1.230.0 与 IB 适配器 |
 | 历史数据 | EODHD EOD API；IBKR 备用适配器 |
+| 跨项目因子 | FacDigger FactorBatch；导入后为 NT `FactorScoreData` |
 | 行情存储 | NT ParquetDataCatalog |
 | 业务存储 | SQLAlchemy 2.x + SQLite；live/backtest 数据库分离 |
 | 通知与审批 | python-telegram-bot |
@@ -41,7 +42,7 @@
 
 1. `signals/` 只能包含无 IO、无全局状态、无 NautilusTrader 依赖的纯函数。
 2. `strategies.yaml` 通过 `active_strategy` 为一次运行选择唯一决策策略。backtest 与 live 必须使用同一个策略装配函数和同一个 Actor 实现。
-3. 策略 Actor 只订阅 NT 原生数据、调用纯函数并发布不可变 `TradeSignalEvent`；不得读取执行账户、审批或下单。
+3. 策略 Actor 只接收经 NT DataEngine 投递的 Bar 或已注册 CustomData、调用纯函数并发布不可变 `TradeSignalEvent`；不得读取外部文件、执行账户、审批或下单。
 4. `ExecutionGatewayStrategy` 是唯一允许调用 NT `order_factory` 和 `submit_order` 的组件。
 5. 唯一执行链路为：`TradeSignalEvent → ExecutionGatewayStrategy → 应用风控 → manual/auto 审批 → NT RiskEngine → NT ExecutionEngine → 环境执行客户端`。
 6. 不在执行网关之后聚合或混合多个策略。需要切换策略时只能修改 `active_strategy` 并重新启动一次独立运行。
@@ -61,6 +62,10 @@
 - splits/dividends 保存到固定 JSON sidecar，不维护 manifest、版本号或内容哈希；
 - EODHD 完整响应通过质量校验后替换规范序列；Catalog 与 sidecar 写入必须串行；
 - IBKR 与 EODHD Catalog 不得混写。
+- 标的的 `first_trading_date` 和可选 `last_trading_date` 是同步、质量检查与回测预检共同使用的显式生命周期边界；不得以“缺失数据”代表尚未上市或已经退市；
+- FacDigger 与 HeyBoss 之间只有 `factors.parquet + manifest.json` FactorBatch 契约；HeyBoss 不加载 checkpoint、不复制特征处理，也不直接读取研究 predictions；
+- FactorBatch 必须先完整校验和显式映射，再转换为已注册的 NT `FactorScoreData` 写入同一 ParquetDataCatalog；Actor 不得直接读交付文件；
+- `evaluation_predictions` 只能在显式开启的隔离回测中使用，paper 只接受完整的 `signal_inference` 横截面。
 
 ## 回测和 paper 约束
 

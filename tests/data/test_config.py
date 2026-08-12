@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ def test_load_project_configuration() -> None:
     assert instruments[0].instrument_id == "SPY.US"
     assert instruments[0].resolved_live_instrument_id == "SPY.ARCA"
     assert instruments[0].data_symbol == "SPY.US"
+    assert instruments[0].first_trading_date == date(1993, 1, 29)
+    assert instruments[0].last_trading_date is None
     assert len(instruments) == 10
     assert config.historical_data.provider == "eodhd"
     assert config.historical_data.price_basis == "total_return_adjusted"
@@ -199,4 +202,70 @@ def test_invalid_instrument_config_is_rejected(
     path = tmp_path / "instruments.yaml"
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError, match=message):
+        load_instruments(path)
+
+
+def test_instrument_lifecycle_dates_are_validated(tmp_path: Path) -> None:
+    """生命周期必须是有效 ISO 日期且起点不得晚于终点。"""
+    base = """
+instruments:
+  - symbol: TEST
+    instrument_id: TEST.US
+    data_symbol: TEST.US
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
+    first_trading_date: {first}
+    last_trading_date: {last}
+"""
+    path = tmp_path / "instruments.yaml"
+    path.write_text(base.format(first="2025-01-02", last="2025-12-31"), encoding="utf-8")
+    instrument = load_instruments(path)[0]
+    assert instrument.effective_trading_interval(date(2020, 1, 1), date(2025, 6, 30)) == (
+        date(2025, 1, 2),
+        date(2025, 6, 30),
+    )
+    assert instrument.effective_trading_interval(date(2026, 1, 1), date(2026, 12, 31)) is None
+
+    path.write_text(base.format(first="2025-02-01", last="2025-01-01"), encoding="utf-8")
+    with pytest.raises(ValueError, match="first_trading_date"):
+        load_instruments(path)
+
+    path.write_text(base.format(first="not-a-date", last="null"), encoding="utf-8")
+    with pytest.raises(ValueError, match="字段类型无效"):
+        load_instruments(path)
+
+
+def test_factor_security_id_must_be_nonempty_and_unique(tmp_path: Path) -> None:
+    base = """
+instruments:
+  - &item
+    symbol: AAPL
+    instrument_id: AAPL.US
+    data_symbol: AAPL.US
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
+    factor_security_id: {factor_id}
+{second}
+"""
+    path = tmp_path / "instruments.yaml"
+    path.write_text(base.format(factor_id='""', second=""), encoding="utf-8")
+    with pytest.raises(ValueError, match="factor_security_id"):
+        load_instruments(path)
+
+    second = """
+  - <<: *item
+    symbol: MSFT
+    instrument_id: MSFT.US
+    data_symbol: MSFT.US
+"""
+    path.write_text(base.format(factor_id="eodhd:isin:duplicate", second=second), encoding="utf-8")
+    with pytest.raises(ValueError, match="factor_security_id 不得重复"):
         load_instruments(path)

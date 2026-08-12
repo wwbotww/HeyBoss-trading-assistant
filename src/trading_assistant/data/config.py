@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -23,6 +24,9 @@ class InstrumentSpec:
     price_increment: str
     lot_size: int
     live_instrument_id: str | None = None
+    first_trading_date: date | None = None
+    last_trading_date: date | None = None
+    factor_security_id: str | None = None
 
     @property
     def canonical_id(self) -> str:
@@ -33,6 +37,24 @@ class InstrumentSpec:
     def resolved_live_instrument_id(self) -> str:
         """返回 IBKR 执行标识; 旧配置默认沿用规范标识。"""
         return self.live_instrument_id or self.instrument_id
+
+    def effective_trading_interval(
+        self,
+        start: date,
+        end: date | None,
+    ) -> tuple[date, date | None] | None:
+        """返回请求区间与显式交易生命周期的交集。"""
+        effective_start = max(start, self.first_trading_date or start)
+        effective_end = end
+        if self.last_trading_date is not None:
+            effective_end = (
+                self.last_trading_date
+                if effective_end is None
+                else min(effective_end, self.last_trading_date)
+            )
+        if effective_end is not None and effective_start > effective_end:
+            return None
+        return effective_start, effective_end
 
 
 HistoricalProvider = Literal["eodhd", "ibkr"]
@@ -93,6 +115,17 @@ def _required_mapping(parent: dict[str, Any], key: str, path: Path) -> dict[str,
     return value
 
 
+def _optional_date(value: object) -> date | None:
+    """读取 YAML 原生日期或 ISO 日期字符串。"""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    raise TypeError("expected ISO date")
+
+
 def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
     """从 YAML 加载并校验标的清单。"""
     root = _load_mapping(path)
@@ -120,6 +153,13 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
                     if value.get("live_instrument_id") is None
                     else str(value["live_instrument_id"])
                 ),
+                first_trading_date=_optional_date(value.get("first_trading_date")),
+                last_trading_date=_optional_date(value.get("last_trading_date")),
+                factor_security_id=(
+                    None
+                    if value.get("factor_security_id") is None
+                    else str(value["factor_security_id"])
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, KeyError):
@@ -141,6 +181,16 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
             raise ValueError(f"instruments[{index}].price_increment 必须是正数: {path}")
         if instrument.lot_size < 1:
             raise ValueError(f"instruments[{index}].lot_size 必须大于等于 1: {path}")
+        if (
+            instrument.first_trading_date is not None
+            and instrument.last_trading_date is not None
+            and instrument.first_trading_date > instrument.last_trading_date
+        ):
+            raise ValueError(
+                f"instruments[{index}].first_trading_date 不得晚于 last_trading_date: {path}"
+            )
+        if instrument.factor_security_id is not None and not instrument.factor_security_id.strip():
+            raise ValueError(f"instruments[{index}].factor_security_id 不得为空: {path}")
 
     instrument_ids = [instrument.instrument_id for instrument in instruments]
     if len(instrument_ids) != len(set(instrument_ids)):
@@ -148,6 +198,13 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
     live_instrument_ids = [instrument.resolved_live_instrument_id for instrument in instruments]
     if len(live_instrument_ids) != len(set(live_instrument_ids)):
         raise ValueError(f"live_instrument_id 不得重复: {path}")
+    factor_security_ids = [
+        instrument.factor_security_id
+        for instrument in instruments
+        if instrument.factor_security_id is not None
+    ]
+    if len(factor_security_ids) != len(set(factor_security_ids)):
+        raise ValueError(f"factor_security_id 不得重复: {path}")
 
     return tuple(instruments)
 

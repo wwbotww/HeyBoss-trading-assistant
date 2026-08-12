@@ -31,8 +31,9 @@ from trading_assistant.backtest.reporting import (
     write_backtest_report,
 )
 from trading_assistant.data.catalog import CatalogRepository
-from trading_assistant.data.config import load_data_config, load_instruments
+from trading_assistant.data.config import InstrumentSpec, load_data_config, load_instruments
 from trading_assistant.data.corporate_actions import corporate_action_path
+from trading_assistant.data.factor import FACTOR_DATA_METADATA, FactorScoreData
 from trading_assistant.data.service import select_instruments
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.storage.repository import TradingRepository
@@ -47,13 +48,14 @@ def _new_run_id(now: datetime) -> str:
 def _validate_backtest_catalog(
     *,
     catalog_path: Path,
-    instrument_ids: tuple[str, ...],
+    instruments: tuple[InstrumentSpec, ...],
     bar_type_suffixes: tuple[str, ...],
     data_start: date,
     end: date | None,
 ) -> None:
     """在启动 NT 引擎前验证标的定义和双价格序列均存在。"""
     catalog = CatalogRepository(catalog_path)
+    instrument_ids = tuple(spec.canonical_id for spec in instruments)
     resolved = {
         instrument.id.value
         for instrument in catalog.catalog.instruments(instrument_ids=list(instrument_ids))
@@ -61,19 +63,25 @@ def _validate_backtest_catalog(
     missing_instruments = sorted(set(instrument_ids) - resolved)
     if missing_instruments:
         raise ValueError(f"Catalog 缺少标的定义: {', '.join(missing_instruments)}")
-    start_ns = int(datetime.combine(data_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000)
-    end_ns = (
-        None
-        if end is None
-        else int(
-            datetime.combine(end + timedelta(days=1), time.min, tzinfo=UTC).timestamp()
-            * 1_000_000_000
-        )
-    )
     missing_bars: list[str] = []
-    for instrument_id in instrument_ids:
+    for spec in instruments:
+        interval = spec.effective_trading_interval(data_start, end)
+        if interval is None:
+            continue
+        interval_start, interval_end = interval
+        start_ns = int(
+            datetime.combine(interval_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000
+        )
+        end_ns = (
+            None
+            if interval_end is None
+            else int(
+                datetime.combine(interval_end + timedelta(days=1), time.min, tzinfo=UTC).timestamp()
+                * 1_000_000_000
+            )
+        )
         for suffix in bar_type_suffixes:
-            bar_type = BarType.from_str(f"{instrument_id}-{suffix}")
+            bar_type = BarType.from_str(f"{spec.canonical_id}-{suffix}")
             if not catalog.read_bars(bar_type, start_ns=start_ns, end_ns=end_ns):
                 missing_bars.append(str(bar_type))
     if missing_bars:
@@ -122,6 +130,7 @@ def _build_run_config(
             publish_after_ns=int(
                 datetime.combine(evaluation_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000
             ),
+            allow_evaluation_predictions=True,
         ),
     )
     execution = ImportableStrategyConfig(
@@ -188,7 +197,7 @@ def _build_run_config(
             ],
         )
     ]
-    data = BacktestDataConfig(
+    bar_data = BacktestDataConfig(
         catalog_path=str(catalog_path),
         data_cls="nautilus_trader.model.data:Bar",
         instrument_ids=list(instrument_ids),
@@ -197,6 +206,19 @@ def _build_run_config(
         end_time=None if end is None else (end + timedelta(days=1)).isoformat(),
         optimize_file_loading=True,
     )
+    data = [bar_data]
+    if strategy.name == "patchtst_e3":
+        data.append(
+            BacktestDataConfig(
+                catalog_path=str(catalog_path),
+                data_cls="trading_assistant.data.factor:FactorScoreData",
+                client_id="FACTOR",
+                metadata=FACTOR_DATA_METADATA,
+                start_time=data_start.isoformat(),
+                end_time=None if end is None else (end + timedelta(days=1)).isoformat(),
+                optimize_file_loading=True,
+            )
+        )
     engine = BacktestEngineConfig(
         actors=[actor],
         strategies=[execution],
@@ -204,7 +226,7 @@ def _build_run_config(
     )
     return BacktestRunConfig(
         venues=venue_configs,
-        data=[data],
+        data=data,
         engine=engine,
         raise_exception=True,
         dispose_on_completion=False,
@@ -241,7 +263,7 @@ def run_backtest(
         raise ValueError("end 不得早于 evaluation_start")
     _validate_backtest_catalog(
         catalog_path=catalog_path,
-        instrument_ids=instrument_ids,
+        instruments=instruments,
         bar_type_suffixes=(
             data_config.historical_data.signal_bar_type_suffix,
             data_config.historical_data.execution_bar_type_suffix,
@@ -249,6 +271,17 @@ def run_backtest(
         data_start=effective_data_start,
         end=effective_end,
     )
+    if strategy.name == "patchtst_e3":
+        factor_rows = CatalogRepository(catalog_path).catalog.query(
+            FactorScoreData,
+            start=effective_data_start.isoformat(),
+            end=(
+                None if effective_end is None else (effective_end + timedelta(days=1)).isoformat()
+            ),
+            metadata=FACTOR_DATA_METADATA,
+        )
+        if not factor_rows:
+            raise ValueError("Catalog 在回测区间缺少 FactorScoreData")
     repository = TradingRepository(database_url)
     repository.create_schema()
     repository.start_backtest_run(run_id, now)

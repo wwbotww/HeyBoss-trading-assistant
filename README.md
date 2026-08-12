@@ -9,10 +9,12 @@
 - 从 EODHD 同步显式标的清单的历史日线、拆股和分红；
 - 将供应商数据转换为 NautilusTrader 原生 Instrument、Bar 和 ParquetDataCatalog；
 - 使用同一个活动策略 Actor、交易事件、执行网关和风控运行回测与 paper；
-- 当前提供双动量 ETF 轮动策略，一次运行只启用一个策略；
+- 提供双动量 ETF 轮动和 PatchTST E3 因子策略，一次运行只启用一个策略；
 - 支持 Telegram 人工确认或配置为自动审批；
 - 记录信号、审批、订单、成交、账户和持仓审计；
 - 生成回测报告，并通过只读 Streamlit 看板浏览运行状态。
+
+默认活动策略仍是双动量。PatchTST 链路已经可回测和装配 paper，但项目不内置模型、特征或生产 FactorBatch；正式启用前必须由 FacDigger 发布合规批次并完成标的身份映射。
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、市场新闻或大语言模型分析。
 
@@ -20,6 +22,7 @@
 
 - [项目事实与硬性约束](docs/project-context.md)
 - [技术设计参考](docs/technical-reference.md)
+- [FacDigger 因子接入与改造说明](docs/factor-integration.md)
 - [回测研究 notebook](notebooks/README.md)
 
 ## 环境要求
@@ -136,6 +139,21 @@ uv run --frozen --env-file .env python scripts/fetch_data.py --validate-only
 
 命令输出中的 `errors` 必须为 `0`。数据套餐决定实际可返回的历史范围和调用配额。
 
+`config/instruments.yaml` 的 `first_trading_date` 和可选 `last_trading_date` 限定每个标的的有效历史区间。同步和回测预检不会再要求标的上市前或退市后的数据。
+
+## 导入 PatchTST 因子
+
+先按 [FacDigger 因子接入说明](docs/factor-integration.md) 生成正式 FactorBatch，并在 `config/instruments.yaml` 为参与因子交易的标的填写稳定的 `factor_security_id`。不要按 ticker 自动猜测身份。
+
+相同日期的 INTERNAL Bar 必须先存在于 Catalog，然后导入批次：
+
+```bash
+uv run --frozen --env-file .env python scripts/import_factor_bundle.py \
+  /path/to/<delivery_id>
+```
+
+导入器会校验 schema、完整性哈希、覆盖率、时间语义和身份映射，再写成 NT `FactorScoreData`。同一内容重复导入是 no-op，冲突数据不会覆盖已有 Catalog。根目录 `artifacts2/` 是研究中间结果并被 Git 忽略，不能直接作为交易输入。
+
 ## 运行回测
 
 使用配置中的活动策略和完整标的清单：
@@ -167,6 +185,8 @@ uv run --frozen --env-file .env python scripts/run_backtest.py \
 
 回测不需要连接 IB Gateway，审批固定为 auto。报告只用于验证与研究，不构成收益承诺或投资建议。
 
+要回测 PatchTST，把 `config/strategies.yaml` 的 `active_strategy` 改为 `patchtst_e3`。正式批次使用 `source.kind=signal_inference`；仅在隔离研究回放中，才可同时把 `allow_evaluation_predictions` 改为 `true`。runner 会从同一 NT Catalog 加载因子，之后仍沿用统一的 Actor、信号、风控、执行和报告链路。
+
 ## 运行 Telegram 审批与 IBKR paper
 
 先启动 Gateway 和 Bot：
@@ -189,6 +209,8 @@ docker compose logs -f trading-node approval-bot
 ```
 
 交易节点会先更新 Catalog，再从最新完整月份形成信号。manual 模式下，未确认前不会提交订单；确认后执行网关会重新读取账户和持仓并进行第二次风控。
+
+如果活动策略是 `patchtst_e3`，当前启动命令不会调用 FacDigger，也不会自动导入因子。必须先按“同步行情 → FacDigger 推理 → 导入生产 FactorBatch”的顺序完成准备，再启动或重启节点。paper 会拒绝评估 predictions 和不完整的生产批次。
 
 如果工作流停留在 `PROCESSING`，系统不会自动重试。必须先核对 IBKR paper 和 SQLite 审计，排除已经提交订单的可能，再人工处理。
 
@@ -224,6 +246,7 @@ docker compose down
 - **无法提交订单**：确认是 paper 账户、`READ_ONLY_API=no`，且应用风控与账户产品权限均允许该订单。
 - **Dashboard 显示空状态**：先确认 live 数据库、Catalog 或回测报告已经生成。
 - **每月没有自动产生新信号**：当前没有常驻月末调度，需要显式重新启动 `trading-node`。
+- **因子策略没有新信号**：确认最新生产 FactorBatch 已在启动前导入，且相同 as-of 日期的 INTERNAL Bar 已存在；当前没有跨项目自动调度。
 
 ## 开发检查
 

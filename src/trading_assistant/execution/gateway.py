@@ -253,10 +253,22 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
 
     def _build_plan(self, event: TradeSignalEvent) -> tuple[tuple[_PlannedOrder, ...], str | None]:
         requested = dict(event.target_weights)
+        unknown_targets = sorted(set(requested) - self._settings.instrument_routes.keys())
+        if unknown_targets:
+            return (), f"unknown target instruments: {', '.join(unknown_targets)}"
         target_weights = apply_weight_limits(requested, self._limits)
+        current_quantities = {
+            canonical_id: self._current_quantity(InstrumentId.from_str(execution_id))
+            for canonical_id, execution_id in self._settings.instrument_routes.items()
+        }
+        required_ids = {
+            canonical_id for canonical_id, weight in target_weights.items() if weight > 0
+        } | {canonical_id for canonical_id, quantity in current_quantities.items() if quantity != 0}
+        if not required_ids:
+            return (), None
+
         prices: dict[str, float] = {}
-        current_quantities: dict[str, int] = {}
-        for canonical_id, execution_id in self._settings.instrument_routes.items():
+        for canonical_id in sorted(required_ids):
             bar_type = self._settings.execution_bar_types.get(canonical_id)
             if bar_type is None:
                 return (), f"missing execution BarType for {canonical_id}"
@@ -264,11 +276,8 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             if bar is None:
                 return (), f"missing price for {canonical_id}"
             prices[canonical_id] = bar.close.as_double()
-            current_quantities[canonical_id] = self._current_quantity(
-                InstrumentId.from_str(execution_id)
-            )
 
-        equity = self._portfolio_equity(prices)
+        equity = self._portfolio_equity(prices, current_quantities)
         if equity <= 0:
             return (), "non-positive portfolio equity"
 
@@ -281,7 +290,8 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             if weight > 0 and current_quantities.get(instrument_id, 0) == 0
         )
         planned: list[_PlannedOrder] = []
-        for canonical_id, execution_id in self._settings.instrument_routes.items():
+        for canonical_id in sorted(required_ids):
+            execution_id = self._settings.instrument_routes[canonical_id]
             price = prices[canonical_id]
             weight = target_weights.get(canonical_id, 0.0)
             target_quantity = floor(equity * weight / price)
@@ -312,15 +322,20 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         planned.sort(key=lambda item: (item.side != OrderSide.SELL, item.canonical_id))
         return tuple(planned), None
 
-    def _portfolio_equity(self, prices: dict[str, float]) -> float:
+    def _portfolio_equity(
+        self,
+        prices: dict[str, float],
+        current_quantities: dict[str, int],
+    ) -> float:
         currency = Currency.from_str("USD")
         account = self.portfolio.account(account_id=AccountId(self._settings.account_id))
         if account is None:
             return 0.0
         cash = account.balance_total(currency).as_double()
         positions_value = sum(
-            self._current_quantity(InstrumentId.from_str(execution_id)) * prices[canonical_id]
-            for canonical_id, execution_id in self._settings.instrument_routes.items()
+            quantity * prices[canonical_id]
+            for canonical_id, quantity in current_quantities.items()
+            if quantity != 0
         )
         account_equity = float(cash + positions_value)
         return effective_strategy_equity(

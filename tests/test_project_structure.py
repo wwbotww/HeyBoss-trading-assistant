@@ -107,3 +107,4 @@ def test_local_secrets_are_ignored() -> None:
     ignore_rules = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".env" in ignore_rules
     assert "!.env.example" in ignore_rules
+    assert "/artifacts2/" in ignore_rules

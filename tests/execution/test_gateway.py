@@ -109,8 +109,13 @@ class _PlanningGateway(ExecutionGatewayStrategy):
     def cache(self) -> _PlanningCache:
         return self.test_cache
 
-    def _portfolio_equity(self, prices: dict[str, float]) -> float:
+    def _portfolio_equity(
+        self,
+        prices: dict[str, float],
+        current_quantities: dict[str, int],
+    ) -> float:
         assert prices
+        assert set(current_quantities) == set(self._settings.instrument_routes)
         return self.equity
 
     def _current_quantity(self, instrument_id: InstrumentId) -> int:
@@ -120,13 +125,15 @@ class _PlanningGateway(ExecutionGatewayStrategy):
 def _planning_config(
     tmp_path: Path,
     *,
+    instrument_routes: dict[str, str] | None = None,
     execution_bar_types: dict[str, str] | None = None,
     max_order_notional_usd: float = 100_000,
 ) -> ExecutionGatewayConfig:
+    routes = instrument_routes or {"SPY.US": "SPY.ARCA"}
     return ExecutionGatewayConfig(
-        instrument_routes={"SPY.US": "SPY.ARCA"},
+        instrument_routes=routes,
         execution_bar_types=(
-            {"SPY.US": "SPY.US-1-DAY-LAST-EXTERNAL"}
+            {canonical_id: f"{canonical_id}-1-DAY-LAST-EXTERNAL" for canonical_id in routes}
             if execution_bar_types is None
             else execution_bar_types
         ),
@@ -141,11 +148,13 @@ def _planning_config(
     )
 
 
-def _planning_event() -> TradeSignalEvent:
+def _planning_event(
+    target_weights: tuple[tuple[str, float], ...] = (("SPY.US", 0.25),),
+) -> TradeSignalEvent:
     now_ns = time.time_ns()
     return TradeSignalEvent(
         strategy_name="dual_momentum",
-        target_weights=(("SPY.US", 0.25),),
+        target_weights=target_weights,
         rebalance_key="2025-01",
         reason="momentum",
         expires_at_ns=now_ns + 3_600_000_000_000,
@@ -357,6 +366,53 @@ def test_plan_fails_closed_for_missing_inputs_and_risk(tmp_path: Path) -> None:
     assert not plan[0].opens_position
 
 
+def test_plan_only_requires_prices_for_targets_and_open_positions(tmp_path: Path) -> None:
+    """空仓候选无需行情; 目标与待退出持仓仍必须有行情。"""
+    routes = {"SPY.US": "SPY.ARCA", "QQQ.US": "QQQ.NASDAQ"}
+    spy = make_bar(date(2025, 1, 2), instrument_id="SPY.US", close=100)
+    gateway = _PlanningGateway(
+        _planning_config(tmp_path, instrument_routes=routes),
+        equity=10_000,
+        bars={str(spy.bar_type): spy},
+    )
+    plan, rejection = gateway._build_plan(_planning_event())
+    assert rejection is None
+    assert [item.canonical_id for item in plan] == ["SPY.US"]
+
+    missing_target = _planning_event((("QQQ.US", 0.25),))
+    assert gateway._build_plan(missing_target)[1] == "missing price for QQQ.US"
+
+    missing_exit = _PlanningGateway(
+        _planning_config(tmp_path, instrument_routes=routes),
+        equity=10_000,
+        quantities={"QQQ.NASDAQ": 5},
+        bars={str(spy.bar_type): spy},
+    )
+    assert missing_exit._build_plan(_planning_event())[1] == "missing price for QQQ.US"
+
+    qqq = make_bar(
+        date(2025, 1, 2),
+        instrument_id="QQQ.US",
+        open_price=199,
+        high=201,
+        low=198,
+        close=200,
+    )
+    missing_exit.test_cache = _PlanningCache({str(spy.bar_type): spy, str(qqq.bar_type): qqq})
+    plan, rejection = missing_exit._build_plan(_planning_event())
+    assert rejection is None
+    assert [item.side for item in plan] == [OrderSide.SELL, OrderSide.BUY]
+    assert plan[0].canonical_id == "QQQ.US"
+    assert plan[0].quantity == 5
+
+
+def test_plan_rejects_unknown_targets_and_accepts_empty_portfolio(tmp_path: Path) -> None:
+    gateway = _PlanningGateway(_planning_config(tmp_path), equity=0)
+    unknown = _planning_event((("UNKNOWN.US", 0.25),))
+    assert gateway._build_plan(unknown)[1] == "unknown target instruments: UNKNOWN.US"
+    assert gateway._build_plan(_planning_event(())) == ((), None)
+
+
 class _Money:
     def __init__(self, value: float) -> None:
         self._value = value
@@ -401,8 +457,12 @@ class _PortfolioPlanningGateway(_PlanningGateway):
     def portfolio(self) -> _Portfolio:
         return self.test_portfolio
 
-    def _portfolio_equity(self, prices: dict[str, float]) -> float:
-        return ExecutionGatewayStrategy._portfolio_equity(self, prices)
+    def _portfolio_equity(
+        self,
+        prices: dict[str, float],
+        current_quantities: dict[str, int],
+    ) -> float:
+        return ExecutionGatewayStrategy._portfolio_equity(self, prices, current_quantities)
 
 
 def test_portfolio_equity_uses_exact_account_and_live_positions(tmp_path: Path) -> None:
@@ -414,7 +474,7 @@ def test_portfolio_equity_uses_exact_account_and_live_positions(tmp_path: Path) 
         quantities={},
         bars=bars,
     )
-    assert missing._portfolio_equity({"SPY.US": 100}) == 0
+    assert missing._portfolio_equity({"SPY.US": 100}, {"SPY.US": 0}) == 0
 
     gateway = _PortfolioPlanningGateway(
         _planning_config(tmp_path),
@@ -422,7 +482,7 @@ def test_portfolio_equity_uses_exact_account_and_live_positions(tmp_path: Path) 
         quantities={"SPY.ARCA": 10},
         bars=bars,
     )
-    assert gateway._portfolio_equity({"SPY.US": 100}) == 6_000
+    assert gateway._portfolio_equity({"SPY.US": 100}, {"SPY.US": 10}) == 6_000
     assert gateway._current_quantity(InstrumentId.from_str("SPY.ARCA")) == 10
     gateway.test_cache = _PlanningCache(bars, (_Position(3), _Position(2)))
     assert (

@@ -2,27 +2,51 @@
 
 from __future__ import annotations
 
+import multiprocessing
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
+from nautilus_trader.model.data import CustomData
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from sqlalchemy import create_engine, text
 
 from tests.data.helpers import make_bar, utc_ns
 from trading_assistant.backtest.runner import _validate_backtest_catalog, run_backtest
 from trading_assistant.data.catalog import CatalogRepository
+from trading_assistant.data.config import InstrumentSpec
 from trading_assistant.data.corporate_actions import (
     CorporateActionRepository,
     CorporateActions,
     DividendAction,
 )
+from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 
 
 def _write_yaml(path: Path, value: object) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+
+def _spec(
+    instrument_id: str = "SPY.US",
+    *,
+    first_trading_date: date | None = None,
+) -> InstrumentSpec:
+    symbol = instrument_id.split(".", maxsplit=1)[0]
+    return InstrumentSpec(
+        symbol=symbol,
+        instrument_id=instrument_id,
+        data_symbol=instrument_id,
+        exchange="SMART",
+        primary_exchange="ARCA",
+        currency="USD",
+        price_precision=2,
+        price_increment="0.01",
+        lot_size=1,
+        first_trading_date=first_trading_date,
+    )
 
 
 def _write_test_config(project_root: Path) -> None:
@@ -124,6 +148,79 @@ def _write_test_catalog(path: Path) -> None:
             TestInstrumentProvider.equity("BIL", "US"),
         ]
     )
+    _write_market_data(path)
+
+
+def _write_factor_test_config(project_root: Path) -> None:
+    _write_test_config(project_root)
+    instruments = [
+        {
+            "symbol": symbol,
+            "instrument_id": f"{symbol}.US",
+            "live_instrument_id": f"{symbol}.ARCA",
+            "data_symbol": f"{symbol}.US",
+            "exchange": "SMART",
+            "primary_exchange": "ARCA",
+            "currency": "USD",
+            "price_precision": 2,
+            "price_increment": "0.01",
+            "lot_size": 1,
+            "factor_security_id": f"isin:{symbol}",
+        }
+        for symbol in ("SPY", "BIL")
+    ]
+    _write_yaml(project_root / "config" / "instruments.yaml", {"instruments": instruments})
+    _write_yaml(
+        project_root / "config" / "strategies.yaml",
+        {
+            "active_strategy": "patchtst_e3",
+            "strategies": {
+                "patchtst_e3": {
+                    "approval_mode": "manual",
+                    "signal_expiry_hours": 24,
+                    "parameters": {
+                        "top_n": 1,
+                        "target_gross_exposure": 0.25,
+                        "rebalance_frequency": "daily",
+                        "allow_evaluation_predictions": False,
+                    },
+                }
+            },
+        },
+    )
+
+
+def _write_factor_scores(path: Path) -> None:
+    catalog = CatalogRepository(path)
+    sessions = [date(2025, 1, 31), date(2025, 2, 28), date(2025, 3, 31)]
+    values: list[CustomData] = []
+    for index, session in enumerate(sessions):
+        timestamp_ns = utc_ns(session + timedelta(days=1)) - 1
+        for symbol, score in (("SPY", 2.0 + index), ("BIL", 1.0)):
+            values.append(
+                CustomData(
+                    FACTOR_DATA_TYPE,
+                    FactorScoreData(
+                        canonical_id=f"{symbol}.US",
+                        security_id=f"isin:{symbol}",
+                        asof_date=session.isoformat(),
+                        score=score,
+                        eligible=True,
+                        batch_id=f"delivery:{session}",
+                        batch_size=2,
+                        delivery_id="d" * 64,
+                        model_release_id="r" * 64,
+                        source_kind="signal_inference",
+                        ts_event=timestamp_ns,
+                        ts_init=timestamp_ns,
+                    ),
+                )
+            )
+    catalog.catalog.write_data(values)
+
+
+def _write_market_data(path: Path) -> None:
+    catalog = CatalogRepository(path)
     sessions = [
         date(2025, 1, 31),
         date(2025, 2, 28),
@@ -202,6 +299,20 @@ def _write_test_catalog(path: Path) -> None:
     )
 
 
+def _run_factor_backtest_process(
+    project_root: str,
+    catalog_path: str,
+    database_url: str,
+) -> None:
+    """在独立进程运行第二个 NT BacktestNode。"""
+    run_backtest(
+        project_root=Path(project_root),
+        catalog_path=Path(catalog_path),
+        database_url=database_url,
+        end=date(2025, 10, 31),
+    )
+
+
 def test_backtest_node_runs_unified_actor_event_strategy_chain(tmp_path: Path) -> None:
     _write_test_config(tmp_path)
     catalog_path = tmp_path / "catalog"
@@ -235,12 +346,43 @@ def test_backtest_node_runs_unified_actor_event_strategy_chain(tmp_path: Path) -
     assert fill_time > signal_time
 
 
+def test_factor_backtest_runs_custom_data_actor_gateway_chain(tmp_path: Path) -> None:
+    """FactorScoreData 必须由 BacktestNode 驱动同一个 Actor 与执行网关。"""
+    _write_factor_test_config(tmp_path)
+    catalog_path = tmp_path / "catalog"
+    _write_test_catalog(catalog_path)
+    _write_factor_scores(catalog_path)
+    database_url = f"sqlite:///{tmp_path}/factor-audit.db"
+
+    process = multiprocessing.get_context("spawn").Process(
+        target=_run_factor_backtest_process,
+        args=(str(tmp_path), str(catalog_path), database_url),
+    )
+    process.start()
+    process.join(timeout=60)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        raise AssertionError("factor backtest process timed out")
+    assert process.exitcode == 0
+    with create_engine(database_url).connect() as connection:
+        strategy, signal_time, fill_time = connection.execute(
+            text(
+                "SELECT s.strategy_name, s.timestamp_utc, f.timestamp_utc "
+                "FROM signals s JOIN fills f ON f.event_id = s.event_id "
+                "ORDER BY f.timestamp_utc LIMIT 1"
+            )
+        ).one()
+    assert strategy == "patchtst_e3"
+    assert fill_time > signal_time
+
+
 def test_backtest_preflight_rejects_missing_instrument_and_bars(tmp_path: Path) -> None:
     catalog_path = tmp_path / "catalog"
     with pytest.raises(ValueError, match="缺少标的定义"):
         _validate_backtest_catalog(
             catalog_path=catalog_path,
-            instrument_ids=("SPY.US",),
+            instruments=(_spec(),),
             bar_type_suffixes=(
                 "1-DAY-LAST-INTERNAL",
                 "1-DAY-LAST-EXTERNAL",
@@ -253,7 +395,7 @@ def test_backtest_preflight_rejects_missing_instrument_and_bars(tmp_path: Path) 
     with pytest.raises(ValueError, match="缺少 BarType"):
         _validate_backtest_catalog(
             catalog_path=catalog_path,
-            instrument_ids=("SPY.US",),
+            instruments=(_spec(),),
             bar_type_suffixes=(
                 "1-DAY-LAST-INTERNAL",
                 "1-DAY-LAST-EXTERNAL",
@@ -261,6 +403,17 @@ def test_backtest_preflight_rejects_missing_instrument_and_bars(tmp_path: Path) 
             data_start=date(2025, 1, 1),
             end=date(2025, 12, 31),
         )
+
+    _validate_backtest_catalog(
+        catalog_path=catalog_path,
+        instruments=(_spec(first_trading_date=date(2026, 1, 1)),),
+        bar_type_suffixes=(
+            "1-DAY-LAST-INTERNAL",
+            "1-DAY-LAST-EXTERNAL",
+        ),
+        data_start=date(2025, 1, 1),
+        end=date(2025, 12, 31),
+    )
 
 
 def test_backtest_rejects_invalid_runtime_window_before_catalog_access(

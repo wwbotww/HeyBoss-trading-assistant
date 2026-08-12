@@ -9,3 +9,13 @@ strategies:
       top_n: 3
       rebalance_frequency: month_end
       fallback_instrument: BIL.US
+  # 完成正式 E3 FactorBatch 和标的映射后，才把 active_strategy 切换到 patchtst_e3。
+  patchtst_e3:
+    approval_mode: manual
+    signal_expiry_hours: 24
+    parameters:
+      top_n: 3
+      target_gross_exposure: 0.75
+      rebalance_frequency: daily
+      # 仅允许隔离回测使用评估 predictions 转换批次；paper runner 永远覆盖为 false。
+      allow_evaluation_predictions: false

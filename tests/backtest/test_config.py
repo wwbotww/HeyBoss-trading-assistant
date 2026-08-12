@@ -8,7 +8,7 @@ import yaml
 
 from trading_assistant.backtest.config import load_backtest_settings
 from trading_assistant.risk.config import load_risk_limits
-from trading_assistant.strategies.config import load_active_strategy
+from trading_assistant.strategies.config import DualMomentumSettings, load_active_strategy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,6 +26,7 @@ def test_loads_project_m2_configs() -> None:
     assert risk.strategy_capital_usd == 10000
     assert risk.max_gross_exposure == 0.80
     assert strategy.name == "dual_momentum"
+    assert isinstance(strategy.settings, DualMomentumSettings)
     assert strategy.settings.lookback_months == 6
 
 

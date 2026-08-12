@@ -12,8 +12,15 @@ EODHD / IBKR 历史接口
 供应商适配与质量检查
           ↓
 NT Instrument + INTERNAL/EXTERNAL Bar + ParquetDataCatalog
-          ↓
-配置选中的唯一策略 Actor → signals 纯函数
+          ├────────────────────────────┐
+          │                            │
+FacDigger → FactorBatch → 严格导入 → NT FactorScoreData
+          │                            │
+          └──────────────┬─────────────┘
+                         ↓
+              配置选中的唯一策略 Actor
+                         ↓
+                   signals 纯函数
           ↓
 TradeSignalEvent（NT MessageBus）
           ↓
@@ -36,11 +43,11 @@ Dashboard  ← SQLite、Catalog、回测报告
 config/                         非敏感运行配置
 scripts/                        面向操作者的 CLI
 src/trading_assistant/
-├── signals/                    纯函数信号计算
-├── strategies/                 活动策略配置、NT Actor 和统一装配
+├── signals/                    双动量/因子分数到权重的纯函数
+├── strategies/                 活动策略配置、共享 NT Actor 和统一装配
 ├── execution/                  TradeSignalEvent 与唯一执行网关
 ├── risk/                       应用风控规则
-├── data/                       供应商适配、Catalog、公司行动、质量检查
+├── data/                       供应商适配、FactorBatch 导入、Catalog 与质量检查
 ├── backtest/                   BacktestNode、费用、分红模拟和报告
 ├── live/                       TradingNode 与账户快照
 ├── storage/                    SQLAlchemy 模型和审计仓储
@@ -54,7 +61,7 @@ tests/                          与生产模块对应的自动化测试
 
 | 文件 | 职责 |
 |---|---|
-| `config/instruments.yaml` | canonical、EODHD 和 IBKR 标的映射 |
+| `config/instruments.yaml` | canonical、EODHD、IBKR、因子身份与交易生命周期 |
 | `config/data.yaml` | 数据源、历史范围、BarType、重试和质量阈值 |
 | `config/strategies.yaml` | 唯一活动策略、审批模式和策略参数 |
 | `config/risk.yaml` | 账户级交易风控阈值 |
@@ -89,6 +96,10 @@ IBKR 历史适配器保留为备用来源，使用分块、重叠和追加模式
 
 `data_symbol` 只用于供应商请求。`live_instrument_id` 只在 IBKR 合约解析和执行边界使用，例如把 `SPY.US` 映射成 `SPY.ARCA`。
 
+`factor_security_id` 是 FacDigger 稳定身份到 canonical ID 的显式映射。它是可选字段；没有映射的标的不进入因子批次。禁止根据展示用 `symbol` 自动匹配。
+
+`first_trading_date` 和可选 `last_trading_date` 定义标的真实交易生命周期。数据同步将全局请求窗口与该区间求交，退市后质量检查不再误报陈旧；回测预检也只要求生命周期交集内的 Bar。
+
 ### 双 BarType
 
 EODHD 的 `adjusted_close` 同时包含拆股和现金分红影响，原始 OHLC 则未调整。为了让信号连续且成交价格真实，同一响应生成两套 NT 原生日线：
@@ -118,13 +129,21 @@ EODHD 的 `adjusted_close` 同时包含拆股和现金分红影响，原始 OHLC
 
 质量报告写入 `reports/data-quality/`。错误会阻止规范序列写入；警告保留在报告中供人工核对。
 
+### FacDigger 因子边界
+
+FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBoss 交付内容寻址的 `factors.parquet + manifest.json` FactorBatch。HeyBoss importer 严格验证五列 schema、哈希、行数、覆盖率、时间语义和身份映射，将每个 as-of 横截面转换成带显式 `batch_id/batch_size` 的 NT `FactorScoreData`。
+
+`FactorScoreData` 是注册到 NT 的逐证券 CustomData。回测通过 `BacktestDataConfig` 从 Catalog 流式投递；paper Actor 通过同一 Catalog 历史请求 bootstrap。两条入口最终调用相同的批次聚合方法。Actor 永远不读取 FactorBatch 文件，也不加载 FacDigger 代码。
+
+详细契约与 FacDigger 改造步骤见 [factor-integration.md](factor-integration.md)。
+
 ## 策略设计
 
 ### 唯一活动策略
 
 `config/strategies.yaml` 使用 `active_strategy` 指定一次 backtest/live 运行的唯一策略。`load_active_strategy()` 负责读取和校验，`build_strategy_actor()` 根据运行环境注入 BarType、标的、数据库、作用域和预热参数。
 
-backtest 和 live runner 不保存具体 Actor 路径。当前只有 `dual_momentum` 实现；未知策略在启动阶段失败关闭。系统不在下游合并多个策略。
+backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual_momentum` 与 `patchtst_e3`；未知策略在启动阶段失败关闭。系统不在下游合并多个策略，默认仍启用双动量。
 
 ### 双动量规则
 
@@ -141,6 +160,12 @@ backtest 和 live runner 不保存具体 Actor 路径。当前只有 `dual_momen
 
 `DualMomentumActor` 负责收集 NT Bar、形成月末矩阵、调用纯函数、建立幂等工作流并发布 `TradeSignalEvent`。它不读取执行账户，也不提交订单。
 
+### PatchTST E3 因子规则
+
+`signals/factor.py` 接收 eligible 的 canonical 分数，按“分数降序、canonical ID 升序”稳定选择前 N 名，再将目标总敞口等权分配。可选标的不足 N 个时保持现金，不用缺失数据凑数。
+
+`PatchTSTFactorActor` 必须等到 `batch_size` 声明的完整横截面后才计算。重复行幂等，冲突行或批次大小变化失败关闭。回测可显式允许 `evaluation_predictions`；paper runner 强制禁止评估数据并验证最新生产批次完整。
+
 ## 执行和审批
 
 `TradeSignalEvent` 携带策略名、目标权重、调仓键、理由、过期时间和 UTC 时间戳，通过通用 Topic `events.trade_signal` 发布。
@@ -156,6 +181,8 @@ backtest 和 live runner 不保存具体 Actor 路径。当前只有 `dual_momen
 - 审批后重新计划并第二次风控；
 - 调用 NT `order_factory` 和 `submit_order`；
 - 审计订单生命周期与成交。
+
+计划阶段只要求目标标的和当前非零持仓具有最新执行价。没有目标且没有持仓时直接形成空计划；这使数百只候选池不必全部具备 execution Bar，同时仍保证任何买入或退出都有可成交价格。未知目标身份失败关闭。
 
 manual 工作流：
 
@@ -186,6 +213,8 @@ BacktestNode 和 TradingNode 都装配：
 - 同一个 `ExecutionGatewayStrategy`；
 - 同一套应用风控和仓位计算；
 - 同一 signal/execution BarType 语义。
+
+因子策略额外复用同一个 `FactorScoreData` Catalog 和 `PatchTSTFactorActor`：BacktestNode 以 `FACTOR` client 流式回放，TradingNode 以 `CATALOG` client 请求历史批次。环境 runner 不重新计算分数或权重。
 
 回测只把审批固定为 auto，并将最终执行端换成 `BacktestExchange`。
 
@@ -223,11 +252,13 @@ BacktestNode 和 TradingNode 都装配：
 
 ## Paper 运行设计
 
-TradingNode 启动前通过隔离子进程运行同一个历史同步服务，避免多个 NT 组件在同一进程重复初始化全局日志器。策略从 Catalog 请求 INTERNAL 信号 Bar，执行网关加载 EXTERNAL Bar 估价；IBKR 连接只负责账户、仓位、对账和订单执行。
+TradingNode 启动前通过隔离子进程运行同一个历史同步服务，避免多个 NT 组件在同一进程重复初始化全局日志器。双动量策略从 Catalog 请求 INTERNAL 信号 Bar；因子策略从 Catalog 请求已经导入的最新完整生产批次。执行网关加载 EXTERNAL Bar 估价；IBKR 连接只负责账户、仓位、对账和订单执行。
 
 `trading-node` 与 `approval-bot` 是独立进程，以 SQLite 工作流作为唯一审批邮箱。`trading-node` 禁用 Compose 自动重启，避免数据同步失败或订单提交边界异常后自动重放。
 
 当前没有常驻月末调度器。需要同步新数据并形成下一期信号时，由操作者显式启动或重启 `trading-node`。
+
+因子策略当前也没有跨项目调度。固定顺序是：同步 EODHD → FacDigger 用冻结 scaler 推理并原子发布 → HeyBoss 导入 FactorBatch → 启动/重启 TradingNode。缺少生产批次、最新批次不完整或只有评估数据时，paper 启动失败关闭。
 
 ## 存储与看板
 
@@ -259,7 +290,7 @@ Dashboard 不创建交易连接，也没有审批、下单或撤单能力。
 接入新策略时：
 
 1. 在 `signals/` 增加纯函数及边界测试；
-2. 在 `strategies/` 增加只负责 Bar→纯函数→事件的 NT Actor；
+2. 在 `strategies/` 增加只负责 NT DataEngine 数据→纯函数→事件的 NT Actor；
 3. 为策略增加参数校验；
 4. 在统一运行时装配边界增加一个显式支持分支；
 5. 使用 `active_strategy` 切换；

@@ -28,7 +28,9 @@ from nautilus_trader.config import (
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
+from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import load_data_config, load_instruments
+from trading_assistant.data.factor import FACTOR_DATA_METADATA, FactorScoreData
 from trading_assistant.live.config import load_live_settings
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.strategies.config import load_active_strategy
@@ -68,6 +70,25 @@ def build_trading_node_config(
     catalog_path = Path(
         environ.get("CATALOG_PATH", str(project_root / "catalog" / "eodhd")),
     ).resolve()
+    if strategy.name == "patchtst_e3":
+        factor_rows = CatalogRepository(catalog_path).catalog.query(
+            FactorScoreData,
+            metadata=FACTOR_DATA_METADATA,
+        )
+        if not factor_rows:
+            raise ValueError("Catalog has no FactorScoreData for patchtst_e3")
+        production_rows = [
+            row.data for row in factor_rows if row.data.source_kind == "signal_inference"
+        ]
+        if not production_rows:
+            raise ValueError("paper mode requires signal_inference factors")
+        latest = max(production_rows, key=lambda row: (row.ts_event, row.batch_id))
+        latest_batch = [row for row in production_rows if row.batch_id == latest.batch_id]
+        if (
+            len({row.batch_size for row in latest_batch}) != 1
+            or len({row.canonical_id for row in latest_batch}) != latest.batch_size
+        ):
+            raise ValueError("latest signal_inference factor batch is incomplete")
     account_id = f"IB-{tws_account}"
     signal_actor = build_strategy_actor(
         strategy,
@@ -81,6 +102,7 @@ def build_trading_node_config(
             bootstrap_bar_types=tuple(execution_bar_types.values()),
             catalog_lookback_days=live.catalog_lookback_days,
             publish_after_ns=0,
+            allow_evaluation_predictions=False,
         ),
     )
     portfolio_actor = ImportableActorConfig(

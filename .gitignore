@@ -25,6 +25,7 @@ __pycache__/
 /data/
 /reports/
 /logs/
+/artifacts2/
 *.db
 *.db-shm
 *.db-wal
