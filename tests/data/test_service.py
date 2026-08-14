@@ -54,7 +54,7 @@ def test_validate_only_uses_pipeline_without_ib_source(
             assert "source" not in kwargs
 
         def validate_catalog(self, instruments: object) -> PipelineSummary:
-            assert next(iter(cast(Any, instruments))).instrument_id == "SPY.US"
+            assert next(iter(cast(Any, instruments))).instrument_id == "AAPL.US"
             return marker
 
     monkeypatch.setattr(service, "HistoricalDataPipeline", cast(Any, FakePipeline))
@@ -66,7 +66,7 @@ def test_validate_only_uses_pipeline_without_ib_source(
             data_config_path=Path.cwd() / "config" / "data.yaml",
             start_date=None,
             end_date=None,
-            selected_ids=("SPY.US",),
+            selected_ids=("AAPL.US",),
             validate_only=True,
         )
     )

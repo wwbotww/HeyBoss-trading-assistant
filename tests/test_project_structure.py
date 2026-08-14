@@ -97,9 +97,9 @@ def test_configuration_has_required_defaults() -> None:
         "max_daily_new_positions",
         "max_gross_exposure",
     }
-    assert strategies["active_strategy"] == "dual_momentum"
-    assert strategies["strategies"]["dual_momentum"]["approval_mode"] in {"manual", "auto"}
-    assert "enabled" not in strategies["strategies"]["dual_momentum"]
+    assert strategies["active_strategy"] == "patchtst_e3"
+    assert strategies["strategies"]["patchtst_e3"]["approval_mode"] in {"manual", "auto"}
+    assert "enabled" not in strategies["strategies"]["patchtst_e3"]
 
 
 def test_local_secrets_are_ignored() -> None:

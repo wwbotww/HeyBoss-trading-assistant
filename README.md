@@ -14,7 +14,7 @@
 - 记录信号、审批、订单、成交、账户和持仓审计；
 - 生成回测报告，并通过只读 Streamlit 看板浏览运行状态。
 
-默认活动策略仍是双动量。PatchTST 链路已经可回测和装配 paper，但项目不内置模型、特征或生产 FactorBatch；正式启用前必须由 FacDigger 发布合规批次并完成标的身份映射。
+当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 E3 FactorBatch。
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、市场新闻或大语言模型分析。
 
@@ -126,7 +126,7 @@ uv run --frozen --env-file .env python scripts/fetch_data.py
 
 ```bash
 uv run --frozen --env-file .env python scripts/fetch_data.py \
-  --instrument SPY.US \
+  --instrument AAPL.US \
   --start 2020-01-01 \
   --end 2025-12-31
 ```
@@ -145,7 +145,7 @@ uv run --frozen --env-file .env python scripts/fetch_data.py --validate-only
 
 先按 [FacDigger 因子接入说明](docs/factor-integration.md) 生成正式 FactorBatch，并在 `config/instruments.yaml` 为参与因子交易的标的填写稳定的 `factor_security_id`。不要按 ticker 自动猜测身份。
 
-相同日期的 INTERNAL Bar 必须先存在于 Catalog，然后导入批次：
+相同日期的 INTERNAL 信号 Bar 和 EXTERNAL 执行 Bar 必须先存在于 Catalog，然后导入批次：
 
 ```bash
 uv run --frozen --env-file .env python scripts/import_factor_bundle.py \
@@ -166,8 +166,8 @@ uv run --frozen --env-file .env python scripts/run_backtest.py
 
 ```bash
 uv run --frozen --env-file .env python scripts/run_backtest.py \
-  --instrument SPY.US \
-  --instrument QQQ.US \
+  --instrument AAPL.US \
+  --instrument MSFT.US \
   --data-start 2005-01-01 \
   --evaluation-start 2007-01-01 \
   --end 2025-12-31
@@ -185,7 +185,7 @@ uv run --frozen --env-file .env python scripts/run_backtest.py \
 
 回测不需要连接 IB Gateway，审批固定为 auto。报告只用于验证与研究，不构成收益承诺或投资建议。
 
-要回测 PatchTST，把 `config/strategies.yaml` 的 `active_strategy` 改为 `patchtst_e3`。正式批次使用 `source.kind=signal_inference`；仅在隔离研究回放中，才可同时把 `allow_evaluation_predictions` 改为 `true`。runner 会从同一 NT Catalog 加载因子，之后仍沿用统一的 Actor、信号、风控、执行和报告链路。
+当前 `active_strategy` 已设为 `patchtst_e3`。正式批次使用 `source.kind=signal_inference`；仅在隔离研究回放中，才可同时把 `allow_evaluation_predictions` 改为 `true`。runner 会从同一 NT Catalog 加载因子，之后仍沿用统一的 Actor、信号、风控、执行和报告链路。
 
 ## 运行 Telegram 审批与 IBKR paper
 
@@ -208,7 +208,7 @@ docker compose --profile application up -d trading-node
 docker compose logs -f trading-node approval-bot
 ```
 
-交易节点会先更新 Catalog，再从最新完整月份形成信号。manual 模式下，未确认前不会提交订单；确认后执行网关会重新读取账户和持仓并进行第二次风控。
+交易节点会先更新 Catalog，再由活动策略形成信号。执行网关统一从同一 Catalog 预热全部 EXTERNAL 执行 Bar；预热完成前信号保持 `NEW`，启动顺序造成的未消费信号会按当前 paper 作用域恢复。manual 模式下，未确认前不会提交订单；确认后执行网关会重新读取账户和持仓并进行第二次风控。
 
 如果活动策略是 `patchtst_e3`，当前启动命令不会调用 FacDigger，也不会自动导入因子。必须先按“同步行情 → FacDigger 推理 → 导入生产 FactorBatch”的顺序完成准备，再启动或重启节点。paper 会拒绝评估 predictions 和不完整的生产批次。
 

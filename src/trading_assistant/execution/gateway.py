@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from math import floor
 from typing import Any, Literal
 
 from nautilus_trader.common.component import TimeEvent
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.events import OrderDenied, OrderFilled, OrderRejected, OrderSubmitted
-from nautilus_trader.model.identifiers import AccountId, InstrumentId
+from nautilus_trader.model.identifiers import AccountId, ClientId, InstrumentId
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.trading.strategy import Strategy
 
@@ -58,7 +60,11 @@ class ExecutionGatewayConfig(StrategyConfig, frozen=True):
     max_gross_exposure: float
     backtest_run_id: str | None = None
     signal_topic: str = TRADE_SIGNAL_TOPIC
+    signal_scope: str = "default"
     approval_poll_interval_seconds: int = 5
+    bootstrap_from_catalog: bool = False
+    catalog_client_id: str = "CATALOG"
+    catalog_lookback_days: int = 2_200
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,9 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         self._open_sells: dict[str, set[str]] = {}
         self._failed_sell_signals: set[str] = set()
         self._daily_new_positions: dict[str, int] = {}
+        self._execution_bar_requests: set[str] = set()
+        self._deferred_signals: dict[str, TradeSignalEvent] = {}
+        self._execution_prices_ready = not config.bootstrap_from_catalog
 
     def on_start(self) -> None:
         """建立审计仓储并订阅领域事件。"""
@@ -114,10 +123,22 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 interval=timedelta(seconds=self._settings.approval_poll_interval_seconds),
                 callback=self._poll_approved_signal,
             )
+        if self._settings.bootstrap_from_catalog:
+            self._request_execution_bar_history()
 
     def _handle_signal(self, message: object) -> None:
         if not isinstance(message, TradeSignalEvent):
             return
+        if not self._execution_prices_ready:
+            self._deferred_signals.setdefault(str(message.id), message)
+            self.log.info(
+                f"Deferred signal until execution price bootstrap completes: event_id={message.id}"
+            )
+            return
+        self._process_signal(message)
+
+    def _process_signal(self, message: TradeSignalEvent) -> None:
+        """在执行价已就绪后处理一个持久化交易信号。"""
         now_ns = max(self.clock.timestamp_ns(), message.ts_event)
         repository = self._require_repository()
         workflow = repository.get_signal_workflow(str(message.id))
@@ -176,6 +197,54 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 reason=f"{message.reason}; {reason}",
                 timestamp_ns=now_ns,
             )
+
+    def _request_execution_bar_history(self) -> None:
+        """通过 NT DataEngine 为所有策略统一加载 EXTERNAL 执行 Bar。"""
+        if self._settings.catalog_lookback_days < 1:
+            raise ValueError("catalog_lookback_days must be positive")
+        end = datetime.fromtimestamp(self.clock.timestamp_ns() / 1_000_000_000, tz=UTC)
+        start = end - timedelta(days=self._settings.catalog_lookback_days)
+        bar_types = tuple(dict.fromkeys(self._settings.execution_bar_types.values()))
+        self._execution_bar_requests = set(bar_types)
+        if not bar_types:
+            self._complete_execution_bar_bootstrap()
+            return
+        client_id = ClientId(self._settings.catalog_client_id)
+        for value in bar_types:
+            self.request_bars(
+                BarType.from_str(value),
+                start=start,
+                end=end,
+                client_id=client_id,
+                callback=partial(self._execution_bar_request_completed, value),
+            )
+
+    def _execution_bar_request_completed(self, bar_type: str, _: UUID4) -> None:
+        self._execution_bar_requests.discard(bar_type)
+        if not self._execution_bar_requests:
+            self._complete_execution_bar_bootstrap()
+
+    def _complete_execution_bar_bootstrap(self) -> None:
+        """结束执行价预热并恢复启动阶段已经落库的 NEW 信号。"""
+        if self._execution_prices_ready:
+            return
+        missing = sorted(
+            value
+            for value in self._settings.execution_bar_types.values()
+            if self.cache.bar(BarType.from_str(value)) is None
+        )
+        if missing:
+            self.log.error(f"Execution price bootstrap missing BarTypes: {', '.join(missing)}")
+        self._execution_prices_ready = True
+
+        deferred = tuple(self._deferred_signals.values())
+        self._deferred_signals.clear()
+        for event in deferred:
+            self._process_signal(event)
+
+        repository = self._require_repository()
+        for workflow in repository.list_new_signal_workflows(scope=self._settings.signal_scope):
+            self._process_signal(workflow.to_event())
 
     def _poll_approved_signal(self, _: TimeEvent) -> None:
         """领取人工确认信号并在提交前重新计算和风控。"""
@@ -506,6 +575,9 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         self._open_sells.clear()
         self._failed_sell_signals.clear()
         self._daily_new_positions.clear()
+        self._execution_bar_requests.clear()
+        self._deferred_signals.clear()
+        self._execution_prices_ready = not self._settings.bootstrap_from_catalog
 
     def on_stop(self) -> None:
         """取消订阅并释放数据库连接。"""

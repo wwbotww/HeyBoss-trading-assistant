@@ -1,112 +1,122 @@
-# 显式美股清单。instrument_id 是规范/回测身份，live_instrument_id 是 IBKR 执行身份。
+# 因子联调用高流动性大市值普通股清单。所有身份映射均显式维护，禁止按 ticker 猜测 ISIN。
 instruments:
-  - symbol: SPY
-    instrument_id: SPY.US
-    live_instrument_id: SPY.ARCA
-    data_symbol: SPY.US
-    exchange: SMART
-    primary_exchange: ARCA
-    currency: USD
-    price_precision: 4
-    price_increment: "0.0100"
-    lot_size: 1
-    first_trading_date: 1993-01-29
-  - symbol: QQQ
-    instrument_id: QQQ.US
-    live_instrument_id: QQQ.NASDAQ
-    data_symbol: QQQ.US
+  - symbol: AAPL
+    instrument_id: AAPL.US
+    live_instrument_id: AAPL.NASDAQ
+    data_symbol: AAPL.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 1999-03-10
-  - symbol: TLT
-    instrument_id: TLT.US
-    live_instrument_id: TLT.NASDAQ
-    data_symbol: TLT.US
+    first_trading_date: 1980-12-12
+    factor_security_id: eodhd:isin:US0378331005
+  - symbol: MSFT
+    instrument_id: MSFT.US
+    live_instrument_id: MSFT.NASDAQ
+    data_symbol: MSFT.US
     exchange: SMART
     primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2002-07-30
-  - symbol: GLD
-    instrument_id: GLD.US
-    live_instrument_id: GLD.ARCA
-    data_symbol: GLD.US
+    first_trading_date: 1986-03-13
+    factor_security_id: eodhd:isin:US5949181045
+  - symbol: NVDA
+    instrument_id: NVDA.US
+    live_instrument_id: NVDA.NASDAQ
+    data_symbol: NVDA.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2004-11-18
-  - symbol: IWM
-    instrument_id: IWM.US
-    live_instrument_id: IWM.ARCA
-    data_symbol: IWM.US
+    first_trading_date: 1999-01-22
+    factor_security_id: eodhd:isin:US67066G1040
+  - symbol: GOOGL
+    instrument_id: GOOGL.US
+    live_instrument_id: GOOGL.NASDAQ
+    data_symbol: GOOGL.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2000-05-26
-  - symbol: EFA
-    instrument_id: EFA.US
-    live_instrument_id: EFA.ARCA
-    data_symbol: EFA.US
+    first_trading_date: 2004-08-19
+    factor_security_id: eodhd:isin:US02079K3059
+  - symbol: AMZN
+    instrument_id: AMZN.US
+    live_instrument_id: AMZN.NASDAQ
+    data_symbol: AMZN.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2001-08-27
-  - symbol: EEM
-    instrument_id: EEM.US
-    live_instrument_id: EEM.ARCA
-    data_symbol: EEM.US
+    first_trading_date: 1997-05-15
+    factor_security_id: eodhd:isin:US0231351067
+  - symbol: META
+    instrument_id: META.US
+    live_instrument_id: META.NASDAQ
+    data_symbol: META.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NASDAQ
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2003-04-14
-  - symbol: VNQ
-    instrument_id: VNQ.US
-    live_instrument_id: VNQ.ARCA
-    data_symbol: VNQ.US
+    first_trading_date: 2012-05-18
+    factor_security_id: eodhd:isin:US30303M1027
+  - symbol: JPM
+    instrument_id: JPM.US
+    live_instrument_id: JPM.NYSE
+    data_symbol: JPM.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NYSE
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2004-09-29
-  - symbol: LQD
-    instrument_id: LQD.US
-    live_instrument_id: LQD.ARCA
-    data_symbol: LQD.US
+    first_trading_date: 1969-03-05
+    factor_security_id: eodhd:isin:US46625H1005
+  - symbol: XOM
+    instrument_id: XOM.US
+    live_instrument_id: XOM.NYSE
+    data_symbol: XOM.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NYSE
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2002-07-30
-  - symbol: BIL
-    instrument_id: BIL.US
-    live_instrument_id: BIL.ARCA
-    data_symbol: BIL.US
+    first_trading_date: 1920-03-25
+    factor_security_id: eodhd:isin:US30233Q1085
+  - symbol: JNJ
+    instrument_id: JNJ.US
+    live_instrument_id: JNJ.NYSE
+    data_symbol: JNJ.US
     exchange: SMART
-    primary_exchange: ARCA
+    primary_exchange: NYSE
     currency: USD
     price_precision: 4
     price_increment: "0.0100"
     lot_size: 1
-    first_trading_date: 2007-05-30
+    first_trading_date: 1944-09-25
+    factor_security_id: eodhd:isin:US4781601046
+  - symbol: TSLA
+    instrument_id: TSLA.US
+    live_instrument_id: TSLA.NASDAQ
+    data_symbol: TSLA.US
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+    price_precision: 4
+    price_increment: "0.0100"
+    lot_size: 1
+    first_trading_date: 2010-06-29
+    factor_security_id: eodhd:isin:US88160R1014

@@ -10,9 +10,9 @@
 
 - 交易环境：IBKR paper；
 - 交易频率：日线和月度调仓，不做日内高频；
-- 标的：`config/instruments.yaml` 中显式声明的美元计价美股/ETF；
+- 标的：`config/instruments.yaml` 中显式声明的美元计价普通股；当前为 10 只高流动性大市值联调池；
 - 历史数据：EODHD EOD API，IBKR 历史适配器作为可切换备用实现；
-- 可用策略：双动量 ETF 轮动、PatchTST E3 因子策略；默认活动策略为双动量；
+- 可用策略：双动量 ETF 轮动、PatchTST E3 因子策略；当前联调默认为 PatchTST E3；
 - 策略运行方式：每次 backtest/live 只允许一个活动策略；
 - 审批方式：Telegram manual 或配置为 auto；
 - 运行形态：本地 Python 或 Docker Compose；
@@ -43,7 +43,7 @@
 1. `signals/` 只能包含无 IO、无全局状态、无 NautilusTrader 依赖的纯函数。
 2. `strategies.yaml` 通过 `active_strategy` 为一次运行选择唯一决策策略。backtest 与 live 必须使用同一个策略装配函数和同一个 Actor 实现。
 3. 策略 Actor 只接收经 NT DataEngine 投递的 Bar 或已注册 CustomData、调用纯函数并发布不可变 `TradeSignalEvent`；不得读取外部文件、执行账户、审批或下单。
-4. `ExecutionGatewayStrategy` 是唯一允许调用 NT `order_factory` 和 `submit_order` 的组件。
+4. `ExecutionGatewayStrategy` 是唯一允许调用 NT `order_factory` 和 `submit_order` 的组件，也是所有策略共用的 EXTERNAL 执行 Bar 预热边界；策略 Actor 不得加载执行价。
 5. 唯一执行链路为：`TradeSignalEvent → ExecutionGatewayStrategy → 应用风控 → manual/auto 审批 → NT RiskEngine → NT ExecutionEngine → 环境执行客户端`。
 6. 不在执行网关之后聚合或混合多个策略。需要切换策略时只能修改 `active_strategy` 并重新启动一次独立运行。
 7. 回测与 paper 必须复用活动策略 Actor、交易事件、执行网关、仓位计算和应用风控。环境差异只能位于节点装配、审批模式、账户和执行客户端。
@@ -56,7 +56,7 @@
 ## 数据约束
 
 - 供应商适配层之后只使用 NT 原生 Instrument、Bar、BarType 和 ParquetDataCatalog；
-- canonical ID（如 `SPY.US`）贯穿 Catalog、信号和回测；IBKR live ID 只在合约解析与执行边界使用；
+- canonical ID（如 `AAPL.US`）贯穿 Catalog、信号和回测；IBKR live ID 只在合约解析与执行边界使用；
 - EODHD 同一响应生成 `1-DAY-LAST-INTERNAL` 总回报信号价和 `1-DAY-LAST-EXTERNAL` 拆股调整执行价；
 - 信号价不能用于撮合，执行价不能替代信号价；
 - splits/dividends 保存到固定 JSON sidecar，不维护 manifest、版本号或内容哈希；
@@ -64,7 +64,7 @@
 - IBKR 与 EODHD Catalog 不得混写。
 - 标的的 `first_trading_date` 和可选 `last_trading_date` 是同步、质量检查与回测预检共同使用的显式生命周期边界；不得以“缺失数据”代表尚未上市或已经退市；
 - FacDigger 与 HeyBoss 之间只有 `factors.parquet + manifest.json` FactorBatch 契约；HeyBoss 不加载 checkpoint、不复制特征处理，也不直接读取研究 predictions；
-- FactorBatch 必须先完整校验和显式映射，再转换为已注册的 NT `FactorScoreData` 写入同一 ParquetDataCatalog；Actor 不得直接读交付文件；
+- FactorBatch 必须先完整校验和显式映射，再转换为已注册的 NT `FactorScoreData` 写入同一 ParquetDataCatalog；内部 DataType 只以 CustomData 类身份路由，不附加 Catalog 查询 metadata，以保证 NT 1.230 回放与历史请求使用同一 Topic；Actor 不得直接读交付文件；
 - `evaluation_predictions` 只能在显式开启的隔离回测中使用，paper 只接受完整的 `signal_inference` 横截面。
 
 ## 回测和 paper 约束
@@ -74,6 +74,7 @@
 - 完整日线在当日结束后才可用，订单必须延迟到下一根可成交 Bar，禁止同日开盘前视；
 - 费用、滑点、分红、账户和持仓变化必须通过 NT 官方扩展点及 NT 状态计算；
 - paper 只使用 IBKR 执行客户端，不订阅付费实时行情；
+- paper 启动时由执行网关通过 NT DataEngine 从同一 Catalog 预热全部 EXTERNAL Bar；预热完成前信号保持 `NEW`，不得提前规划订单；
 - manual 审批前后各执行一次账户、报价、仓位和应用风控检查；
 - 提交边界失败时工作流保持失败关闭，不自动重放订单。
 

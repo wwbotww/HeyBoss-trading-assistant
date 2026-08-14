@@ -30,7 +30,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import load_data_config, load_instruments
-from trading_assistant.data.factor import FACTOR_DATA_METADATA, FactorScoreData
+from trading_assistant.data.factor import FactorScoreData
 from trading_assistant.live.config import load_live_settings
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.strategies.config import load_active_strategy
@@ -71,10 +71,7 @@ def build_trading_node_config(
         environ.get("CATALOG_PATH", str(project_root / "catalog" / "eodhd")),
     ).resolve()
     if strategy.name == "patchtst_e3":
-        factor_rows = CatalogRepository(catalog_path).catalog.query(
-            FactorScoreData,
-            metadata=FACTOR_DATA_METADATA,
-        )
+        factor_rows = CatalogRepository(catalog_path).catalog.query(FactorScoreData)
         if not factor_rows:
             raise ValueError("Catalog has no FactorScoreData for patchtst_e3")
         production_rows = [
@@ -90,16 +87,16 @@ def build_trading_node_config(
         ):
             raise ValueError("latest signal_inference factor batch is incomplete")
     account_id = f"IB-{tws_account}"
+    signal_scope = f"paper:{tws_account}"
     signal_actor = build_strategy_actor(
         strategy,
         StrategyRuntimeContext(
             instrument_ids=canonical_ids,
             signal_bar_types=signal_bar_types,
             database_url=database_url,
-            signal_scope=f"paper:{tws_account}",
+            signal_scope=signal_scope,
             stream_bars=False,
             bootstrap_from_catalog=True,
-            bootstrap_bar_types=tuple(execution_bar_types.values()),
             catalog_lookback_days=live.catalog_lookback_days,
             publish_after_ns=0,
             allow_evaluation_predictions=False,
@@ -123,6 +120,7 @@ def build_trading_node_config(
             "execution_bar_types": execution_bar_types,
             "approval_mode": strategy.settings.approval_mode,
             "database_url": database_url,
+            "signal_scope": signal_scope,
             "strategy_capital_usd": risk.strategy_capital_usd,
             "max_order_notional_usd": risk.max_order_notional_usd,
             "max_instrument_weight": risk.max_instrument_weight,
@@ -130,6 +128,8 @@ def build_trading_node_config(
             "max_gross_exposure": risk.max_gross_exposure,
             "approval_poll_interval_seconds": live.approval_poll_interval_seconds,
             "account_id": account_id,
+            "bootstrap_from_catalog": True,
+            "catalog_lookback_days": live.catalog_lookback_days,
         },
     )
     execution = InteractiveBrokersExecClientConfig(

@@ -1,6 +1,7 @@
-active_strategy: dual_momentum
+active_strategy: patchtst_e3
 
 strategies:
+  # 实现保留供 ETF 池恢复后使用；当前普通股联调不启用此配置。
   dual_momentum:
     approval_mode: manual
     signal_expiry_hours: 4
@@ -9,7 +10,6 @@ strategies:
       top_n: 3
       rebalance_frequency: month_end
       fallback_instrument: BIL.US
-  # 完成正式 E3 FactorBatch 和标的映射后，才把 active_strategy 切换到 patchtst_e3。
   patchtst_e3:
     approval_mode: manual
     signal_expiry_hours: 24

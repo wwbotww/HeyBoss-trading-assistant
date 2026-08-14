@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import shutil
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,13 +17,20 @@ from sqlalchemy import create_engine, text
 from tests.data.helpers import make_bar, utc_ns
 from trading_assistant.backtest.runner import _validate_backtest_catalog, run_backtest
 from trading_assistant.data.catalog import CatalogRepository
-from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.config import InstrumentSpec, load_instruments
 from trading_assistant.data.corporate_actions import (
     CorporateActionRepository,
     CorporateActions,
     DividendAction,
 )
-from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
+from trading_assistant.data.factor import (
+    FACTOR_DATA_TYPE,
+    FactorScoreData,
+    import_factor_bundle,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FACDIGGER_MOCK_DELIVERY_ID = "3b9eaacfb408310ed421659b12ffca70c8e84620169a208d6614a7a47e6bbea4"
 
 
 def _write_yaml(path: Path, value: object) -> None:
@@ -299,6 +307,76 @@ def _write_market_data(path: Path) -> None:
     )
 
 
+def _write_mock_factor_backtest_project(project_root: Path) -> None:
+    """为 FacDigger 原始单日模拟包构造隔离回测配置。"""
+    shutil.copytree(PROJECT_ROOT / "config", project_root / "config")
+    backtest_path = project_root / "config" / "backtest.yaml"
+    values = yaml.safe_load(backtest_path.read_text(encoding="utf-8"))
+    assert isinstance(values, dict)
+    backtest = values["backtest"]
+    assert isinstance(backtest, dict)
+    backtest.update(
+        {
+            "report_root": "reports/backtests",
+            "data_start": "2026-08-12",
+            "evaluation_start": "2026-08-12",
+            "end": "2026-08-13",
+        }
+    )
+    _write_yaml(backtest_path, values)
+
+
+def _write_mock_factor_market_data(path: Path) -> None:
+    """写入因子日和下一根可成交 Bar; 数值只用于确定性工程验收。"""
+    instruments = load_instruments(PROJECT_ROOT / "config" / "instruments.yaml")
+    catalog = CatalogRepository(path)
+    catalog.write_instruments(
+        [TestInstrumentProvider.equity(spec.symbol, "US") for spec in instruments]
+    )
+    sessions = (date(2026, 8, 12), date(2026, 8, 13))
+    bars = []
+    for instrument_index, spec in enumerate(instruments):
+        for session_index, session in enumerate(sessions):
+            price = 100.0 + instrument_index * 10 + session_index
+            bars.append(
+                make_bar(
+                    session,
+                    instrument_id=spec.canonical_id,
+                    open_price=price,
+                    high=price + 1,
+                    low=price - 1,
+                    close=price,
+                    ts_init=utc_ns(session + timedelta(days=1)) - 2,
+                )
+            )
+            bars.append(
+                make_bar(
+                    session,
+                    instrument_id=spec.canonical_id,
+                    bar_type_suffix="1-DAY-LAST-INTERNAL",
+                    open_price=price,
+                    high=price + 1,
+                    low=price - 1,
+                    close=price,
+                )
+            )
+    assert catalog.append_new_bars(bars) == 40
+
+
+def _run_mock_factor_backtest_process(
+    project_root: str,
+    catalog_path: str,
+    database_url: str,
+) -> None:
+    """在独立进程回放 FacDigger 单日模拟交付。"""
+    run_backtest(
+        project_root=Path(project_root),
+        catalog_path=Path(catalog_path),
+        database_url=database_url,
+        end=date(2026, 8, 13),
+    )
+
+
 def _run_factor_backtest_process(
     project_root: str,
     catalog_path: str,
@@ -375,6 +453,67 @@ def test_factor_backtest_runs_custom_data_actor_gateway_chain(tmp_path: Path) ->
         ).one()
     assert strategy == "patchtst_e3"
     assert fill_time > signal_time
+
+
+def test_facdigger_mock_bundle_runs_one_rebalance_through_unified_chain(
+    tmp_path: Path,
+) -> None:
+    """原始单日 FactorBatch 必须产生预期 top-3 并在下一根 Bar 成交。"""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _write_mock_factor_backtest_project(project_root)
+    catalog_path = tmp_path / "catalog"
+    _write_mock_factor_market_data(catalog_path)
+    instruments = load_instruments(project_root / "config" / "instruments.yaml")
+    summary = import_factor_bundle(
+        bundle_dir=(
+            PROJECT_ROOT / "tests" / "fixtures" / "factor_batches" / FACDIGGER_MOCK_DELIVERY_ID
+        ),
+        catalog_path=catalog_path,
+        instruments=instruments,
+        signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+        execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+    )
+    assert summary.rows_imported == 10
+    factor_rows = CatalogRepository(catalog_path).catalog.query(FactorScoreData)
+    assert len(factor_rows) == 10
+    database_url = f"sqlite:///{tmp_path}/mock-factor-audit.db"
+
+    process = multiprocessing.get_context("spawn").Process(
+        target=_run_mock_factor_backtest_process,
+        args=(str(project_root), str(catalog_path), database_url),
+    )
+    process.start()
+    process.join(timeout=60)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        raise AssertionError("mock factor backtest process timed out")
+    assert process.exitcode == 0
+
+    with create_engine(database_url).connect() as connection:
+        signal_rows = connection.execute(
+            text(
+                "SELECT instrument_id, target_weight, timestamp_utc "
+                "FROM signals ORDER BY instrument_id"
+            )
+        ).all()
+        fill_rows = connection.execute(
+            text("SELECT instrument_id, timestamp_utc FROM fills ORDER BY instrument_id")
+        ).all()
+    assert [(row.instrument_id, row.target_weight) for row in signal_rows] == [
+        ("AAPL.US", 0.25),
+        ("MSFT.US", 0.25),
+        ("NVDA.US", 0.25),
+    ]
+    assert {row.instrument_id for row in fill_rows} == {
+        "AAPL.US",
+        "MSFT.US",
+        "NVDA.US",
+    }
+    assert min(row.timestamp_utc for row in fill_rows) > max(
+        row.timestamp_utc for row in signal_rows
+    )
 
 
 def test_backtest_preflight_rejects_missing_instrument_and_bars(tmp_path: Path) -> None:

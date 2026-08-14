@@ -637,6 +637,19 @@ class TradingRepository:
             values=values,
         )
 
+    def list_new_signal_workflows(self, *, scope: str) -> tuple[SignalWorkflow, ...]:
+        """返回指定运行作用域内尚未被执行网关处理的信号。"""
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(SignalWorkflowRecord)
+                .where(
+                    SignalWorkflowRecord.scope == scope,
+                    SignalWorkflowRecord.status == "NEW",
+                )
+                .order_by(SignalWorkflowRecord.created_at, SignalWorkflowRecord.event_id)
+            )
+            return tuple(self._workflow_snapshot(row) for row in rows)
+
     def list_pending_notifications(self, *, scope: str) -> tuple[SignalWorkflow, ...]:
         """返回指定 paper 作用域内尚未推送的人工审批。"""
         with Session(self._engine) as session:

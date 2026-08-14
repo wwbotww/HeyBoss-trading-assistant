@@ -50,27 +50,33 @@ def _patchtst_project(
     return catalog_path
 
 
-def test_builds_paper_trading_node_from_native_components() -> None:
-    project_root = PROJECT_ROOT
+def test_builds_paper_trading_node_from_native_components(tmp_path: Path) -> None:
+    catalog_path = _patchtst_project(tmp_path, source_kind="signal_inference", batch_size=1)
     config = runner.build_trading_node_config(
-        project_root=project_root,
+        project_root=tmp_path,
         environ={
             "TRADING_MODE": "paper",
             "TWS_ACCOUNT": "DU123",
-            "CATALOG_PATH": str(project_root / "catalog"),
+            "CATALOG_PATH": str(catalog_path),
         },
     )
     assert tuple(config.exec_clients) == ("IB",)
     assert len(config.actors) == 2
-    assert config.actors[0].config["strategy_name"] == "dual_momentum"
+    assert config.actors[0].config["strategy_name"] == "patchtst_e3"
     assert config.actors[0].config["bootstrap_from_catalog"] is True
-    assert config.actors[0].config["stream_bars"] is False
+    assert config.actors[0].config["stream_data"] is False
     assert config.actors[1].config["account_id"] == "IB-DU123"
     assert config.actors[1].config["snapshot_interval_seconds"] == 30
     assert config.strategies[0].config["account_id"] == "IB-DU123"
-    assert config.strategies[0].config["instrument_routes"]["SPY.US"] == "SPY.ARCA"
-    assert config.actors[0].config["bar_types"][0].endswith("1-DAY-LAST-INTERNAL")
-    assert config.actors[0].config["bootstrap_bar_types"][0].endswith("1-DAY-LAST-EXTERNAL")
+    assert config.strategies[0].config["signal_scope"] == "paper:DU123"
+    assert config.strategies[0].config["bootstrap_from_catalog"] is True
+    assert config.strategies[0].config["catalog_lookback_days"] == 2200
+    assert config.strategies[0].config["instrument_routes"]["AAPL.US"] == "AAPL.NASDAQ"
+    assert (
+        config.strategies[0]
+        .config["execution_bar_types"]["AAPL.US"]
+        .endswith("1-DAY-LAST-EXTERNAL")
+    )
     assert config.exec_clients["IB"].routing.default is True
     assert str(AccountId(config.strategies[0].config["account_id"])) == "IB-DU123"
 

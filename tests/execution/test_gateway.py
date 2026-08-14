@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
 import pytest
 from nautilus_trader.common.component import TestClock, TimeEvent
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import ClientId, InstrumentId
 
 from tests.data.helpers import make_bar
 from trading_assistant.execution.events import TradeSignalEvent
@@ -122,12 +124,51 @@ class _PlanningGateway(ExecutionGatewayStrategy):
         return self.quantities.get(str(instrument_id), 0)
 
 
+class _CatalogBootstrapGateway(_PlanningGateway):
+    """同步返回 Catalog 请求以复现 live 启动时序。"""
+
+    def __init__(
+        self,
+        config: ExecutionGatewayConfig,
+        *,
+        equity: float,
+        bars: dict[str, Bar],
+    ) -> None:
+        super().__init__(config, equity=equity, bars=bars)
+        self.requested_bar_types: list[tuple[str, str | None]] = []
+
+    def request_bars(
+        self,
+        bar_type: BarType,
+        start: datetime,
+        end: datetime | None = None,
+        limit: int = 0,
+        client_id: ClientId | None = None,
+        callback: Callable[[UUID4], None] | None = None,
+        update_catalog: bool = False,
+        join_request: bool = False,
+        request_id: UUID4 | None = None,
+        params: dict[str, object] | None = None,
+    ) -> UUID4:
+        del start, end, limit, update_catalog, join_request, params
+        used_request_id = request_id or UUID4()
+        self.requested_bar_types.append(
+            (str(bar_type), None if client_id is None else str(client_id))
+        )
+        if callback is not None:
+            callback(used_request_id)
+        return used_request_id
+
+
 def _planning_config(
     tmp_path: Path,
     *,
     instrument_routes: dict[str, str] | None = None,
     execution_bar_types: dict[str, str] | None = None,
     max_order_notional_usd: float = 100_000,
+    approval_mode: str = "auto",
+    bootstrap_from_catalog: bool = False,
+    signal_scope: str = "default",
 ) -> ExecutionGatewayConfig:
     routes = instrument_routes or {"SPY.US": "SPY.ARCA"}
     return ExecutionGatewayConfig(
@@ -137,7 +178,7 @@ def _planning_config(
             if execution_bar_types is None
             else execution_bar_types
         ),
-        approval_mode="auto",
+        approval_mode=approval_mode,
         database_url=f"sqlite:///{tmp_path}/planning.db",
         account_id="IB-DU123",
         strategy_capital_usd=10_000,
@@ -145,19 +186,26 @@ def _planning_config(
         max_instrument_weight=0.25,
         max_daily_new_positions=3,
         max_gross_exposure=0.8,
+        signal_scope=signal_scope,
+        bootstrap_from_catalog=bootstrap_from_catalog,
+        catalog_lookback_days=10,
     )
 
 
 def _planning_event(
     target_weights: tuple[tuple[str, float], ...] = (("SPY.US", 0.25),),
+    *,
+    rebalance_key: str = "2025-01",
+    timestamp_ns: int | None = None,
+    expiry_hours: int = 1,
 ) -> TradeSignalEvent:
-    now_ns = time.time_ns()
+    now_ns = time.time_ns() if timestamp_ns is None else timestamp_ns
     return TradeSignalEvent(
         strategy_name="dual_momentum",
         target_weights=target_weights,
-        rebalance_key="2025-01",
+        rebalance_key=rebalance_key,
         reason="momentum",
-        expires_at_ns=now_ns + 3_600_000_000_000,
+        expires_at_ns=now_ns + expiry_hours * 3_600_000_000_000,
         ts_event=now_ns,
         ts_init=now_ns,
     )
@@ -289,6 +337,77 @@ def test_auto_claims_once_and_initial_failures_never_execute(tmp_path: Path) -> 
     gateway._handle_signal(expired)
     assert repository.get_signal_workflow(str(expired.id)).status == "EXPIRED"  # type: ignore[union-attr]
     assert gateway.executed == [str(event.id)]
+    repository.close()
+
+
+def test_catalog_bootstrap_defers_and_recovers_new_signals_by_scope(tmp_path: Path) -> None:
+    """模拟 8 月 13 日 11:44 ET 启动。Gateway 先加载执行价再恢复 NEW 信号。"""
+    routes = {"SPY.US": "SPY.ARCA", "QQQ.US": "QQQ.NASDAQ"}
+    spy = make_bar(date(2026, 8, 12), instrument_id="SPY.US", close=100)
+    qqq = make_bar(
+        date(2026, 8, 12),
+        instrument_id="QQQ.US",
+        open_price=199,
+        high=201,
+        low=198,
+        close=200,
+    )
+    bars = {str(spy.bar_type): spy, str(qqq.bar_type): qqq}
+    gateway = _CatalogBootstrapGateway(
+        _planning_config(
+            tmp_path,
+            instrument_routes=routes,
+            approval_mode="manual",
+            bootstrap_from_catalog=True,
+            signal_scope="paper:DU123",
+        ),
+        equity=10_000,
+        bars=bars,
+    )
+    repository = TradingRepository(f"sqlite:///{tmp_path}/planning.db")
+    repository.create_schema()
+    gateway._repository = repository
+
+    signal_time_ns = int(datetime(2026, 8, 13, tzinfo=UTC).timestamp() * 1_000_000_000)
+    simulated_intraday_ns = int(
+        datetime(2026, 8, 13, 15, 44, tzinfo=UTC).timestamp() * 1_000_000_000
+    )
+    gateway.test_clock.set_time(simulated_intraday_ns)
+
+    deferred = _planning_event(
+        rebalance_key="2026-08-13-deferred",
+        timestamp_ns=signal_time_ns,
+        expiry_hours=24,
+    )
+    recovered = _planning_event(
+        (("QQQ.US", 0.25),),
+        rebalance_key="2026-08-13-recovered",
+        timestamp_ns=signal_time_ns,
+        expiry_hours=24,
+    )
+    other_scope = _planning_event(
+        rebalance_key="2026-08-13-other",
+        timestamp_ns=signal_time_ns,
+        expiry_hours=24,
+    )
+    repository.register_signal_workflow(deferred, scope="paper:DU123")
+    repository.register_signal_workflow(recovered, scope="paper:DU123")
+    repository.register_signal_workflow(other_scope, scope="paper:OTHER")
+
+    gateway._handle_signal(deferred)
+    assert repository.get_signal_workflow(str(deferred.id)).status == "NEW"  # type: ignore[union-attr]
+
+    gateway._request_execution_bar_history()
+
+    assert set(gateway.requested_bar_types) == {
+        ("SPY.US-1-DAY-LAST-EXTERNAL", "CATALOG"),
+        ("QQQ.US-1-DAY-LAST-EXTERNAL", "CATALOG"),
+    }
+    assert gateway._execution_prices_ready is True
+    assert gateway._deferred_signals == {}
+    assert repository.get_signal_workflow(str(deferred.id)).status == "PENDING"  # type: ignore[union-attr]
+    assert repository.get_signal_workflow(str(recovered.id)).status == "PENDING"  # type: ignore[union-attr]
+    assert repository.get_signal_workflow(str(other_scope.id)).status == "NEW"  # type: ignore[union-attr]
     repository.close()
 
 

@@ -46,6 +46,7 @@ def main() -> int:
             catalog_path=args.catalog_path,
             instruments=instruments,
             signal_bar_type_suffix=data_config.historical_data.signal_bar_type_suffix,
+            execution_bar_type_suffix=(data_config.historical_data.execution_bar_type_suffix),
         )
     except ValueError as exc:
         print(f"Factor import failed: {exc}")

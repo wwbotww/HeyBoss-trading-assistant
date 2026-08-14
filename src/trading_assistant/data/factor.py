@@ -20,8 +20,8 @@ from trading_assistant.data.config import InstrumentSpec
 
 FACTOR_CONTRACT = "facdigger.factor_batch"
 FACTOR_COLUMNS = ("security_id", "symbol", "asof_date", "score", "eligible")
-FACTOR_DATA_METADATA = {"contract": "facdigger.factor_score"}
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_SEMANTICS = {
     "evaluation_predictions": "eligible_scored_cross_section",
     "signal_inference": "complete_candidate_cross_section",
@@ -45,7 +45,9 @@ class FactorScoreData(Data):  # type: ignore[misc]
 
 
 register_custom_data_class(FactorScoreData)
-FACTOR_DATA_TYPE = DataType(FactorScoreData, metadata=FACTOR_DATA_METADATA)
+# NT 1.230 的 Catalog 历史请求不会把查询 metadata 带回 DataType。这里使用稳定的
+# CustomData 类身份路由, 确保回测流式回放与 paper Catalog bootstrap 进入同一 Topic。
+FACTOR_DATA_TYPE = DataType(FactorScoreData)
 
 
 @dataclass(frozen=True)
@@ -119,10 +121,23 @@ def _number(value: object, label: str) -> float:
     return result
 
 
+def _float(value: object, label: str) -> float:
+    if not isinstance(value, float) or not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite float")
+    return value
+
+
 def _sha256(value: object, label: str) -> str:
     result = _string(value, label)
     if _SHA256_PATTERN.fullmatch(result) is None:
         raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return result
+
+
+def _git_commit(value: object, label: str) -> str:
+    result = _string(value, label)
+    if _GIT_COMMIT_PATTERN.fullmatch(result) is None:
+        raise ValueError(f"{label} must be a 40-character lowercase Git commit")
     return result
 
 
@@ -151,6 +166,19 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _semantic_delivery_id(manifest: dict[str, Any]) -> str:
+    identity = dict(manifest)
+    identity.pop("created_at")
+    identity.pop("delivery_id")
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
@@ -196,7 +224,7 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     if source_kind not in _SOURCE_SEMANTICS:
         raise ValueError("manifest.source.kind is unsupported")
     _string(source["repository"], "manifest.source.repository")
-    _string(source["commit"], "manifest.source.commit")
+    _git_commit(source["commit"], "manifest.source.commit")
     _string(source["run_id"], "manifest.source.run_id")
     _sha256(source["run_manifest_sha256"], "manifest.source.run_manifest_sha256")
 
@@ -211,6 +239,7 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
             "training_dataset_id",
             "higher_score_is_better",
             "forecast_horizon_sessions",
+            "score_semantics",
         },
         "manifest.model",
     )
@@ -227,18 +256,41 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
         "manifest.model.forecast_horizon_sessions",
         minimum=1,
     )
+    if model["score_semantics"] != "raw_cross_sectional_rank_score":
+        raise ValueError("manifest.model.score_semantics is unsupported")
 
     input_metadata = _mapping(manifest["input"], "manifest.input")
-    _expect_keys(input_metadata, {"snapshot_id", "universe_semantics"}, "manifest.input")
+    _expect_keys(
+        input_metadata,
+        {
+            "snapshot_id",
+            "snapshot_manifest_sha256",
+            "universe_semantics",
+            "universe_sha256",
+            "identity_policy",
+        },
+        "manifest.input",
+    )
     _string(input_metadata["snapshot_id"], "manifest.input.snapshot_id")
+    _sha256(
+        input_metadata["snapshot_manifest_sha256"],
+        "manifest.input.snapshot_manifest_sha256",
+    )
     if input_metadata["universe_semantics"] != _SOURCE_SEMANTICS[source_kind]:
         raise ValueError("manifest.input.universe_semantics does not match source.kind")
+    _sha256(input_metadata["universe_sha256"], "manifest.input.universe_sha256")
+    if input_metadata["identity_policy"] not in {
+        "provider_neutral_security_id",
+        "eodhd_isin_only",
+    }:
+        raise ValueError("manifest.input.identity_policy is unsupported")
 
     time_metadata = _mapping(manifest["time"], "manifest.time")
     _expect_keys(
         time_metadata,
         {
             "calendar",
+            "calendar_version",
             "timezone",
             "minimum_asof_date",
             "maximum_asof_date",
@@ -249,6 +301,7 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     )
     if time_metadata["calendar"] != "US_EQUITIES_REGULAR":
         raise ValueError("manifest.time.calendar must be US_EQUITIES_REGULAR")
+    _string(time_metadata["calendar_version"], "manifest.time.calendar_version")
     if time_metadata["timezone"] != "America/New_York":
         raise ValueError("manifest.time.timezone must be America/New_York")
     minimum_asof_date = _iso_date(
@@ -259,20 +312,53 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     )
     if minimum_asof_date > maximum_asof_date:
         raise ValueError("manifest.time minimum date is after maximum date")
+    if source_kind == "signal_inference" and minimum_asof_date != maximum_asof_date:
+        raise ValueError("signal_inference must contain exactly one as-of date")
     if time_metadata["signal_available"] != "after_regular_session_close":
         raise ValueError("manifest.time.signal_available is unsupported")
     if time_metadata["earliest_execution"] != "next_regular_session_open":
         raise ValueError("manifest.time.earliest_execution is unsupported")
 
     coverage = _mapping(manifest["coverage"], "manifest.coverage")
-    _expect_keys(coverage, {"expected_rows", "actual_rows", "ratio"}, "manifest.coverage")
-    expected_rows = _integer(
-        coverage["expected_rows"], "manifest.coverage.expected_rows", minimum=1
+    _expect_keys(
+        coverage,
+        {
+            "candidate_rows",
+            "actual_rows",
+            "expected_eligible_rows",
+            "scored_eligible_rows",
+            "missing_eligible_rows",
+            "ratio",
+        },
+        "manifest.coverage",
+    )
+    candidate_rows = _integer(
+        coverage["candidate_rows"], "manifest.coverage.candidate_rows", minimum=1
     )
     actual_rows = _integer(coverage["actual_rows"], "manifest.coverage.actual_rows", minimum=1)
-    ratio = _number(coverage["ratio"], "manifest.coverage.ratio")
-    if expected_rows != actual_rows or ratio != 1.0:
+    expected_eligible_rows = _integer(
+        coverage["expected_eligible_rows"],
+        "manifest.coverage.expected_eligible_rows",
+    )
+    scored_eligible_rows = _integer(
+        coverage["scored_eligible_rows"],
+        "manifest.coverage.scored_eligible_rows",
+    )
+    missing_eligible_rows = _integer(
+        coverage["missing_eligible_rows"],
+        "manifest.coverage.missing_eligible_rows",
+    )
+    ratio = _float(coverage["ratio"], "manifest.coverage.ratio")
+    if (
+        candidate_rows != actual_rows
+        or expected_eligible_rows != scored_eligible_rows
+        or expected_eligible_rows > candidate_rows
+        or missing_eligible_rows != 0
+        or ratio != 1.0
+    ):
         raise ValueError("FactorBatch coverage must be complete")
+    if source_kind == "evaluation_predictions" and candidate_rows != expected_eligible_rows:
+        raise ValueError("evaluation_predictions may contain only eligible scored rows")
 
     artifact = _mapping(manifest["artifact"], "manifest.artifact")
     _expect_keys(
@@ -284,8 +370,8 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
         raise ValueError("manifest.artifact.file must be factors.parquet")
     factor_hash = _file_sha256(factor_path)
     artifact_hash = _sha256(artifact["sha256"], "manifest.artifact.sha256")
-    if artifact_hash != factor_hash or delivery_id != factor_hash:
-        raise ValueError("FactorBatch content hash does not match delivery identity")
+    if artifact_hash != factor_hash:
+        raise ValueError("FactorBatch factors hash does not match manifest")
     artifact_bytes = _integer(artifact["bytes"], "manifest.artifact.bytes", minimum=1)
     if artifact_bytes != factor_path.stat().st_size:
         raise ValueError("manifest.artifact.bytes does not match factors.parquet")
@@ -293,6 +379,8 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     _integer(artifact["date_count"], "manifest.artifact.date_count", minimum=1)
     if row_count != actual_rows:
         raise ValueError("manifest row counts disagree")
+    if delivery_id != _semantic_delivery_id(manifest):
+        raise ValueError("FactorBatch semantic identity does not match delivery_id")
 
     return _BundleMetadata(
         delivery_id=delivery_id,
@@ -309,13 +397,27 @@ def _load_rows(
     manifest_path: Path,
 ) -> tuple[_ExternalFactorRow, ...]:
     try:
-        frame = pd.read_parquet(factor_path)
+        frame = pd.read_parquet(factor_path, dtype_backend="pyarrow")
     except Exception as exc:
         raise ValueError("FactorBatch factors.parquet is unreadable") from exc
     if tuple(frame.columns) != FACTOR_COLUMNS:
         raise ValueError(
             f"factors.parquet columns must be exactly {list(FACTOR_COLUMNS)}; "
             f"received {list(frame.columns)}"
+        )
+    actual_types = tuple(str(value) for value in frame.dtypes)
+    expected_types = (
+        frozenset({"string[pyarrow]", "large_string[pyarrow]"}),
+        frozenset({"string[pyarrow]", "large_string[pyarrow]"}),
+        frozenset({"date32[day][pyarrow]"}),
+        frozenset({"double[pyarrow]"}),
+        frozenset({"bool[pyarrow]"}),
+    )
+    type_pairs = zip(actual_types, expected_types, strict=True)
+    if any(actual not in expected for actual, expected in type_pairs):
+        raise ValueError(
+            "factors.parquet schema mismatch: expected string/string/date32/float64/bool, "
+            f"received={actual_types}"
         )
     if frame.empty:
         raise ValueError("factors.parquet must not be empty")
@@ -361,6 +463,7 @@ def _load_rows(
     manifest = cast(dict[str, Any], json.loads(manifest_path.read_text(encoding="utf-8")))
     artifact = cast(dict[str, Any], manifest["artifact"])
     coverage = cast(dict[str, Any], manifest["coverage"])
+    input_metadata = cast(dict[str, Any], manifest["input"])
     unique_dates = {row.asof_date for row in rows}
     if len(rows) != int(artifact["row_count"]) or len(rows) != int(coverage["actual_rows"]):
         raise ValueError("manifest row count does not match factors.parquet")
@@ -371,6 +474,24 @@ def _load_rows(
         or max(unique_dates) != metadata.maximum_asof_date
     ):
         raise ValueError("manifest date range does not match factors.parquet")
+    eligible_rows = sum(row.eligible for row in rows)
+    if (
+        int(coverage["candidate_rows"]) != len(rows)
+        or int(coverage["expected_eligible_rows"]) != eligible_rows
+        or int(coverage["scored_eligible_rows"]) != eligible_rows
+    ):
+        raise ValueError("manifest coverage does not match factors.parquet")
+    universe_digest = hashlib.sha256()
+    for row in rows:
+        line = json.dumps(
+            [row.security_id, row.symbol, row.asof_date.isoformat(), row.eligible],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        universe_digest.update(line.encode("utf-8"))
+        universe_digest.update(b"\n")
+    if input_metadata["universe_sha256"] != universe_digest.hexdigest():
+        raise ValueError("FactorBatch universe hash does not match factors.parquet")
     return tuple(rows)
 
 
@@ -378,8 +499,8 @@ def _validate_bundle(bundle_dir: Path) -> _ValidatedBundle:
     resolved = bundle_dir.expanduser().resolve()
     if not resolved.is_dir() or resolved.name.startswith("."):
         raise ValueError("FactorBatch must be a finalized directory")
-    visible_files = {path.name for path in resolved.iterdir() if not path.name.startswith(".")}
-    if visible_files != {"factors.parquet", "manifest.json"}:
+    entries = {path.name for path in resolved.iterdir()}
+    if entries != {"factors.parquet", "manifest.json"}:
         raise ValueError(
             "FactorBatch directory must contain only factors.parquet and manifest.json"
         )
@@ -412,7 +533,7 @@ def _bar_availability_by_date(
     for bar in bars:
         event_date = datetime.fromtimestamp(bar.ts_event / 1_000_000_000, tz=UTC).date()
         if event_date in result:
-            raise ValueError(f"duplicate signal bars for {spec.canonical_id} on {event_date}")
+            raise ValueError(f"duplicate {suffix} bars for {spec.canonical_id} on {event_date}")
         result[event_date] = bar.ts_init
     return result
 
@@ -435,7 +556,7 @@ def _score_signature(value: FactorScoreData) -> tuple[object, ...]:
 
 
 def _catalog_factor_scores(catalog: CatalogRepository) -> tuple[FactorScoreData, ...]:
-    values = catalog.catalog.query(FactorScoreData, metadata=FACTOR_DATA_METADATA)
+    values = catalog.catalog.query(FactorScoreData)
     result: list[FactorScoreData] = []
     for value in values:
         payload = value.data if isinstance(value, CustomData) else value
@@ -451,6 +572,7 @@ def import_factor_bundle(
     catalog_path: Path,
     instruments: tuple[InstrumentSpec, ...],
     signal_bar_type_suffix: str,
+    execution_bar_type_suffix: str,
 ) -> FactorImportSummary:
     """完整校验一个 FactorBatch 并原子地写入规范 NT Catalog。"""
     bundle = _validate_bundle(bundle_dir)
@@ -463,11 +585,21 @@ def import_factor_bundle(
     rows_by_key = {(row.asof_date, row.security_id): row for row in bundle.rows}
     factor_dates = sorted({row.asof_date for row in bundle.rows})
     catalog = CatalogRepository(catalog_path)
-    availability = {
+    signal_availability = {
         spec.canonical_id: _bar_availability_by_date(
             catalog,
             spec,
             signal_bar_type_suffix,
+            bundle.metadata.minimum_asof_date,
+            bundle.metadata.maximum_asof_date,
+        )
+        for spec in mapped
+    }
+    execution_availability = {
+        spec.canonical_id: _bar_availability_by_date(
+            catalog,
+            spec,
+            execution_bar_type_suffix,
             bundle.metadata.minimum_asof_date,
             bundle.metadata.maximum_asof_date,
         )
@@ -501,19 +633,23 @@ def import_factor_bundle(
                 )
             selected.append((spec, row))
 
-        available_times = [
-            availability[spec.canonical_id][asof_date]
+        signal_available_times = [
+            signal_availability[spec.canonical_id][asof_date]
             for spec, _ in selected
-            if asof_date in availability[spec.canonical_id]
+            if asof_date in signal_availability[spec.canonical_id]
         ]
-        if not available_times:
+        if not signal_available_times:
             raise ValueError(f"Catalog has no signal bar for factor date {asof_date}")
         for spec, row in selected:
-            if row.eligible and asof_date not in availability[spec.canonical_id]:
+            if row.eligible and asof_date not in signal_availability[spec.canonical_id]:
                 raise ValueError(
                     f"Catalog has no signal bar for eligible {spec.canonical_id} on {asof_date}"
                 )
-        available_at_ns = max(available_times)
+            if row.eligible and asof_date not in execution_availability[spec.canonical_id]:
+                raise ValueError(
+                    f"Catalog has no execution bar for eligible {spec.canonical_id} on {asof_date}"
+                )
+        available_at_ns = max(signal_available_times)
         batch_id = f"{bundle.metadata.delivery_id}:{asof_date.isoformat()}"
         for spec, row in selected:
             scores.append(

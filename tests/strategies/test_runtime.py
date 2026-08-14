@@ -28,24 +28,44 @@ def _context() -> StrategyRuntimeContext:
         signal_scope="test",
         stream_bars=False,
         bootstrap_from_catalog=True,
-        bootstrap_bar_types=("SPY.US-1-DAY-LAST-EXTERNAL",),
         catalog_lookback_days=500,
         publish_after_ns=123,
     )
 
 
-def test_builds_configured_dual_momentum_actor() -> None:
+def test_builds_configured_patchtst_factor_actor() -> None:
     strategy = load_active_strategy(PROJECT_ROOT / "config" / "strategies.yaml")
+
+    actor = build_strategy_actor(strategy, _context())
+
+    assert actor.actor_path.endswith(":PatchTSTFactorActor")
+    assert actor.config_path.endswith(":PatchTSTFactorActorConfig")
+    assert actor.config["strategy_name"] == "patchtst_e3"
+    assert actor.config["instrument_ids"] == ["SPY.US", "BIL.US"]
+    assert actor.config["bootstrap_from_catalog"] is True
+    assert actor.config["catalog_lookback_days"] == 500
+    assert actor.config["publish_after_ns"] == 123
+
+
+def test_builds_dual_momentum_actor() -> None:
+    strategy = ConfiguredStrategy(
+        name="dual_momentum",
+        settings=DualMomentumSettings(
+            approval_mode="manual",
+            signal_expiry_hours=4,
+            lookback_months=6,
+            top_n=1,
+            rebalance_frequency="month_end",
+            fallback_instrument="BIL.US",
+        ),
+    )
 
     actor = build_strategy_actor(strategy, _context())
 
     assert actor.actor_path.endswith(":DualMomentumActor")
     assert actor.config_path.endswith(":DualMomentumActorConfig")
     assert actor.config["strategy_name"] == "dual_momentum"
-    assert actor.config["instrument_ids"] == ["SPY.US", "BIL.US"]
-    assert actor.config["bootstrap_from_catalog"] is True
-    assert actor.config["catalog_lookback_days"] == 500
-    assert actor.config["publish_after_ns"] == 123
+    assert "bootstrap_bar_types" not in actor.config
 
 
 def test_rejects_unimplemented_strategy_at_runtime_boundary() -> None:

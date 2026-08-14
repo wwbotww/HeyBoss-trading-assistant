@@ -1,0 +1,54 @@
+{
+  "artifact": {
+    "bytes": 2075,
+    "date_count": 1,
+    "file": "factors.parquet",
+    "row_count": 10,
+    "sha256": "636eeb8632ab91dc839db6309873e2a7a8f05f10b34b6c64db9841698b813836"
+  },
+  "contract": "facdigger.factor_batch",
+  "coverage": {
+    "actual_rows": 10,
+    "candidate_rows": 10,
+    "expected_eligible_rows": 8,
+    "missing_eligible_rows": 0,
+    "ratio": 1.0,
+    "scored_eligible_rows": 8
+  },
+  "created_at": "2026-08-14T06:34:47.822522Z",
+  "delivery_id": "3b9eaacfb408310ed421659b12ffca70c8e84620169a208d6614a7a47e6bbea4",
+  "input": {
+    "identity_policy": "eodhd_isin_only",
+    "snapshot_id": "MOCK-INFERENCE-SNAPSHOT-NOT-FOR-TRADING",
+    "snapshot_manifest_sha256": "b0b8249c15e632b0da44f22dcce8390d95476936bcb4f99ebccf68bf1be0c906",
+    "universe_semantics": "complete_candidate_cross_section",
+    "universe_sha256": "c521a43c4b34b4ac1837d4c9782af075a1a4aeb4d092a52c2149a71a68950788"
+  },
+  "model": {
+    "checkpoint_sha256": "aa501e995c568d0dcc1f5c84c4a7707ca19ca004f6ffbaa95b1a589615c85626",
+    "forecast_horizon_sessions": 5,
+    "higher_score_is_better": true,
+    "model_id": "MOCK-E3-NOT-FOR-TRADING",
+    "model_type": "financial_pretrained_patchtst",
+    "release_id": "fa7c42f51a9860a0f058b714416c4a162779a1392937d42321963b071ff5a034",
+    "score_semantics": "raw_cross_sectional_rank_score",
+    "training_dataset_id": "MOCK-DATASET-NOT-FOR-RESEARCH"
+  },
+  "source": {
+    "commit": "0000000000000000000000000000000000000000",
+    "kind": "signal_inference",
+    "repository": "FacDiggerNN",
+    "run_id": "MOCK-E3-HEYBOSS-CONTRACT-ONLY",
+    "run_manifest_sha256": "f787552dd9e2fd938095be04496757fefbbef2cdf2879870b9468d6e74c5128c"
+  },
+  "status": "complete",
+  "time": {
+    "calendar": "US_EQUITIES_REGULAR",
+    "calendar_version": "2026.1",
+    "earliest_execution": "next_regular_session_open",
+    "maximum_asof_date": "2026-08-12",
+    "minimum_asof_date": "2026-08-12",
+    "signal_available": "after_regular_session_close",
+    "timezone": "America/New_York"
+  }
+}

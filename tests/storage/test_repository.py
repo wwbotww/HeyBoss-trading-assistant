@@ -81,6 +81,8 @@ def test_signal_workflow_is_idempotent_and_transitions_atomically(tmp_path: Path
     assert duplicate.event_id == workflow.event_id
     assert duplicate.target_weights == (("SPY.ARCA", 0.25),)
     assert repository.count(SignalWorkflowRecord) == 1
+    assert repository.list_new_signal_workflows(scope="paper:DU123") == (workflow,)
+    assert repository.list_new_signal_workflows(scope="paper:OTHER") == ()
 
     assert repository.prepare_manual_approval(
         workflow.event_id,
@@ -88,6 +90,7 @@ def test_signal_workflow_is_idempotent_and_transitions_atomically(tmp_path: Path
         risk_summary="risk passed",
         timestamp_ns=12_000_000_000,
     )
+    assert repository.list_new_signal_workflows(scope="paper:DU123") == ()
     assert not repository.prepare_manual_approval(
         workflow.event_id,
         planned_orders=(),

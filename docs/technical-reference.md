@@ -87,14 +87,14 @@ IBKR 历史适配器保留为备用来源，使用分块、重叠和追加模式
 
 ### 标的身份
 
-`instrument_id` 是稳定 canonical ID，例如 `SPY.US`，用于：
+`instrument_id` 是稳定 canonical ID，例如 `AAPL.US`，用于：
 
 - Catalog；
 - 策略和信号；
 - 回测；
 - 审计记录。
 
-`data_symbol` 只用于供应商请求。`live_instrument_id` 只在 IBKR 合约解析和执行边界使用，例如把 `SPY.US` 映射成 `SPY.ARCA`。
+`data_symbol` 只用于供应商请求。`live_instrument_id` 只在 IBKR 合约解析和执行边界使用，例如把 `AAPL.US` 映射成 `AAPL.NASDAQ`。
 
 `factor_security_id` 是 FacDigger 稳定身份到 canonical ID 的显式映射。它是可选字段；没有映射的标的不进入因子批次。禁止根据展示用 `symbol` 自动匹配。
 
@@ -131,9 +131,9 @@ EODHD 的 `adjusted_close` 同时包含拆股和现金分红影响，原始 OHLC
 
 ### FacDigger 因子边界
 
-FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBoss 交付内容寻址的 `factors.parquet + manifest.json` FactorBatch。HeyBoss importer 严格验证五列 schema、哈希、行数、覆盖率、时间语义和身份映射，将每个 as-of 横截面转换成带显式 `batch_id/batch_size` 的 NT `FactorScoreData`。
+FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBoss 交付内容寻址的 `factors.parquet + manifest.json` FactorBatch。HeyBoss importer 严格验证五列 schema、哈希、行数、覆盖率、时间语义和身份映射；每个 eligible 标的还必须在同日具备 INTERNAL 信号 Bar 与 EXTERNAL 执行 Bar。通过后才将每个 as-of 横截面转换成带显式 `batch_id/batch_size` 的 NT `FactorScoreData`。
 
-`FactorScoreData` 是注册到 NT 的逐证券 CustomData。回测通过 `BacktestDataConfig` 从 Catalog 流式投递；paper Actor 通过同一 Catalog 历史请求 bootstrap。两条入口最终调用相同的批次聚合方法。Actor 永远不读取 FactorBatch 文件，也不加载 FacDigger 代码。
+`FactorScoreData` 是注册到 NT 的逐证券 CustomData。它以固定 CustomData 类身份路由，不在 `DataType.metadata` 中保存契约标记：NT 1.230 的 Catalog 历史查询不会把查询 metadata 带回数据对象，若订阅端依赖 metadata 会形成不同 Topic 并丢失整批数据。回测通过 `BacktestDataConfig` 从 Catalog 流式投递；paper Actor 通过同一 Catalog 历史请求 bootstrap。两条入口最终调用相同的批次聚合方法。Actor 永远不读取 FactorBatch 文件，也不加载 FacDigger 代码。
 
 详细契约与 FacDigger 改造步骤见 [factor-integration.md](factor-integration.md)。
 
@@ -143,7 +143,7 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 
 `config/strategies.yaml` 使用 `active_strategy` 指定一次 backtest/live 运行的唯一策略。`load_active_strategy()` 负责读取和校验，`build_strategy_actor()` 根据运行环境注入 BarType、标的、数据库、作用域和预热参数。
 
-backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual_momentum` 与 `patchtst_e3`；未知策略在启动阶段失败关闭。系统不在下游合并多个策略，默认仍启用双动量。
+backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual_momentum` 与 `patchtst_e3`；未知策略在启动阶段失败关闭。系统不在下游合并多个策略。当前普通股联调配置默认启用 `patchtst_e3`；恢复双动量前必须同时恢复 ETF 标的池与 BIL 兜底标的。
 
 ### 双动量规则
 
@@ -172,6 +172,7 @@ backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual
 
 `ExecutionGatewayStrategy` 是唯一订单入口，负责：
 
+- 在 paper 启动时通过 NT DataEngine 为所有策略统一预热配置中的 EXTERNAL Bar；
 - 读取执行 Bar、账户现金和账户级仓位；
 - 把 canonical ID 映射为环境执行 ID；
 - 应用策略资金上限和风险阈值；
@@ -182,7 +183,9 @@ backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual
 - 调用 NT `order_factory` 和 `submit_order`；
 - 审计订单生命周期与成交。
 
-计划阶段只要求目标标的和当前非零持仓具有最新执行价。没有目标且没有持仓时直接形成空计划；这使数百只候选池不必全部具备 execution Bar，同时仍保证任何买入或退出都有可成交价格。未知目标身份失败关闭。
+Gateway 启动时会请求配置池中的全部 EXTERNAL Bar，并在请求完成前暂存新信号。计划阶段仍只强制目标标的和当前非零持仓具有最新执行价；缺失的非目标候选不会阻止无关订单。未知目标身份失败关闭。
+
+NT 固定先启动 Actor、再启动 Strategy。策略 Actor 的同步 Catalog bootstrap 因而可能在 Gateway 订阅 Topic 前已经生成信号。Actor 会先把幂等工作流写为 `NEW`；Gateway 完成执行价预热后按同一 `signal_scope` 恢复这些 `NEW` 工作流。恢复只覆盖尚未进入执行边界的信号，不会自动重放 `PROCESSING` 或已提交订单。
 
 manual 工作流：
 
@@ -252,7 +255,7 @@ BacktestNode 和 TradingNode 都装配：
 
 ## Paper 运行设计
 
-TradingNode 启动前通过隔离子进程运行同一个历史同步服务，避免多个 NT 组件在同一进程重复初始化全局日志器。双动量策略从 Catalog 请求 INTERNAL 信号 Bar；因子策略从 Catalog 请求已经导入的最新完整生产批次。执行网关加载 EXTERNAL Bar 估价；IBKR 连接只负责账户、仓位、对账和订单执行。
+TradingNode 启动前通过隔离子进程运行同一个历史同步服务，避免多个 NT 组件在同一进程重复初始化全局日志器。双动量策略只从 Catalog 请求 INTERNAL 信号 Bar；因子策略只请求已经导入的最新完整生产批次。执行网关独立请求全部 EXTERNAL Bar，等待请求完成后再处理暂存或恢复的信号；IBKR 连接只负责账户、仓位、对账和订单执行。
 
 `trading-node` 与 `approval-bot` 是独立进程，以 SQLite 工作流作为唯一审批邮箱。`trading-node` 禁用 Compose 自动重启，避免数据同步失败或订单提交边界异常后自动重放。
 

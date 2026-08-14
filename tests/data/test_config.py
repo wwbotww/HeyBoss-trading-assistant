@@ -17,12 +17,14 @@ def test_load_project_configuration() -> None:
     instruments = load_instruments(PROJECT_ROOT / "config" / "instruments.yaml")
     config = load_data_config(PROJECT_ROOT / "config" / "data.yaml")
 
-    assert instruments[0].instrument_id == "SPY.US"
-    assert instruments[0].resolved_live_instrument_id == "SPY.ARCA"
-    assert instruments[0].data_symbol == "SPY.US"
-    assert instruments[0].first_trading_date == date(1993, 1, 29)
+    assert instruments[0].instrument_id == "AAPL.US"
+    assert instruments[0].resolved_live_instrument_id == "AAPL.NASDAQ"
+    assert instruments[0].data_symbol == "AAPL.US"
+    assert instruments[0].factor_security_id == "eodhd:isin:US0378331005"
+    assert instruments[0].first_trading_date == date(1980, 12, 12)
     assert instruments[0].last_trading_date is None
     assert len(instruments) == 10
+    assert all(instrument.factor_security_id is not None for instrument in instruments)
     assert config.historical_data.provider == "eodhd"
     assert config.historical_data.price_basis == "total_return_adjusted"
     assert config.historical_data.refresh_mode == "replace"

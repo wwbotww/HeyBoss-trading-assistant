@@ -33,7 +33,7 @@ from trading_assistant.backtest.reporting import (
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec, load_data_config, load_instruments
 from trading_assistant.data.corporate_actions import corporate_action_path
-from trading_assistant.data.factor import FACTOR_DATA_METADATA, FactorScoreData
+from trading_assistant.data.factor import FactorScoreData
 from trading_assistant.data.service import select_instruments
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.storage.repository import TradingRepository
@@ -125,7 +125,6 @@ def _build_run_config(
             signal_scope=f"backtest:{run_id}",
             stream_bars=True,
             bootstrap_from_catalog=False,
-            bootstrap_bar_types=(),
             catalog_lookback_days=0,
             publish_after_ns=int(
                 datetime.combine(evaluation_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000
@@ -141,6 +140,7 @@ def _build_run_config(
             "execution_bar_types": execution_bar_types,
             "approval_mode": "auto",
             "database_url": database_url,
+            "signal_scope": f"backtest:{run_id}",
             "account_id": "US-001",
             "strategy_capital_usd": risk.strategy_capital_usd,
             "max_order_notional_usd": risk.max_order_notional_usd,
@@ -148,6 +148,7 @@ def _build_run_config(
             "max_daily_new_positions": risk.max_daily_new_positions,
             "max_gross_exposure": risk.max_gross_exposure,
             "backtest_run_id": run_id,
+            "bootstrap_from_catalog": False,
         },
     )
     fee_model = ImportableFeeModelConfig(
@@ -213,7 +214,6 @@ def _build_run_config(
                 catalog_path=str(catalog_path),
                 data_cls="trading_assistant.data.factor:FactorScoreData",
                 client_id="FACTOR",
-                metadata=FACTOR_DATA_METADATA,
                 start_time=data_start.isoformat(),
                 end_time=None if end is None else (end + timedelta(days=1)).isoformat(),
                 optimize_file_loading=True,
@@ -278,7 +278,6 @@ def run_backtest(
             end=(
                 None if effective_end is None else (effective_end + timedelta(days=1)).isoformat()
             ),
-            metadata=FACTOR_DATA_METADATA,
         )
         if not factor_rows:
             raise ValueError("Catalog 在回测区间缺少 FactorScoreData")

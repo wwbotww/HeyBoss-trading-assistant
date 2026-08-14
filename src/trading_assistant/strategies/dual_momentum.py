@@ -36,7 +36,6 @@ class DualMomentumActorConfig(ActorConfig, frozen=True):
     bootstrap_from_catalog: bool = False
     catalog_lookback_days: int = 2_200
     catalog_client_id: str = "CATALOG"
-    bootstrap_bar_types: tuple[str, ...] = ()
     publish_after_ns: int = 0
 
 
@@ -147,9 +146,7 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         """通过 NT DataEngine 向 Catalog 请求策略启动所需历史 Bar。"""
         end = datetime.fromtimestamp(self.clock.timestamp_ns() / 1_000_000_000, tz=UTC)
         start = end - timedelta(days=self._settings.catalog_lookback_days)
-        requested_bar_types = tuple(
-            dict.fromkeys((*self._settings.bar_types, *self._settings.bootstrap_bar_types))
-        )
+        requested_bar_types = tuple(dict.fromkeys(self._settings.bar_types))
         self._catalog_requests = set(requested_bar_types)
         client_id = ClientId(self._settings.catalog_client_id)
         for value in requested_bar_types:

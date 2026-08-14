@@ -23,7 +23,6 @@ class StrategyRuntimeContext:
     signal_scope: str
     stream_bars: bool
     bootstrap_from_catalog: bool
-    bootstrap_bar_types: tuple[str, ...]
     catalog_lookback_days: int
     publish_after_ns: int
     factor_data_client_id: str = "FACTOR"
@@ -74,7 +73,6 @@ def build_strategy_actor(
         "signal_scope": context.signal_scope,
         "stream_bars": context.stream_bars,
         "bootstrap_from_catalog": context.bootstrap_from_catalog,
-        "bootstrap_bar_types": list(context.bootstrap_bar_types),
         "publish_after_ns": context.publish_after_ns,
     }
     if context.catalog_lookback_days > 0:
