@@ -273,6 +273,24 @@ def test_portfolio_snapshot_and_dashboard_audits_are_readable(tmp_path: Path) ->
             ),
         ),
     )
+    repository.record_portfolio_snapshot(
+        timestamp_ns=9_000_000_000,
+        account_id="IB-DU123",
+        currency="USD",
+        net_liquidation=10_000.0,
+        free_cash=8_000.0,
+        locked_cash=2_000.0,
+        positions=(),
+    )
+    repository.record_portfolio_snapshot(
+        timestamp_ns=20_000_000_000,
+        account_id="IB-OTHER",
+        currency="USD",
+        net_liquidation=99_000.0,
+        free_cash=99_000.0,
+        locked_cash=0.0,
+        positions=(),
+    )
     event = TradeSignalEvent(
         strategy_name="dual_momentum",
         target_weights=(("SPY.ARCA", 0.5),),
@@ -303,15 +321,37 @@ def test_portfolio_snapshot_and_dashboard_audits_are_readable(tmp_path: Path) ->
         quantity=5.0,
         reason="IBKR code 201",
     )
+    repository.record_fill(
+        run_id=None,
+        signal_event_id=workflow.event_id,
+        trade_id="trade-1",
+        timestamp_ns=13_000_000_000,
+        strategy_name="dual_momentum",
+        instrument_id="SPY.ARCA",
+        client_order_id="O-1",
+        direction="BUY",
+        quantity=5.0,
+        price=600.0,
+        commission=0.5,
+    )
 
     snapshot = repository.latest_portfolio_snapshot(account_id="IB-DU123")
     assert snapshot is not None
     assert snapshot.net_liquidation == 10_500.0
     assert snapshot.positions[0].instrument_id == "SPY.ARCA"
     assert repository.list_signal_reviews(scope="paper:DU123")[0].target_weight == 0.5
+    assert repository.list_signal_workflows(scope="paper:DU123")[0].event_id == workflow.event_id
+    assert repository.list_signal_workflows(scope="paper:OTHER") == ()
     assert repository.list_decision_audits(scope="paper:DU123")[0].decision == "RISK_REJECTED"
     assert repository.list_order_audits(scope="paper:DU123")[0].reason == "IBKR code 201"
-    assert repository.count(AccountSnapshotRecord) == 1
+    fills = repository.list_fill_audits(scope="paper:DU123")
+    assert fills[0].event_id == workflow.event_id
+    assert fills[0].strategy_name == "dual_momentum"
+    assert repository.list_fill_audits(scope="paper:OTHER") == ()
+    history = repository.list_account_snapshots(account_id="IB-DU123")
+    assert [snapshot.net_liquidation for snapshot in history] == [10_500.0, 10_000.0]
+    assert repository.list_account_snapshots(account_id="IB-DU123", limit=1) == history[:1]
+    assert repository.count(AccountSnapshotRecord) == 3
     repository.close()
 
 

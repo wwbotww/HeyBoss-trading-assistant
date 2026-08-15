@@ -56,6 +56,8 @@ class FillAudit:
     quantity: float
     price: float
     commission: float
+    event_id: str = ""
+    strategy_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,18 @@ class PortfolioSnapshot:
     free_cash: float
     locked_cash: float
     positions: tuple[PositionSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class AccountSnapshotAudit:
+    """脱离 Session 的只读账户资金快照。"""
+
+    timestamp_utc: datetime
+    account_id: str
+    currency: str
+    net_liquidation: float
+    free_cash: float
+    locked_cash: float
 
 
 @dataclass(frozen=True)
@@ -307,6 +321,54 @@ class TradingRepository:
                 positions=positions,
             )
 
+    def list_account_snapshots(
+        self,
+        *,
+        account_id: str,
+        limit: int = 500,
+    ) -> tuple[AccountSnapshotAudit, ...]:
+        """按时间倒序读取指定账户的资金历史。"""
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(AccountSnapshotRecord)
+                .where(AccountSnapshotRecord.account_id == account_id)
+                .order_by(
+                    AccountSnapshotRecord.timestamp_utc.desc(),
+                    AccountSnapshotRecord.id.desc(),
+                )
+                .limit(limit)
+            )
+            return tuple(
+                AccountSnapshotAudit(
+                    timestamp_utc=self._as_utc(row.timestamp_utc),
+                    account_id=row.account_id,
+                    currency=row.currency,
+                    net_liquidation=row.net_liquidation,
+                    free_cash=row.free_cash,
+                    locked_cash=row.locked_cash,
+                )
+                for row in rows
+            )
+
+    def list_signal_workflows(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+    ) -> tuple[SignalWorkflow, ...]:
+        """按更新时间倒序读取指定作用域的工作流。"""
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(SignalWorkflowRecord)
+                .where(SignalWorkflowRecord.scope == scope)
+                .order_by(
+                    SignalWorkflowRecord.updated_at.desc(),
+                    SignalWorkflowRecord.event_id.desc(),
+                )
+                .limit(limit)
+            )
+            return tuple(self._workflow_snapshot(row) for row in rows)
+
     def list_signal_reviews(self, *, scope: str, limit: int = 500) -> tuple[SignalReview, ...]:
         """按时间倒序读取指定作用域的逐标的信号。"""
         with Session(self._engine) as session:
@@ -384,6 +446,38 @@ class TradingRepository:
                     direction=row.direction,
                     quantity=row.quantity,
                     reason=row.reason,
+                )
+                for row in rows
+            )
+
+    def list_fill_audits(self, *, scope: str, limit: int = 500) -> tuple[FillAudit, ...]:
+        """按时间倒序读取指定作用域的 paper/live 成交。"""
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(FillRecord)
+                .join(
+                    SignalWorkflowRecord,
+                    SignalWorkflowRecord.event_id == FillRecord.event_id,
+                )
+                .where(
+                    SignalWorkflowRecord.scope == scope,
+                    FillRecord.run_id.is_(None),
+                )
+                .order_by(FillRecord.timestamp_utc.desc(), FillRecord.id.desc())
+                .limit(limit)
+            )
+            return tuple(
+                FillAudit(
+                    trade_id=row.trade_id,
+                    timestamp_utc=self._as_utc(row.timestamp_utc),
+                    instrument_id=row.instrument_id,
+                    client_order_id=row.client_order_id,
+                    direction=row.direction,
+                    quantity=row.quantity,
+                    price=row.price,
+                    commission=row.commission,
+                    event_id=row.event_id,
+                    strategy_name=row.strategy_name,
                 )
                 for row in rows
             )
@@ -998,6 +1092,8 @@ class TradingRepository:
                     quantity=row.quantity,
                     price=row.price,
                     commission=row.commission,
+                    event_id=row.event_id,
+                    strategy_name=row.strategy_name,
                 )
                 for row in rows
             )

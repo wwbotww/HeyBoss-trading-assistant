@@ -1,4 +1,4 @@
-# Trading Assistant
+# HeyBoss Trading Assistant
 
 基于 NautilusTrader、EODHD 和 Interactive Brokers 的中低频半自动交易助手。系统从日线数据产生目标仓位，经过应用风控和人工或自动审批后，只通过 NautilusTrader 的统一执行链路向 IBKR paper 账户提交订单。
 
@@ -229,7 +229,17 @@ docker compose run --rm --no-deps trading-node \
 docker compose --profile application up -d trading-node dashboard
 ```
 
-浏览器访问 `http://127.0.0.1:8501`。页面包括账户概览、信号复盘、回测报告、风控与订单。看板没有审批、下单或撤单入口。
+浏览器访问 `http://127.0.0.1:8501`。看板固定为五个页面：
+
+- **总览**：账户快照、最新因子、工作流和需要关注的状态；
+- **Paper 交易**：资金历史、仓位、工作流、订单与成交时间线；
+- **策略与信号**：PatchTST 因子排名、目标组合和信号事后收益；
+- **回测**：最多三次运行对比、绩效边界、权益与完整 NT 明细；
+- **数据与系统**：Catalog 覆盖、最新质量报告、因子交付和运行顺序。
+
+业务时间默认显示北京时间，技术详情保留 UTC。账户标识会脱敏；数据质量原始错误消息和本地文件路径不会在界面展示。单日或评估期过短的报告只标记为链路验证，不作为绩效结论。
+
+看板只读取 SQLite、NT Catalog 和 `reports/`，不会连接 IBKR、EODHD 或 Telegram，也没有同步、审批、下单、撤单或重试入口。账户快照陈旧只代表最近一次落库时间较早，不能据此判断 IBKR 当前连接状态。
 
 ## 停止服务
 
