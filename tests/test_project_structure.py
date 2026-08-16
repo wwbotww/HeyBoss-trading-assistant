@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from trading_assistant import __version__
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = PROJECT_ROOT / "src" / "trading_assistant"
+WEB_UI_ROOT = PROJECT_ROOT / "web-ui" / "src"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -19,6 +21,20 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _imported_modules(source_path: Path) -> set[str]:
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported.update(
+        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    )
+    return imported
 
 
 def test_package_version() -> None:
@@ -36,8 +52,9 @@ def test_required_modules_exist() -> None:
         "storage",
         "notify",
         "risk",
-        "dashboard",
         "backtest",
+        "application",
+        "web_api",
     }
     actual_modules = {path.name for path in PACKAGE_ROOT.iterdir() if path.is_dir()}
     assert required_modules <= actual_modules
@@ -47,17 +64,99 @@ def test_signal_package_does_not_import_nautilus() -> None:
     """signals 包禁止依赖 NautilusTrader。"""
     signal_root = PACKAGE_ROOT / "signals"
     for source_path in signal_root.glob("*.py"):
-        tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        imported_modules = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
-        imported_modules.update(
-            node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        assert not any(
+            name.startswith("nautilus_trader") for name in _imported_modules(source_path)
         )
-        assert not any(name.startswith("nautilus_trader") for name in imported_modules)
+
+
+def test_web_api_does_not_import_execution_runners_or_notification_clients() -> None:
+    """删除 Web 后交易核心应不受影响, API 也不得形成控制路径。"""
+    forbidden = {
+        "trading_assistant.execution.gateway",
+        "trading_assistant.live.runner",
+        "trading_assistant.backtest.runner",
+        "trading_assistant.notify.bot",
+    }
+    for source_path in (PACKAGE_ROOT / "web_api").rglob("*.py"):
+        assert _imported_modules(source_path).isdisjoint(forbidden)
+
+
+def test_legacy_dashboard_is_absent() -> None:
+    """新 API 不得重新引入旧 Streamlit 展示层。"""
+    assert not (PACKAGE_ROOT / "dashboard").exists()
+
+
+def test_web_ui_http_boundary_is_read_only() -> None:
+    """Vue 只能通过集中式只读客户端访问 API。"""
+    source_paths = [
+        path
+        for path in WEB_UI_ROOT.rglob("*")
+        if path.suffix in {".ts", ".vue"} and path.name != "schema.d.ts"
+    ]
+    direct_fetchers = {
+        str(path.relative_to(WEB_UI_ROOT))
+        for path in source_paths
+        if re.search(r"(?<![A-Za-z0-9_])fetch\(", path.read_text(encoding="utf-8"))
+    }
+    assert direct_fetchers == {"api/client.ts"}
+
+    client_source = (WEB_UI_ROOT / "api" / "client.ts").read_text(encoding="utf-8")
+    assert all(
+        token not in client_source
+        for token in ("http.POST(", "http.PUT(", "http.PATCH(", "http.DELETE(")
+    )
+
+
+def test_web_compose_services_are_isolated_and_read_only() -> None:
+    """Web 容器只能获得只读数据和最小环境变量, 且不反向控制核心服务。"""
+    compose = _load_yaml(PROJECT_ROOT / "docker-compose.yml")
+    services = compose["services"]
+    web_api = services["web-api"]
+    web_ui = services["web-ui"]
+
+    assert web_api["profiles"] == ["web"]
+    assert "env_file" not in web_api
+    assert "ports" not in web_api
+    assert set(web_api["environment"]) == {
+        "BACKTEST_DATABASE_URL",
+        "CATALOG_PATH",
+        "DATA_QUALITY_REPORT_ROOT",
+        "LIVE_DATABASE_URL",
+        "PORTFOLIO_SNAPSHOT_STALE_SECONDS",
+        "REPORT_ROOT",
+        "TWS_ACCOUNT",
+    }
+    assert web_api["volumes"] == [
+        "./catalog:/app/catalog:ro",
+        "./data:/app/data:ro",
+        "./reports:/app/reports:ro",
+    ]
+
+    assert web_ui["profiles"] == ["web"]
+    assert web_ui["build"]["context"] == "./web-ui"
+    assert web_ui["ports"] == ["127.0.0.1:${WEB_PORT:-8080}:8080"]
+    assert web_ui["depends_on"] == {"web-api": {"condition": "service_healthy"}}
+
+    for service_name in ("ib-gateway", "trading-node", "approval-bot"):
+        dependencies = services[service_name].get("depends_on", {})
+        assert set(dependencies).isdisjoint({"web-api", "web-ui"})
+
+
+def test_web_ui_runtime_proxy_preserves_same_origin_failure_boundary() -> None:
+    """Nginx 应支持 SPA 深链, 并把 API 上游失败保持在统一错误契约内。"""
+    nginx = (PROJECT_ROOT / "web-ui" / "nginx.conf").read_text(encoding="utf-8")
+    dockerfile = (PROJECT_ROOT / "web-ui" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert dockerfile.startswith("FROM node:24-alpine AS builder")
+    assert "FROM nginx:alpine" in dockerfile
+    assert "try_files $uri $uri/ /index.html;" in nginx
+    assert "proxy_pass $web_api_upstream$request_uri;" in nginx
+    assert "resolver 127.0.0.11" in nginx
+    assert "default_type application/problem+json;" in nginx
+
+    docker_ignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert "artifacts2" in docker_ignore
+    assert "web-ui/node_modules" in docker_ignore
 
 
 def test_execution_gateway_is_the_only_submit_order_caller() -> None:

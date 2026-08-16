@@ -13,6 +13,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 /htmlcov/
+.pnpm-store/
 
 # 编辑器与系统文件
 .DS_Store

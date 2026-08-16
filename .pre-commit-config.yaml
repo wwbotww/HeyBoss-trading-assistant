@@ -23,3 +23,33 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+      - id: web-api-schema
+        name: regenerate Web API types
+        entry: pnpm --dir web-ui api:generate
+        language: system
+        pass_filenames: false
+        files: ^(scripts/export_openapi\.py|src/trading_assistant/(application|web_api)/|web-ui/)
+      - id: web-format
+        name: Web format
+        entry: pnpm --dir web-ui format:check
+        language: system
+        pass_filenames: false
+        files: ^web-ui/
+      - id: web-lint
+        name: Web lint
+        entry: pnpm --dir web-ui lint
+        language: system
+        pass_filenames: false
+        files: ^web-ui/
+      - id: web-typecheck
+        name: Web typecheck
+        entry: pnpm --dir web-ui typecheck
+        language: system
+        pass_filenames: false
+        files: ^web-ui/
+      - id: web-test
+        name: Web tests
+        entry: pnpm --dir web-ui test
+        language: system
+        pass_filenames: false
+        files: ^web-ui/

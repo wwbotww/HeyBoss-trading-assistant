@@ -46,6 +46,13 @@ def test_records_signal_approval_and_run(tmp_path: Path) -> None:
     assert repository.count(SignalRecord) == 1
     assert repository.count(ApprovalRecord) == 1
     assert repository.count(BacktestRunRecord) == 1
+    repository.healthcheck()
+    runs = repository.list_backtest_runs(limit=1)
+    assert runs[0].run_id == "run-1"
+    assert runs[0].status == "COMPLETED"
+    assert repository.get_backtest_run("run-1") == runs[0]
+    assert repository.get_backtest_run("missing") is None
+    assert repository.list_backtest_runs(limit=1, offset=1) == ()
     repository.close()
 
 
@@ -253,8 +260,8 @@ def test_backtest_trade_ids_are_unique_per_run(tmp_path: Path) -> None:
     repository.close()
 
 
-def test_portfolio_snapshot_and_dashboard_audits_are_readable(tmp_path: Path) -> None:
-    repository = TradingRepository(f"sqlite:///{tmp_path}/dashboard.db")
+def test_portfolio_snapshot_and_trading_audits_are_readable(tmp_path: Path) -> None:
+    repository = TradingRepository(f"sqlite:///{tmp_path}/trading-audit.db")
     repository.create_schema()
     repository.record_portfolio_snapshot(
         timestamp_ns=10_000_000_000,
@@ -321,6 +328,18 @@ def test_portfolio_snapshot_and_dashboard_audits_are_readable(tmp_path: Path) ->
         quantity=5.0,
         reason="IBKR code 201",
     )
+    repository.record_order_event(
+        signal_event_id=workflow.event_id,
+        order_event_id="order-event-older",
+        timestamp_ns=11_500_000_000,
+        strategy_name="dual_momentum",
+        instrument_id="SPY.ARCA",
+        client_order_id="O-1",
+        status="SUBMITTED",
+        direction="BUY",
+        quantity=5.0,
+        reason="late audit insert",
+    )
     repository.record_fill(
         run_id=None,
         signal_event_id=workflow.event_id,
@@ -340,13 +359,88 @@ def test_portfolio_snapshot_and_dashboard_audits_are_readable(tmp_path: Path) ->
     assert snapshot.net_liquidation == 10_500.0
     assert snapshot.positions[0].instrument_id == "SPY.ARCA"
     assert repository.list_signal_reviews(scope="paper:DU123")[0].target_weight == 0.5
+    assert (
+        repository.list_signal_reviews(
+            scope="paper:DU123",
+            status="NEW",
+            instrument_id="SPY.ARCA",
+            offset=0,
+        )[0].target_weight
+        == 0.5
+    )
+    assert (
+        repository.list_signal_reviews(
+            scope="paper:DU123",
+            instrument_id="QQQ.NASDAQ",
+        )
+        == ()
+    )
     assert repository.list_signal_workflows(scope="paper:DU123")[0].event_id == workflow.event_id
+    assert (
+        repository.list_signal_workflows(
+            scope="paper:DU123",
+            status="NEW",
+            offset=0,
+        )[0].event_id
+        == workflow.event_id
+    )
+    assert repository.list_signal_workflows(scope="paper:DU123", status="DENIED") == ()
+    assert repository.workflow_status_counts(scope="paper:DU123") == {"NEW": 1}
     assert repository.list_signal_workflows(scope="paper:OTHER") == ()
     assert repository.list_decision_audits(scope="paper:DU123")[0].decision == "RISK_REJECTED"
+    assert (
+        repository.list_decision_audits(
+            scope="paper:DU123",
+            event_id=workflow.event_id,
+            offset=0,
+        )[0].decision
+        == "RISK_REJECTED"
+    )
     assert repository.list_order_audits(scope="paper:DU123")[0].reason == "IBKR code 201"
+    assert (
+        repository.list_order_audits(
+            scope="paper:DU123",
+            status="REJECTED",
+            instrument_id="SPY.ARCA",
+            event_id=workflow.event_id,
+            client_order_id="O-1",
+            client_order_ids=("O-1",),
+            offset=0,
+        )[0].reason
+        == "IBKR code 201"
+    )
+    assert repository.list_order_audits(scope="paper:DU123", status="FILLED") == ()
+    assert (
+        repository.list_latest_order_audits(
+            scope="paper:DU123",
+            status="REJECTED",
+            instrument_id="SPY.ARCA",
+            offset=0,
+            limit=1,
+        )[0].client_order_id
+        == "O-1"
+    )
+    assert (
+        repository.list_latest_order_audits(
+            scope="paper:DU123",
+            status="FILLED",
+        )
+        == ()
+    )
     fills = repository.list_fill_audits(scope="paper:DU123")
     assert fills[0].event_id == workflow.event_id
     assert fills[0].strategy_name == "dual_momentum"
+    assert (
+        repository.list_fill_audits(
+            scope="paper:DU123",
+            instrument_id="SPY.ARCA",
+            event_id=workflow.event_id,
+            client_order_id="O-1",
+            client_order_ids=("O-1",),
+            offset=0,
+        )
+        == fills
+    )
     assert repository.list_fill_audits(scope="paper:OTHER") == ()
     history = repository.list_account_snapshots(account_id="IB-DU123")
     assert [snapshot.net_liquidation for snapshot in history] == [10_500.0, 10_000.0]
@@ -361,6 +455,7 @@ def test_read_only_repository_rejects_writes(tmp_path: Path) -> None:
     writer.create_schema()
     writer.close()
     reader = TradingRepository(database_url, read_only=True)
+    reader.healthcheck()
 
     with pytest.raises(OperationalError, match="readonly"):
         reader.record_portfolio_snapshot(
@@ -373,4 +468,14 @@ def test_read_only_repository_rejects_writes(tmp_path: Path) -> None:
             positions=(),
         )
 
+    reader.close()
+
+
+def test_read_only_repository_does_not_create_a_missing_database(tmp_path: Path) -> None:
+    path = tmp_path / "missing" / "readonly.db"
+    reader = TradingRepository(f"sqlite:///{path}", read_only=True)
+    assert not path.exists()
+    with pytest.raises(OperationalError):
+        reader.healthcheck()
+    assert not path.exists()
     reader.close()

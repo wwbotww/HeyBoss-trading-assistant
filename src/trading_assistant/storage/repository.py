@@ -165,7 +165,7 @@ class AccountSnapshotAudit:
 
 @dataclass(frozen=True)
 class SignalReview:
-    """Dashboard 使用的信号与工作流联合视图。"""
+    """信号与工作流关联后的只读审计视图。"""
 
     event_id: str
     timestamp_utc: datetime
@@ -203,6 +203,17 @@ class OrderAudit:
     direction: str
     quantity: float
     reason: str
+
+
+@dataclass(frozen=True)
+class BacktestRunAudit:
+    """脱离 Session 的回测运行快照。"""
+
+    run_id: str
+    started_at: datetime
+    completed_at: datetime | None
+    status: str
+    summary: dict[str, Any] | None
 
 
 class TradingRepository:
@@ -247,6 +258,11 @@ class TradingRepository:
     def close(self) -> None:
         """释放数据库连接池。"""
         self._engine.dispose()
+
+    def healthcheck(self) -> None:
+        """执行不依赖业务表的只读连接检查。"""
+        with Session(self._engine) as session:
+            session.scalar(select(1))
 
     def record_portfolio_snapshot(
         self,
@@ -326,6 +342,7 @@ class TradingRepository:
         *,
         account_id: str,
         limit: int = 500,
+        offset: int = 0,
     ) -> tuple[AccountSnapshotAudit, ...]:
         """按时间倒序读取指定账户的资金历史。"""
         with Session(self._engine) as session:
@@ -336,6 +353,7 @@ class TradingRepository:
                     AccountSnapshotRecord.timestamp_utc.desc(),
                     AccountSnapshotRecord.id.desc(),
                 )
+                .offset(offset)
                 .limit(limit)
             )
             return tuple(
@@ -355,31 +373,60 @@ class TradingRepository:
         *,
         scope: str,
         limit: int = 500,
+        offset: int = 0,
+        status: str | None = None,
     ) -> tuple[SignalWorkflow, ...]:
         """按更新时间倒序读取指定作用域的工作流。"""
+        statement = select(SignalWorkflowRecord).where(SignalWorkflowRecord.scope == scope)
+        if status is not None:
+            statement = statement.where(SignalWorkflowRecord.status == status)
         with Session(self._engine) as session:
             rows = session.scalars(
-                select(SignalWorkflowRecord)
-                .where(SignalWorkflowRecord.scope == scope)
-                .order_by(
+                statement.order_by(
                     SignalWorkflowRecord.updated_at.desc(),
                     SignalWorkflowRecord.event_id.desc(),
                 )
+                .offset(offset)
                 .limit(limit)
             )
             return tuple(self._workflow_snapshot(row) for row in rows)
 
-    def list_signal_reviews(self, *, scope: str, limit: int = 500) -> tuple[SignalReview, ...]:
-        """按时间倒序读取指定作用域的逐标的信号。"""
+    def workflow_status_counts(self, *, scope: str) -> dict[str, int]:
+        """聚合指定作用域的全部工作流状态。"""
         with Session(self._engine) as session:
             rows = session.execute(
-                select(SignalRecord, SignalWorkflowRecord)
-                .join(
-                    SignalWorkflowRecord,
-                    SignalWorkflowRecord.event_id == SignalRecord.event_id,
-                )
+                select(SignalWorkflowRecord.status, func.count(SignalWorkflowRecord.event_id))
                 .where(SignalWorkflowRecord.scope == scope)
-                .order_by(SignalRecord.timestamp_utc.desc(), SignalRecord.id.desc())
+                .group_by(SignalWorkflowRecord.status)
+            )
+            return {str(status): int(count) for status, count in rows}
+
+    def list_signal_reviews(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+        offset: int = 0,
+        status: str | None = None,
+        instrument_id: str | None = None,
+    ) -> tuple[SignalReview, ...]:
+        """按时间倒序读取指定作用域的逐标的信号。"""
+        statement = (
+            select(SignalRecord, SignalWorkflowRecord)
+            .join(
+                SignalWorkflowRecord,
+                SignalWorkflowRecord.event_id == SignalRecord.event_id,
+            )
+            .where(SignalWorkflowRecord.scope == scope)
+        )
+        if status is not None:
+            statement = statement.where(SignalWorkflowRecord.status == status)
+        if instrument_id is not None:
+            statement = statement.where(SignalRecord.instrument_id == instrument_id)
+        with Session(self._engine) as session:
+            rows = session.execute(
+                statement.order_by(SignalRecord.timestamp_utc.desc(), SignalRecord.id.desc())
+                .offset(offset)
                 .limit(limit)
             )
             return tuple(
@@ -398,17 +445,29 @@ class TradingRepository:
                 for signal, workflow in rows
             )
 
-    def list_decision_audits(self, *, scope: str, limit: int = 500) -> tuple[DecisionAudit, ...]:
+    def list_decision_audits(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+        offset: int = 0,
+        event_id: str | None = None,
+    ) -> tuple[DecisionAudit, ...]:
         """按时间倒序读取指定作用域的风控与审批事件。"""
+        statement = (
+            select(ApprovalRecord)
+            .join(
+                SignalWorkflowRecord,
+                SignalWorkflowRecord.event_id == ApprovalRecord.event_id,
+            )
+            .where(SignalWorkflowRecord.scope == scope)
+        )
+        if event_id is not None:
+            statement = statement.where(ApprovalRecord.event_id == event_id)
         with Session(self._engine) as session:
             rows = session.scalars(
-                select(ApprovalRecord)
-                .join(
-                    SignalWorkflowRecord,
-                    SignalWorkflowRecord.event_id == ApprovalRecord.event_id,
-                )
-                .where(SignalWorkflowRecord.scope == scope)
-                .order_by(ApprovalRecord.timestamp_utc.desc(), ApprovalRecord.id.desc())
+                statement.order_by(ApprovalRecord.timestamp_utc.desc(), ApprovalRecord.id.desc())
+                .offset(offset)
                 .limit(limit)
             )
             return tuple(
@@ -423,47 +482,133 @@ class TradingRepository:
                 for row in rows
             )
 
-    def list_order_audits(self, *, scope: str, limit: int = 500) -> tuple[OrderAudit, ...]:
+    def list_order_audits(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+        offset: int = 0,
+        status: str | None = None,
+        instrument_id: str | None = None,
+        event_id: str | None = None,
+        client_order_id: str | None = None,
+        client_order_ids: tuple[str, ...] | None = None,
+    ) -> tuple[OrderAudit, ...]:
         """按时间倒序读取指定作用域的订单生命周期。"""
+        statement = (
+            select(OrderEventRecord)
+            .join(
+                SignalWorkflowRecord,
+                SignalWorkflowRecord.event_id == OrderEventRecord.event_id,
+            )
+            .where(SignalWorkflowRecord.scope == scope)
+        )
+        if status is not None:
+            statement = statement.where(OrderEventRecord.status == status)
+        if instrument_id is not None:
+            statement = statement.where(OrderEventRecord.instrument_id == instrument_id)
+        if event_id is not None:
+            statement = statement.where(OrderEventRecord.event_id == event_id)
+        if client_order_id is not None:
+            statement = statement.where(OrderEventRecord.client_order_id == client_order_id)
+        if client_order_ids is not None:
+            statement = statement.where(OrderEventRecord.client_order_id.in_(client_order_ids))
         with Session(self._engine) as session:
             rows = session.scalars(
-                select(OrderEventRecord)
-                .join(
-                    SignalWorkflowRecord,
-                    SignalWorkflowRecord.event_id == OrderEventRecord.event_id,
+                statement.order_by(
+                    OrderEventRecord.timestamp_utc.desc(),
+                    OrderEventRecord.id.desc(),
                 )
-                .where(SignalWorkflowRecord.scope == scope)
-                .order_by(OrderEventRecord.timestamp_utc.desc(), OrderEventRecord.id.desc())
+                .offset(offset)
                 .limit(limit)
             )
-            return tuple(
-                OrderAudit(
-                    timestamp_utc=self._as_utc(row.timestamp_utc),
-                    event_id=row.event_id,
-                    instrument_id=row.instrument_id,
-                    client_order_id=row.client_order_id,
-                    status=row.status,
-                    direction=row.direction,
-                    quantity=row.quantity,
-                    reason=row.reason,
-                )
-                for row in rows
-            )
+            return tuple(self._order_audit_snapshot(row) for row in rows)
 
-    def list_fill_audits(self, *, scope: str, limit: int = 500) -> tuple[FillAudit, ...]:
-        """按时间倒序读取指定作用域的 paper/live 成交。"""
+    def list_latest_order_audits(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+        offset: int = 0,
+        status: str | None = None,
+        instrument_id: str | None = None,
+    ) -> tuple[OrderAudit, ...]:
+        """每个订单只返回按事件时间判定的最新生命周期状态。"""
+        ranked = (
+            select(
+                OrderEventRecord.id.label("order_event_id"),
+                func.row_number()
+                .over(
+                    partition_by=OrderEventRecord.client_order_id,
+                    order_by=(
+                        OrderEventRecord.timestamp_utc.desc(),
+                        OrderEventRecord.id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+            .join(
+                SignalWorkflowRecord,
+                SignalWorkflowRecord.event_id == OrderEventRecord.event_id,
+            )
+            .where(SignalWorkflowRecord.scope == scope)
+            .subquery()
+        )
+        statement = (
+            select(OrderEventRecord)
+            .join(ranked, ranked.c.order_event_id == OrderEventRecord.id)
+            .where(ranked.c.row_number == 1)
+        )
+        if status is not None:
+            statement = statement.where(OrderEventRecord.status == status)
+        if instrument_id is not None:
+            statement = statement.where(OrderEventRecord.instrument_id == instrument_id)
         with Session(self._engine) as session:
             rows = session.scalars(
-                select(FillRecord)
-                .join(
-                    SignalWorkflowRecord,
-                    SignalWorkflowRecord.event_id == FillRecord.event_id,
+                statement.order_by(
+                    OrderEventRecord.timestamp_utc.desc(),
+                    OrderEventRecord.id.desc(),
                 )
-                .where(
-                    SignalWorkflowRecord.scope == scope,
-                    FillRecord.run_id.is_(None),
-                )
-                .order_by(FillRecord.timestamp_utc.desc(), FillRecord.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return tuple(self._order_audit_snapshot(row) for row in rows)
+
+    def list_fill_audits(
+        self,
+        *,
+        scope: str,
+        limit: int = 500,
+        offset: int = 0,
+        instrument_id: str | None = None,
+        event_id: str | None = None,
+        client_order_id: str | None = None,
+        client_order_ids: tuple[str, ...] | None = None,
+    ) -> tuple[FillAudit, ...]:
+        """按时间倒序读取指定作用域的 paper/live 成交。"""
+        statement = (
+            select(FillRecord)
+            .join(
+                SignalWorkflowRecord,
+                SignalWorkflowRecord.event_id == FillRecord.event_id,
+            )
+            .where(
+                SignalWorkflowRecord.scope == scope,
+                FillRecord.run_id.is_(None),
+            )
+        )
+        if instrument_id is not None:
+            statement = statement.where(FillRecord.instrument_id == instrument_id)
+        if event_id is not None:
+            statement = statement.where(FillRecord.event_id == event_id)
+        if client_order_id is not None:
+            statement = statement.where(FillRecord.client_order_id == client_order_id)
+        if client_order_ids is not None:
+            statement = statement.where(FillRecord.client_order_id.in_(client_order_ids))
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                statement.order_by(FillRecord.timestamp_utc.desc(), FillRecord.id.desc())
+                .offset(offset)
                 .limit(limit)
             )
             return tuple(
@@ -953,6 +1098,19 @@ class TradingRepository:
         )
 
     @staticmethod
+    def _order_audit_snapshot(row: OrderEventRecord) -> OrderAudit:
+        return OrderAudit(
+            timestamp_utc=TradingRepository._as_utc(row.timestamp_utc),
+            event_id=row.event_id,
+            instrument_id=row.instrument_id,
+            client_order_id=row.client_order_id,
+            status=row.status,
+            direction=row.direction,
+            quantity=row.quantity,
+            reason=row.reason,
+        )
+
+    @staticmethod
     def _as_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
@@ -1072,6 +1230,28 @@ class TradingRepository:
             row.status = status
             row.summary = summary
 
+    def list_backtest_runs(
+        self,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> tuple[BacktestRunAudit, ...]:
+        """按开始时间倒序返回回测运行。"""
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(BacktestRunRecord)
+                .order_by(BacktestRunRecord.started_at.desc(), BacktestRunRecord.run_id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return tuple(self._backtest_run_snapshot(row) for row in rows)
+
+    def get_backtest_run(self, run_id: str) -> BacktestRunAudit | None:
+        """返回指定回测运行。"""
+        with Session(self._engine) as session:
+            row = session.get(BacktestRunRecord, run_id)
+            return None if row is None else self._backtest_run_snapshot(row)
+
     def list_fills(self, run_id: str) -> tuple[FillAudit, ...]:
         """按时间顺序返回某次回测的成交。"""
         with Session(self._engine) as session:
@@ -1102,3 +1282,15 @@ class TradingRepository:
         """返回模型行数。供验收测试使用。"""
         with Session(self._engine) as session:
             return len(list(session.scalars(select(model))))
+
+    @staticmethod
+    def _backtest_run_snapshot(row: BacktestRunRecord) -> BacktestRunAudit:
+        return BacktestRunAudit(
+            run_id=row.run_id,
+            started_at=TradingRepository._as_utc(row.started_at),
+            completed_at=(
+                None if row.completed_at is None else TradingRepository._as_utc(row.completed_at)
+            ),
+            status=row.status,
+            summary=None if row.summary is None else dict(row.summary),
+        )

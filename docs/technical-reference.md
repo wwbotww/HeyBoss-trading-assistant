@@ -4,7 +4,7 @@
 
 ## 总体架构
 
-NautilusTrader 是交易内核，不是所有外围功能的框架。行情规范化、Actor、MessageBus、账户、订单、风控引擎、回测交易所和 IBKR 执行都使用 NT；配置、纯信号计算、SQLite 审计、Telegram 和 Streamlit 位于其外围。
+NautilusTrader 是交易内核，不是所有外围功能的框架。行情规范化、Actor、MessageBus、账户、订单、风控引擎、回测交易所和 IBKR 执行都使用 NT；配置、纯信号计算、SQLite 审计和 Telegram 位于其外围。旧 Web 展示层已经移除，只读 Python Web API 与独立 Vue 3 前端作为可删除的外围模块接入。
 
 ```text
 EODHD / IBKR 历史接口
@@ -34,7 +34,16 @@ BacktestExchange / IBKR paper
 
 SQLite 审计 ← 信号、审批、订单、成交、账户、持仓
 Telegram   ← 审批工作流与订单终态
-Dashboard  ← SQLite、Catalog、回测报告
+
+SQLite / Catalog / 报告 / 白名单配置
+                  ↓
+          application 只读查询服务
+                  ↓
+       FastAPI web-api（Compose 内网）
+                  ↓
+       Nginx web-ui（同源 /api 代理）
+                  ↓
+  127.0.0.1:${WEB_PORT} → Vue 3 / TypeScript
 ```
 
 ## 目录职责
@@ -52,9 +61,11 @@ src/trading_assistant/
 ├── live/                       TradingNode 与账户快照
 ├── storage/                    SQLAlchemy 模型和审计仓储
 ├── notify/                     Telegram 审批与通知
-└── dashboard/                  Streamlit 只读看板
+├── application/                与传输协议无关的只读业务查询
+└── web_api/                    FastAPI、OpenAPI、响应 Schema 与路由
 notebooks/                      研究代码，生产包禁止反向依赖
 tests/                          与生产模块对应的自动化测试
+web-ui/                         独立 Vue 3 只读用户界面、生成式 API 类型与组件测试
 ```
 
 ## 配置边界
@@ -73,7 +84,7 @@ tests/                          与生产模块对应的自动化测试
 
 ### 供应商适配
 
-`HistoricalBarSource` 是数据供应商边界。EODHD 和 IBKR 适配器返回 NT 原生 Instrument 与 Bar，不让供应商响应结构进入策略、回测或看板。
+`HistoricalBarSource` 是数据供应商边界。EODHD 和 IBKR 适配器返回 NT 原生 Instrument 与 Bar，不让供应商响应结构进入策略、回测或其他上层消费者。
 
 EODHD 是当前默认来源：
 
@@ -263,7 +274,7 @@ TradingNode 启动前通过隔离子进程运行同一个历史同步服务，�
 
 因子策略当前也没有跨项目调度。固定顺序是：同步 EODHD → FacDigger 用冻结 scaler 推理并原子发布 → HeyBoss 导入 FactorBatch → 启动/重启 TradingNode。缺少生产批次、最新批次不完整或只有评估数据时，paper 启动失败关闭。
 
-## 存储与看板
+## 存储与 Web 边界
 
 业务数据库包含：
 
@@ -279,17 +290,23 @@ TradingNode 启动前通过隔离子进程运行同一个历史同步服务，�
 
 live/paper 与 backtest 必须使用不同数据库文件。SQLite 仅保存业务事务和审计，市场行情继续由 NT ParquetDataCatalog 管理。
 
-`PortfolioSnapshotActor` 定时从 NT Account 和 Cache 读取账户与仓位并写入 SQLite。Dashboard 按页面延迟读取 SQLite、NT Catalog、回测报告和数据质量报告，并用有限 TTL 缓存展示结果。五个页面职责为：
+`PortfolioSnapshotActor` 定时从 NT Account 和 Cache 读取账户与仓位并写入 SQLite。现有 SQLite 表、NT Catalog 和回测报告是只读 Web 查询的事实来源，不因展示层变化而改变。
 
-- 总览：账户快照、最新因子和需要关注的工作流；
-- Paper 交易：资金、仓位、目标权重及审批、订单、成交时间线；
-- 策略与信号：最新完整 FactorScoreData 横截面、目标组合和信号后 5/10/20 个实际交易日收益；
-- 回测：最多三次运行对比、正式评估边界、KPI、权益、回撤、资金构成和 NT 状态明细；
-- 数据与系统：INTERNAL/EXTERNAL Bar 覆盖、最新质量报告聚合、因子批次和只读运行顺序。
+`application/` 将账户、策略、因子、工作流、订单、成交、回测和数据状态转换成普通 Python 不可变查询模型，不依赖 FastAPI。`web_api/` 只负责 HTTP 参数、Pydantic 响应 Schema、OpenAPI 和错误转换。两个模块都不连接 IBKR、不调用执行网关，也不导入 live/backtest runner。
 
-主界面使用北京时间，技术详情保留 UTC。账户 ID 在所有页面脱敏；数据质量原始错误消息、本地路径、环境变量和凭据不进入展示。缺少数据、零记录与文件损坏使用不同空态；单估值点回测明确标为链路验证，不绘制没有统计意义的绩效曲线。
+Web API 使用 SQLite `mode=ro` 打开 live/backtest 数据库；数据库文件不存在时不会创建文件。Catalog 和报告目录同样只读。账户号在应用层只保留类别与末四位，响应不包含本地路径、凭据或底层异常。EOD EXTERNAL Bar 只能作为带时间戳的参考估值，不能描述成实时价格。
 
-Dashboard 不读取运行配置来推断当前状态，不创建交易连接，也没有同步、导入、回测、审批、下单、撤单或重试能力。它展示的是最近持久化的审计事实，不能根据快照陈旧推断 IBKR 在线状态。
+列表接口使用 `offset/limit/has_more`，时间统一输出 UTC。数据源状态区分 `available`、`empty`、`missing`、`invalid`、`unconfigured` 和 `unobserved`。TradingNode 与 IBKR 当前没有心跳事实源，因此系统接口固定报告 `unobserved`，不会根据数据库陈旧度推断在线状态。
+
+当前 API 覆盖 `/api/overview`、账户与持仓、活动策略、最新完整因子批次、信号与工作流、订单与成交、回测报告、Catalog 覆盖、数据质量和系统状态。回测报告只允许读取固定表名，`run_id` 经过白名单校验。统一错误响应使用 `application/problem+json`，且不暴露内部异常。
+
+Vue 前端提供操作总览、账户与持仓、策略与因子、决策流、订单与成交、回测中心、数据与系统七个一级页面。所有查询经生成式 OpenAPI 类型和集中式 GET 客户端进入；页面不读取本地文件、浏览器持久化或运行时模拟数据。
+
+账户历史、交易审计和回测报告使用 `offset/limit/has_more` 服务端分页。筛选、页码与选中详情保存在 URL；工作流和订单通过可访问抽屉展示完整审计时间线。ECharts 只按需绘制账户净值、因子横截面和回测权益，并提供文字摘要。回测图只识别报告的 `timestamp_utc/equity` 确定列，Catalog 页面分别展示 INTERNAL signal 与 EXTERNAL execution Bar，不改变或推断数据语义。
+
+Compose 的 `web` profile 将 API 与前端作为两个独立服务装配。`web-api` 不暴露宿主机端口、不继承完整 `.env`，只接收查询所需的路径、账户作用域和快照陈旧阈值；Catalog、数据库目录和报告目录均为只读挂载。`web-ui` 仅绑定本机回环地址，由 Nginx 提供静态资源、SPA 深链和同源 `/api` 代理。上游不可用时代理返回统一的 `application/problem+json`，不会把 Nginx HTML 错误混入前端契约。
+
+Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。实际停止并删除 `web-ui`、`web-api` 后，IB Gateway、TradingNode 和 Telegram Bot 状态保持不变；交易核心不存在对 Web 的依赖。详细设计与验收记录见 [Web 重构设计](web-rebuild.md)。
 
 ## 新策略接入
 

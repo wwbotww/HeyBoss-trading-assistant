@@ -12,17 +12,22 @@
 - 提供双动量 ETF 轮动和 PatchTST E3 因子策略，一次运行只启用一个策略；
 - 支持 Telegram 人工确认或配置为自动审批；
 - 记录信号、审批、订单、成交、账户和持仓审计；
-- 生成回测报告，并通过只读 Streamlit 看板浏览运行状态。
+- 生成包含权益、回撤、订单、成交、持仓和账户状态的回测报告；
+- 提供独立的只读 Python Web API，统一查询审计库、Catalog、回测报告和非敏感配置；
+- 提供独立的 Vue 3 只读交易操作台，覆盖操作总览、账户持仓、策略因子、决策流、订单成交、回测和数据系统状态。
 
 当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 E3 FactorBatch。
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、市场新闻或大语言模型分析。
+
+Vue 3 七个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。交易、回测和 Telegram 均不依赖 Web 模块；停止或删除 Web 容器不会改变交易核心状态。
 
 ## 文档
 
 - [项目事实与硬性约束](docs/project-context.md)
 - [技术设计参考](docs/technical-reference.md)
 - [FacDigger 因子接入与改造说明](docs/factor-integration.md)
+- [Web 重构设计与里程碑](docs/web-rebuild.md)
 - [回测研究 notebook](notebooks/README.md)
 
 ## 环境要求
@@ -78,6 +83,8 @@ LIVE_DATABASE_URL=sqlite:///./data/live.db
 BACKTEST_DATABASE_URL=sqlite:///./data/backtest.db
 CATALOG_PATH=./catalog/eodhd
 REPORT_ROOT=./reports/backtests
+DATA_QUALITY_REPORT_ROOT=./reports/data-quality
+WEB_PORT=8080
 ```
 
 live 与 backtest 数据库必须保持分离。
@@ -187,6 +194,28 @@ uv run --frozen --env-file .env python scripts/run_backtest.py \
 
 当前 `active_strategy` 已设为 `patchtst_e3`。正式批次使用 `source.kind=signal_inference`；仅在隔离研究回放中，才可同时把 `allow_evaluation_predictions` 改为 `true`。runner 会从同一 NT Catalog 加载因子，之后仍沿用统一的 Actor、信号、风控、执行和报告链路。
 
+## 打开只读 Web 操作台
+
+只启动 Web UI 及其只读 API 依赖：
+
+```bash
+docker compose --profile web up -d --build web-ui
+docker compose --profile web ps web-api web-ui
+```
+
+浏览器访问 `http://127.0.0.1:8080`。如在 `.env` 修改了 `WEB_PORT`，请使用对应端口。启动命令应保留末尾的 `web-ui` 服务名，以免同时启动 Compose 中不属于 Web 的默认服务。
+
+操作台包含七个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、回测中心、数据与系统。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
+
+Web API 不暴露宿主机端口，也不读取完整 `.env`。它只获得账户作用域和查询路径，Catalog、`data/` 与 `reports/` 均以只读方式挂载。单独停止并删除 Web：
+
+```bash
+docker compose --profile web stop web-ui web-api
+docker compose --profile web rm -f web-ui web-api
+```
+
+以上命令不会停止 IB Gateway、TradingNode 或 Telegram Bot。再次运行启动命令即可恢复 Web。
+
 ## 运行 Telegram 审批与 IBKR paper
 
 先启动 Gateway 和 Bot：
@@ -223,24 +252,6 @@ docker compose run --rm --no-deps trading-node \
   --reason "strategy capital configuration updated"
 ```
 
-## 打开只读看板
-
-```bash
-docker compose --profile application up -d trading-node dashboard
-```
-
-浏览器访问 `http://127.0.0.1:8501`。看板固定为五个页面：
-
-- **总览**：账户快照、最新因子、工作流和需要关注的状态；
-- **Paper 交易**：资金历史、仓位、工作流、订单与成交时间线；
-- **策略与信号**：PatchTST 因子排名、目标组合和信号事后收益；
-- **回测**：最多三次运行对比、绩效边界、权益与完整 NT 明细；
-- **数据与系统**：Catalog 覆盖、最新质量报告、因子交付和运行顺序。
-
-业务时间默认显示北京时间，技术详情保留 UTC。账户标识会脱敏；数据质量原始错误消息和本地文件路径不会在界面展示。单日或评估期过短的报告只标记为链路验证，不作为绩效结论。
-
-看板只读取 SQLite、NT Catalog 和 `reports/`，不会连接 IBKR、EODHD 或 Telegram，也没有同步、审批、下单、撤单或重试入口。账户快照陈旧只代表最近一次落库时间较早，不能据此判断 IBKR 当前连接状态。
-
 ## 停止服务
 
 ```bash
@@ -254,7 +265,6 @@ docker compose down
 - **时间戳解析异常**：确认 Gateway API 设置使用 UTC format，修改后重启。
 - **收不到 Telegram 消息**：检查 token、chat ID，并查看 `approval-bot` 日志。
 - **无法提交订单**：确认是 paper 账户、`READ_ONLY_API=no`，且应用风控与账户产品权限均允许该订单。
-- **Dashboard 显示空状态**：先确认 live 数据库、Catalog 或回测报告已经生成。
 - **每月没有自动产生新信号**：当前没有常驻月末调度，需要显式重新启动 `trading-node`。
 - **因子策略没有新信号**：确认最新生产 FactorBatch 已在启动前导入，且相同 as-of 日期的 INTERNAL Bar 已存在；当前没有跨项目自动调度。
 

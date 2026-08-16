@@ -16,7 +16,7 @@
 - 策略运行方式：每次 backtest/live 只允许一个活动策略；
 - 审批方式：Telegram manual 或配置为 auto；
 - 运行形态：本地 Python 或 Docker Compose；
-- 看板：只读 Streamlit。
+- Web：只读 Python Web API、Vue 3 七个一级页面、Compose 本机部署与响应式浏览器验收均已完成，具体设计见 `web-rebuild.md`。
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、新闻采集、市场监控或大语言模型分析。
 
@@ -31,7 +31,7 @@
 | 行情存储 | NT ParquetDataCatalog |
 | 业务存储 | SQLAlchemy 2.x + SQLite；live/backtest 数据库分离 |
 | 通知与审批 | python-telegram-bot |
-| 看板 | Streamlit，只读 |
+| Web | FastAPI 只读查询边界 + 独立 Vue 3/TypeScript/ECharts 前端；交易核心不得反向依赖 Web |
 | 研究 | Jupyter + NT BacktestNode |
 | 编排 | Docker Compose |
 | 质量 | pytest、ruff、mypy strict、pre-commit |
@@ -51,7 +51,8 @@
 9. 所有信号、审批、订单和成交必须写入业务审计库；时间戳统一为 UTC。
 10. 风控阈值只能来自 `config/risk.yaml`，必须覆盖单笔名义金额、单标的权重、每日新开仓数和总仓位。
 11. 凭据只能来自环境变量；`.env`、数据库、Catalog、报告、日志和账户数据不得提交 Git。
-12. Dashboard 只能读取数据库、Catalog 和报告，不得连接 IBKR 或提供交易操作。
+12. Vue 前端只能通过 Python Web API 获取数据，不得直接读取数据库、Catalog、报告、配置或连接 IBKR。
+13. Web API 不得调用执行网关、NT 下单接口或形成第二条下单路径；删除前端或 Web API 不得影响策略、回测、TradingNode、Telegram、风控和交易执行。
 
 ## 数据约束
 
