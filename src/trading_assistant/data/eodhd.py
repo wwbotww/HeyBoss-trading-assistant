@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from http.client import HTTPResponse
 from typing import cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote
 
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
@@ -24,36 +21,7 @@ from trading_assistant.data.corporate_actions import (
     DividendAction,
     SplitAction,
 )
-from trading_assistant.data.source import HistoricalDataAuthenticationError
-
-HttpTransport = Callable[[str, int], bytes]
-
-
-def _download(url: str, timeout_seconds: int) -> bytes:
-    """通过固定 HTTPS 端点下载响应; 不把含 token 的 URL 写入异常。"""
-    request = Request(  # noqa: S310
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "HeyBoss-trading-assistant/0.1",
-        },
-        method="GET",
-    )
-    try:
-        response = cast(HTTPResponse, urlopen(request, timeout=timeout_seconds))  # noqa: S310
-        with response:
-            return response.read()
-    except HTTPError as exc:
-        if exc.code in {401, 403}:
-            raise HistoricalDataAuthenticationError(
-                "EODHD authentication failed; check EODHD_API_TOKEN"
-            ) from None
-        if exc.code == 429 or exc.code >= 500:
-            raise RuntimeError(f"EODHD temporary HTTP failure: status={exc.code}") from None
-        raise ValueError(f"EODHD request was rejected: status={exc.code}") from None
-    except URLError as exc:
-        reason = type(exc.reason).__name__
-        raise ConnectionError(f"EODHD connection failed: {reason}") from None
+from trading_assistant.data.eodhd_http import EodhdHttpClient, HttpTransport, download
 
 
 def _decimal_field(row: dict[str, object], field: str) -> Decimal:
@@ -113,21 +81,16 @@ class EodhdHistoricalBarSource:
         api_token: str,
         request_timeout_seconds: int,
         max_concurrent_requests: int = 1,
-        transport: HttpTransport = _download,
+        transport: HttpTransport = download,
         base_url: str = "https://eodhd.com/api",
     ) -> None:
-        token = api_token.strip()
-        if not token:
-            raise ValueError("EODHD_API_TOKEN is required for the EODHD data provider")
-        if request_timeout_seconds < 1:
-            raise ValueError("request_timeout_seconds must be positive")
-        if max_concurrent_requests < 1:
-            raise ValueError("max_concurrent_requests must be positive")
-        self._api_token = token
-        self._request_timeout_seconds = request_timeout_seconds
-        self._transport = transport
-        self._base_url = base_url.rstrip("/")
-        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+        self._http = EodhdHttpClient(
+            api_token=api_token,
+            request_timeout_seconds=request_timeout_seconds,
+            max_concurrent_requests=max_concurrent_requests,
+            transport=transport,
+            base_url=base_url,
+        )
         self._actions: dict[str, CorporateActions] = {}
         self._connected = False
 
@@ -171,9 +134,10 @@ class EodhdHistoricalBarSource:
         actions = self._actions.get(spec.instrument_id)
         if actions is None:
             actions = await self.request_corporate_actions(spec, start, end)
-        query = urlencode(
+        symbol = quote(spec.data_symbol, safe=".-")
+        payload = await self._http.request_bytes(
+            f"eod/{symbol}",
             {
-                "api_token": self._api_token,
                 "fmt": "json",
                 "period": "d",
                 "order": "a",
@@ -181,9 +145,6 @@ class EodhdHistoricalBarSource:
                 "to": end.date().isoformat(),
             },
         )
-        symbol = quote(spec.data_symbol, safe=".-")
-        url = f"{self._base_url}/eod/{symbol}?{query}"
-        payload = await self._request(url)
         return self._parse_bars(spec, payload, actions=actions, start=start, end=end)
 
     async def request_corporate_actions(
@@ -194,20 +155,15 @@ class EodhdHistoricalBarSource:
     ) -> CorporateActions:
         """请求完整拆股和现金分红, 并缓存供拆股调整 OHLC 使用。"""
         self._require_connected()
-        query = urlencode(
-            {
-                "api_token": self._api_token,
-                "fmt": "json",
-                "from": start.date().isoformat(),
-                "to": end.date().isoformat(),
-            },
-        )
         symbol = quote(spec.data_symbol, safe=".-")
-        split_url = f"{self._base_url}/splits/{symbol}?{query}"
-        dividend_url = f"{self._base_url}/div/{symbol}?{query}"
+        query = {
+            "fmt": "json",
+            "from": start.date().isoformat(),
+            "to": end.date().isoformat(),
+        }
         split_payload, dividend_payload = await asyncio.gather(
-            self._request(split_url),
-            self._request(dividend_url),
+            self._http.request_bytes(f"splits/{symbol}", query),
+            self._http.request_bytes(f"div/{symbol}", query),
         )
         actions = CorporateActions(
             instrument_id=spec.instrument_id,
@@ -221,15 +177,6 @@ class EodhdHistoricalBarSource:
         )
         self._actions[spec.instrument_id] = actions
         return actions
-
-    async def _request(self, url: str) -> bytes:
-        """限制所有 EODHD HTTP 请求的实际并发数。"""
-        async with self._request_slots:
-            return await asyncio.to_thread(
-                self._transport,
-                url,
-                self._request_timeout_seconds,
-            )
 
     def _parse_bars(
         self,

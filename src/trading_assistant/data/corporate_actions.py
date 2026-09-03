@@ -130,6 +130,44 @@ class CorporateActionRepository:
             raise ValueError(f"公司行动 sidecar 数值无效: {path}")
         return parsed
 
+    def replace_range(
+        self,
+        actions: CorporateActions,
+        *,
+        start: date,
+        end: date,
+    ) -> bool:
+        """替换闭区间内的公司行动, 并保留区间外既有记录。"""
+        if start > end:
+            raise ValueError("公司行动替换起点不得晚于终点")
+        if any(not start <= item.ex_date <= end for item in actions.dividends) or any(
+            not start <= item.ex_date <= end for item in actions.splits
+        ):
+            raise ValueError("待写公司行动超出替换区间")
+        dividend_dates = [item.ex_date for item in actions.dividends]
+        split_dates = [item.ex_date for item in actions.splits]
+        if len(dividend_dates) != len(set(dividend_dates)) or len(split_dates) != len(
+            set(split_dates)
+        ):
+            raise ValueError("同一公司行动类型在替换区间内不得有重复日期")
+
+        existing = self.read(actions.instrument_id)
+        dividends = {
+            item.ex_date: item for item in existing.dividends if not start <= item.ex_date <= end
+        }
+        dividends.update({item.ex_date: item for item in actions.dividends})
+        splits = {
+            item.ex_date: item for item in existing.splits if not start <= item.ex_date <= end
+        }
+        splits.update({item.ex_date: item for item in actions.splits})
+        return self.write(
+            CorporateActions(
+                instrument_id=actions.instrument_id,
+                dividends=tuple(dividends[value] for value in sorted(dividends)),
+                splits=tuple(splits[value] for value in sorted(splits)),
+            )
+        )
+
 
 def corporate_action_path(catalog_path: Path) -> Path:
     """为 Catalog 派生固定 sidecar 目录, 不引入版本号或 manifest。"""

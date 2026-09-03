@@ -55,6 +55,7 @@ def test_required_modules_exist() -> None:
         "backtest",
         "application",
         "web_api",
+        "market_radar",
     }
     actual_modules = {path.name for path in PACKAGE_ROOT.iterdir() if path.is_dir()}
     assert required_modules <= actual_modules
@@ -79,6 +80,23 @@ def test_web_api_does_not_import_execution_runners_or_notification_clients() -> 
     }
     for source_path in (PACKAGE_ROOT / "web_api").rglob("*.py"):
         assert _imported_modules(source_path).isdisjoint(forbidden)
+
+
+def test_market_radar_does_not_import_trading_control_paths() -> None:
+    """删除雷达域不得影响策略、风控、审批、通知或执行链路。"""
+    forbidden_prefixes = (
+        "trading_assistant.strategies",
+        "trading_assistant.execution",
+        "trading_assistant.risk",
+        "trading_assistant.approval",
+        "trading_assistant.notify",
+        "trading_assistant.live",
+        "trading_assistant.backtest",
+    )
+    for source_path in (PACKAGE_ROOT / "market_radar").glob("*.py"):
+        assert not any(
+            imported.startswith(forbidden_prefixes) for imported in _imported_modules(source_path)
+        )
 
 
 def test_legacy_dashboard_is_absent() -> None:

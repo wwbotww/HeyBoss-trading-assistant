@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
-from http.client import HTTPMessage
-from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -159,67 +157,6 @@ def test_adapter_requires_token() -> None:
     """空 token 必须在发起网络请求前失败。"""
     with pytest.raises(ValueError, match="EODHD_API_TOKEN"):
         EodhdHistoricalBarSource(api_token=" ", request_timeout_seconds=30)  # noqa: S106
-
-
-def test_http_authentication_error_redacts_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HTTP 异常文本不得包含请求 URL 中的凭据。"""
-    secret = "should-not-leak"  # noqa: S105
-
-    def fail(*_args: object, **_kwargs: object) -> None:
-        raise HTTPError(
-            f"https://eodhd.com/api/eod/SPY.US?api_token={secret}",
-            401,
-            "Unauthorized",
-            HTTPMessage(),
-            None,
-        )
-
-    monkeypatch.setattr(eodhd_module, "urlopen", fail)
-    with pytest.raises(ValueError, match="authentication failed") as exc_info:
-        eodhd_module._download(
-            f"https://eodhd.com/api/eod/SPY.US?api_token={secret}",
-            30,
-        )
-    assert secret not in str(exc_info.value)
-
-
-def test_http_transport_handles_success_transient_and_client_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """标准库传输应读取成功响应; 并把状态码转换为无凭据异常。"""
-
-    class FakeResponse:
-        def __enter__(self) -> FakeResponse:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b"[]"
-
-    monkeypatch.setattr(eodhd_module, "urlopen", lambda *_args, **_kwargs: FakeResponse())
-    assert eodhd_module._download("https://eodhd.com/api/eod/SPY.US", 30) == b"[]"
-
-    def http_failure(code: int) -> None:
-        def fail(*_args: object, **_kwargs: object) -> None:
-            raise HTTPError("https://eodhd.com", code, "failure", HTTPMessage(), None)
-
-        monkeypatch.setattr(eodhd_module, "urlopen", fail)
-
-    http_failure(429)
-    with pytest.raises(RuntimeError, match="temporary"):
-        eodhd_module._download("https://eodhd.com/api/eod/SPY.US", 30)
-    http_failure(400)
-    with pytest.raises(ValueError, match="rejected"):
-        eodhd_module._download("https://eodhd.com/api/eod/SPY.US", 30)
-
-    def connection_failure(*_args: object, **_kwargs: object) -> None:
-        raise URLError(TimeoutError())
-
-    monkeypatch.setattr(eodhd_module, "urlopen", connection_failure)
-    with pytest.raises(ConnectionError, match="TimeoutError"):
-        eodhd_module._download("https://eodhd.com/api/eod/SPY.US", 30)
 
 
 def test_adapter_validates_timeout_fields_and_requested_dates() -> None:

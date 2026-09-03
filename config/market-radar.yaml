@@ -1,0 +1,138 @@
+# 市场雷达非敏感配置。动态成员、凭据和供应商响应不得写入此文件。
+market:
+  benchmark: SPY.US
+  equal_weight_benchmark: RSP.US
+  credit_proxy:
+    - HYG.US
+    - LQD.US
+  index_membership_symbol: GSPC.INDX
+
+sector_etfs:
+  materials: XLB.US
+  communication_services: XLC.US
+  energy: XLE.US
+  financials: XLF.US
+  industrials: XLI.US
+  information_technology: XLK.US
+  consumer_staples: XLP.US
+  real_estate: XLRE.US
+  utilities: XLU.US
+  health_care: XLV.US
+  consumer_discretionary: XLY.US
+
+# 这里只引用交易配置已有标的，实际 InstrumentSpec 必须复用 config/instruments.yaml。
+watchlist:
+  - AAPL.US
+  - MSFT.US
+  - NVDA.US
+  - GOOGL.US
+  - AMZN.US
+  - META.US
+  - JPM.US
+  - XOM.US
+  - JNJ.US
+  - TSLA.US
+
+# watchlist 的板块归属只服务于价格相对强弱计算，不改变交易配置。
+watchlist_sectors:
+  AAPL.US: information_technology
+  MSFT.US: information_technology
+  NVDA.US: information_technology
+  GOOGL.US: communication_services
+  AMZN.US: consumer_discretionary
+  META.US: communication_services
+  JPM.US: financials
+  XOM.US: energy
+  JNJ.US: health_care
+  TSLA.US: consumer_discretionary
+
+# 仅声明不在交易池中的价格监测标的；它们不会自动成为可交易标的。
+monitor_instruments:
+  - symbol: SPY
+    instrument_id: SPY.US
+    data_symbol: SPY.US
+    primary_exchange: ARCA
+    first_trading_date: 1993-01-29
+  - symbol: RSP
+    instrument_id: RSP.US
+    data_symbol: RSP.US
+    primary_exchange: ARCA
+    first_trading_date: 2003-04-24
+  - symbol: HYG
+    instrument_id: HYG.US
+    data_symbol: HYG.US
+    primary_exchange: ARCA
+    first_trading_date: 2007-04-11
+  - symbol: LQD
+    instrument_id: LQD.US
+    data_symbol: LQD.US
+    primary_exchange: ARCA
+    first_trading_date: 2002-07-30
+  - symbol: XLB
+    instrument_id: XLB.US
+    data_symbol: XLB.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLC
+    instrument_id: XLC.US
+    data_symbol: XLC.US
+    primary_exchange: ARCA
+    first_trading_date: 2018-06-19
+  - symbol: XLE
+    instrument_id: XLE.US
+    data_symbol: XLE.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLF
+    instrument_id: XLF.US
+    data_symbol: XLF.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLI
+    instrument_id: XLI.US
+    data_symbol: XLI.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLK
+    instrument_id: XLK.US
+    data_symbol: XLK.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLP
+    instrument_id: XLP.US
+    data_symbol: XLP.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLRE
+    instrument_id: XLRE.US
+    data_symbol: XLRE.US
+    primary_exchange: ARCA
+    first_trading_date: 2015-10-08
+  - symbol: XLU
+    instrument_id: XLU.US
+    data_symbol: XLU.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLV
+    instrument_id: XLV.US
+    data_symbol: XLV.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+  - symbol: XLY
+    instrument_id: XLY.US
+    data_symbol: XLY.US
+    primary_exchange: ARCA
+    first_trading_date: 1998-12-22
+
+probe:
+  calendar_symbols:
+    - AAPL.US
+    - MSFT.US
+  fundamentals_symbols:
+    - AAPL.US
+    - JPM.US
+  volatility_candidates:
+    vix:
+      - VIX.INDX
+    vix3m:
+      - VIX3M.INDX

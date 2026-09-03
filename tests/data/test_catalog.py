@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
 from nautilus_trader.model.data import BarType
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
@@ -71,3 +72,78 @@ def test_catalog_replaces_complete_bar_series(tmp_path: Path) -> None:
     assert repository.replace_bars([first, second]) == 0
     assert repository.replace_bars([revised, second]) == 2
     assert repository.read_bars(first.bar_type) == [revised, second]
+
+
+def test_catalog_replaces_only_requested_bar_range(tmp_path: Path) -> None:
+    """增量修订应保留窗口外历史并保持幂等。"""
+    repository = CatalogRepository(tmp_path / "catalog")
+    before = make_bar(date(2026, 7, 10), close=100)
+    old_first = make_bar(date(2026, 7, 13), close=101)
+    old_second = make_bar(date(2026, 7, 14), close=102)
+    after = make_bar(date(2026, 7, 15), high=104, close=103)
+    revised_first = make_bar(date(2026, 7, 13), close=99)
+    revised_second = make_bar(date(2026, 7, 14), high=105, close=104)
+    assert repository.replace_bars([before, old_first, old_second, after]) == 4
+
+    assert (
+        repository.replace_bar_range(
+            [revised_first, revised_second],
+            start_ns=old_first.ts_init,
+            end_ns=old_second.ts_init,
+        )
+        == 2
+    )
+    assert repository.read_bars(before.bar_type) == [
+        before,
+        revised_first,
+        revised_second,
+        after,
+    ]
+    assert (
+        repository.replace_bar_range(
+            [revised_first, revised_second],
+            start_ns=old_first.ts_init,
+            end_ns=old_second.ts_init,
+        )
+        == 0
+    )
+
+
+def test_catalog_range_replacement_restores_old_data_after_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """任一范围写入失败时不得留下删除后的半成品。"""
+    repository = CatalogRepository(tmp_path / "catalog")
+    first = make_bar(date(2026, 7, 13), close=101)
+    second = make_bar(date(2026, 7, 14), close=102)
+    revised = make_bar(date(2026, 7, 13), close=99)
+    repository.replace_bars([first, second])
+    original_write = repository.catalog.write_data
+
+    def fail_once(data: list[object], **_kwargs: object) -> None:
+        del data
+        monkeypatch.setattr(repository.catalog, "write_data", original_write)
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(repository.catalog, "write_data", fail_once)
+    with pytest.raises(OSError, match="simulated"):
+        repository.replace_bar_range(
+            [revised],
+            start_ns=first.ts_init,
+            end_ns=first.ts_init,
+        )
+    assert repository.read_bars(first.bar_type) == [first, second]
+
+
+def test_catalog_range_replacement_rejects_invalid_boundaries(tmp_path: Path) -> None:
+    repository = CatalogRepository(tmp_path / "catalog")
+    bar = make_bar(date(2026, 7, 13))
+    with pytest.raises(ValueError, match="must not exceed"):
+        repository.replace_bar_range([bar], start_ns=2, end_ns=1)
+    with pytest.raises(ValueError, match="inside"):
+        repository.replace_bar_range(
+            [bar],
+            start_ns=bar.ts_init + 1,
+            end_ns=bar.ts_init + 2,
+        )

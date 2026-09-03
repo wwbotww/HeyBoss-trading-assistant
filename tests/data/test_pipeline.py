@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,11 @@ from trading_assistant.data.config import (
     InstrumentSpec,
     QualityConfig,
 )
-from trading_assistant.data.corporate_actions import CorporateActionRepository, CorporateActions
+from trading_assistant.data.corporate_actions import (
+    CorporateActionRepository,
+    CorporateActions,
+    SplitAction,
+)
 from trading_assistant.data.pipeline import HistoricalDataPipeline
 
 
@@ -261,6 +266,146 @@ def test_pipeline_replaces_adjusted_history_after_validation(tmp_path: Path) -> 
     assert {issue.code for issue in result.issues} == {"historical_revision_detected"}
     assert catalog.read_bars(stored.bar_type) == [revised, latest]
     assert catalog.read_bars(signal_revised.bar_type) == [signal_revised, signal_latest]
+
+
+def test_explicit_append_missing_fetches_full_window_without_revising_overlap(
+    tmp_path: Path,
+) -> None:
+    """bootstrap 必须补齐两端缺口, 但不得覆盖既有时间戳。"""
+    stored = make_bar(date(2026, 7, 13), instrument_id="SPY.US", close=101)
+    earlier = make_bar(
+        date(2026, 1, 2),
+        instrument_id="SPY.US",
+        open_price=89,
+        high=91,
+        low=88,
+        close=90,
+    )
+    revised = make_bar(
+        date(2026, 7, 13),
+        instrument_id="SPY.US",
+        open_price=98,
+        high=101,
+        low=97,
+        close=99,
+    )
+    latest = make_bar(
+        date(2026, 7, 14),
+        instrument_id="SPY.US",
+        high=103,
+        close=102,
+    )
+    source = FakeSource([earlier, revised, latest])
+    pipeline, catalog = _pipeline(
+        tmp_path,
+        source,
+        config=_config(request_window_days=800),
+    )
+    assert catalog.append_new_bars([stored]) == 1
+    start = datetime(2026, 1, 1)
+
+    result = asyncio.run(
+        pipeline.sync(
+            [_spec()],
+            start=start,
+            end=datetime(2026, 7, 15),
+            write_mode="append_missing",
+        )
+    )
+
+    assert source.requests[0][0] == start
+    assert result.bars_written == 2
+    assert {issue.code for issue in result.issues} == {"historical_revision_detected"}
+    assert catalog.read_bars(stored.bar_type) == [earlier, stored, latest]
+
+
+def test_explicit_range_replace_uses_overlap_and_preserves_older_data(
+    tmp_path: Path,
+) -> None:
+    """daily 仅修订重叠窗口, 同时保留多年 Bar 与公司行动。"""
+    external_old = make_bar(
+        date(2026, 1, 2),
+        instrument_id="SPY.US",
+        open_price=89,
+        high=91,
+        low=88,
+        close=90,
+    )
+    internal_old = make_bar(
+        date(2026, 1, 2),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        open_price=89,
+        high=91,
+        low=88,
+        close=90,
+    )
+    external_stored = make_bar(date(2026, 7, 10), instrument_id="SPY.US", close=101)
+    internal_stored = make_bar(
+        date(2026, 7, 10),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        close=100,
+    )
+    external_revised = make_bar(
+        date(2026, 7, 10),
+        instrument_id="SPY.US",
+        close=100,
+    )
+    internal_revised = make_bar(
+        date(2026, 7, 10),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        close=99,
+    )
+    external_latest = make_bar(
+        date(2026, 7, 13),
+        instrument_id="SPY.US",
+        high=103,
+        close=102,
+    )
+    internal_latest = make_bar(
+        date(2026, 7, 13),
+        instrument_id="SPY.US",
+        bar_type_suffix="1-DAY-LAST-INTERNAL",
+        high=103,
+        close=102,
+    )
+    source = FakeSource([external_revised, internal_revised, external_latest, internal_latest])
+    pipeline, catalog = _pipeline(tmp_path, source, config=_replace_config())
+    catalog.replace_bars([external_old, external_stored, internal_old, internal_stored])
+    actions = CorporateActionRepository(tmp_path / "catalog-actions")
+    actions.write(
+        CorporateActions(
+            instrument_id="SPY.US",
+            dividends=(),
+            splits=(SplitAction(date(2020, 8, 31), Decimal("4")),),
+        )
+    )
+    start = datetime(2026, 1, 1)
+
+    result = asyncio.run(
+        pipeline.sync(
+            [_spec()],
+            start=start,
+            end=datetime(2026, 7, 13),
+            write_mode="replace_range",
+        )
+    )
+
+    assert source.requests[0][0] > start
+    assert result.bars_written == 4
+    assert catalog.read_bars(external_old.bar_type) == [
+        external_old,
+        external_revised,
+        external_latest,
+    ]
+    assert catalog.read_bars(internal_old.bar_type) == [
+        internal_old,
+        internal_revised,
+        internal_latest,
+    ]
+    assert actions.read("SPY.US").splits == (SplitAction(date(2020, 8, 31), Decimal("4")),)
 
 
 def test_pipeline_backfills_when_catalog_only_contains_recent_history(

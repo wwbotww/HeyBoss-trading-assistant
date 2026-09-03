@@ -123,3 +123,55 @@ class CatalogRepository:
                     self._catalog.write_data(existing)
             raise
         return sum(len(incoming) for _, incoming, _ in changes)
+
+    def replace_bar_range(
+        self,
+        bars: Sequence[Bar],
+        *,
+        start_ns: int,
+        end_ns: int,
+    ) -> int:
+        """只替换闭区间内的 Bar; 任一 BarType 写入失败时恢复全部旧窗口。"""
+        if start_ns > end_ns:
+            raise ValueError("bar replacement start_ns must not exceed end_ns")
+        grouped: dict[str, list[Bar]] = defaultdict(list)
+        for bar in bars:
+            if not start_ns <= bar.ts_init <= end_ns:
+                raise ValueError("replacement bars must stay inside the requested range")
+            grouped[str(bar.bar_type)].append(bar)
+
+        changes: list[tuple[str, list[Bar], list[Bar]]] = []
+        for identifier, values in grouped.items():
+            unique = {bar.ts_init: bar for bar in values}
+            incoming = [unique[timestamp] for timestamp in sorted(unique)]
+            existing = self.read_bars(
+                incoming[0].bar_type,
+                start_ns=start_ns,
+                end_ns=end_ns,
+            )
+            if existing == incoming:
+                continue
+            changes.append((identifier, incoming, existing))
+
+        try:
+            for identifier, _, _ in changes:
+                self._catalog.delete_data_range(
+                    Bar,
+                    identifier=identifier,
+                    start=start_ns,
+                    end=end_ns,
+                )
+            for _, incoming, _ in changes:
+                self._catalog.write_data(incoming)
+        except Exception:
+            for identifier, _, existing in changes:
+                self._catalog.delete_data_range(
+                    Bar,
+                    identifier=identifier,
+                    start=start_ns,
+                    end=end_ns,
+                )
+                if existing:
+                    self._catalog.write_data(existing)
+            raise
+        return sum(len(incoming) for _, incoming, _ in changes)

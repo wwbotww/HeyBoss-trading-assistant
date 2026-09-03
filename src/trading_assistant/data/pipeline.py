@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from typing import Literal
 
 from nautilus_trader.model.data import Bar, BarType
 
@@ -24,6 +25,8 @@ from trading_assistant.data.quality import (
 from trading_assistant.data.source import HistoricalBarSource, HistoricalDataAuthenticationError
 
 LOGGER = logging.getLogger(__name__)
+
+CatalogWriteMode = Literal["append_missing", "replace_range", "replace_full"]
 
 
 @dataclass(frozen=True)
@@ -286,10 +289,19 @@ class HistoricalDataPipeline:
         *,
         start: datetime,
         end: datetime,
+        write_mode: CatalogWriteMode | None = None,
     ) -> PipelineSummary:
         """同步标的定义与日线; 校验后按配置追加或替换 Catalog。"""
         if self._source is None:
             raise RuntimeError("Historical data source is required for sync")
+        resolved_write_mode: CatalogWriteMode = write_mode or (
+            "replace_full"
+            if self._config.historical_data.refresh_mode == "replace"
+            else "append_missing"
+        )
+        incremental_fetch = resolved_write_mode == "replace_range" or (
+            write_mode is None and self._config.historical_data.refresh_mode == "append"
+        )
 
         reports: list[DataQualityReport] = []
         issues: list[QualityIssue] = []
@@ -336,11 +348,7 @@ class HistoricalDataPipeline:
                 has_start_coverage = (
                     earliest_ns is not None and earliest_ns <= start_coverage_limit_ns
                 )
-                if (
-                    self._config.historical_data.refresh_mode == "append"
-                    and latest_ns is not None
-                    and has_start_coverage
-                ):
+                if incremental_fetch and latest_ns is not None and has_start_coverage:
                     latest = datetime.fromtimestamp(latest_ns / 1_000_000_000, tz=UTC)
                     overlap_start = latest - timedelta(
                         days=self._config.historical_data.overlap_days,
@@ -396,10 +404,7 @@ class HistoricalDataPipeline:
                     (context.coverage_start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp()
                     * 1_000_000_000,
                 )
-                must_verify_start = (
-                    self._config.historical_data.refresh_mode == "replace"
-                    or not context.has_start_coverage
-                )
+                must_verify_start = not incremental_fetch or not context.has_start_coverage
                 first_by_type = {
                     bar_type: next(
                         (bar for bar in fetched if bar.bar_type == bar_type),
@@ -429,7 +434,12 @@ class HistoricalDataPipeline:
                     )
                     continue
 
-                start_ns = int(context.fetch_start.replace(tzinfo=UTC).timestamp() * 1_000_000_000)
+                range_start = datetime.combine(
+                    context.fetch_start.date(),
+                    time.min,
+                    tzinfo=UTC,
+                )
+                start_ns = int(range_start.timestamp() * 1_000_000_000)
                 instrument_reports: list[DataQualityReport] = []
                 for bar_type in bar_types:
                     typed_bars = [bar for bar in fetched if bar.bar_type == bar_type]
@@ -453,12 +463,32 @@ class HistoricalDataPipeline:
                 reports.extend(instrument_reports)
                 if any(report.has_errors for report in instrument_reports):
                     continue
-                if self._config.historical_data.refresh_mode == "replace":
+                if resolved_write_mode == "replace_full":
                     bars_written += self._catalog.replace_bars(fetched)
+                elif resolved_write_mode == "replace_range":
+                    range_end_exclusive = datetime.combine(
+                        context.fetch_end.date() + timedelta(days=1),
+                        time.min,
+                        tzinfo=UTC,
+                    )
+                    end_ns = int(range_end_exclusive.timestamp() * 1_000_000_000) - 1
+                    bars_written += self._catalog.replace_bar_range(
+                        fetched,
+                        start_ns=start_ns,
+                        end_ns=end_ns,
+                    )
                 else:
                     bars_written += self._catalog.append_new_bars(fetched)
                 if self._corporate_actions is not None:
-                    corporate_actions_written += int(self._corporate_actions.write(actions))
+                    if resolved_write_mode == "replace_range":
+                        changed = self._corporate_actions.replace_range(
+                            actions,
+                            start=context.fetch_start.date(),
+                            end=context.fetch_end.date(),
+                        )
+                    else:
+                        changed = self._corporate_actions.write(actions)
+                    corporate_actions_written += int(changed)
         finally:
             await self._source.close()
 
