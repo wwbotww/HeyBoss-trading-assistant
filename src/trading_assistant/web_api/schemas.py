@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict
 
 from trading_assistant.application.models import (
     BreadthMetricValidity,
+    MacroRegimeCode,
+    MacroRegimeValidity,
     MarketBreadthValidity,
     RadarMetricValidity,
     RadarModuleState,
@@ -361,6 +363,68 @@ class MarketBreadthResponse(ApiSchema):
     b200: BreadthMetricResponse | None
     ad10: BreadthMetricResponse | None
     nhnl: BreadthMetricResponse | None
+
+
+class MacroFreshnessResponse(ApiSchema):
+    risk_appetite_age_days: int
+    real_rate_age_days: int
+    stale_after_days: int
+
+
+class MacroRealRateResponse(ApiSchema):
+    series_id: str
+    observation_date: date
+    level_percent: float
+    change_20_percentage_points: float | None
+    pressure_z: float | None
+    percentile_3y: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+class MacroRiskAppetiteResponse(ApiSchema):
+    as_of_date: date
+    score: float | None
+    credit_z: float | None
+    volatility_z: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+class MacroRegimePointResponse(ApiSchema):
+    day: date
+    real_rate_observation_date: date
+    real_rate_level_percent: float
+    real_rate_change_20_percentage_points: float
+    real_rate_pressure_z: float
+    real_rate_percentile_3y: float
+    risk_appetite_score: float
+    credit_z: float
+    volatility_z: float
+    regime: MacroRegimeCode
+    regime_label: str
+
+
+class MacroRegimeResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MacroRegimeValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    freshness: MacroFreshnessResponse | None
+    neutral_band: float | None
+    alignment_max_age_days: int | None
+    real_rate_source: str | None
+    real_rate_vintage: str | None
+    credit_source: str | None
+    price_source: str | None
+    real_rate: MacroRealRateResponse | None
+    risk_appetite: MacroRiskAppetiteResponse | None
+    current: MacroRegimePointResponse | None
+    trajectory: list[MacroRegimePointResponse]
+    duration_observations: int
 
 
 class RadarMarketResponse(ApiSchema):

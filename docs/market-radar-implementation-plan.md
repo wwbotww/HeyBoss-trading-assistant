@@ -1,6 +1,6 @@
 # 市场雷达实施方案（基于当前仓库）
 
-> 状态：R0、R1、R2、R3 与 R4A 已完成；价格、当前宽度及风险偏好后端均已通过真实数据验收。下一步为 R4B 精确契约。
+> 状态：R0 至 R4B 已完成；价格、当前宽度、风险偏好和实际利率宏观象限均已通过真实数据、自动化与响应式浏览器验收。
 > 核对基线：2026-09-04，分支 `feat/market-radar`。
 > 原始产品设想：[HeyBoss 市场雷达数据面板高层实施方案](HeyBoss_market_radar_implementation_plan.md)。
 > 事实优先级：`AGENTS.md` 与 [项目事实源](project-context.md) 高于原始设想；本文再以当前代码和实际供应商能力收敛实施路径。
@@ -21,9 +21,9 @@
 - EODHD 适配器目前只实现 EOD、拆股和分红，没有指数成分、Calendar Trends、Fundamentals 或 Economic Events；
 - `config/instruments.yaml` 仍只管理 10 只可交易普通股；25 只固定监测池和 503 只动态当前成员已与交易资格隔离；
 - 25 只价格监测池和当前 503 个成员均已进入共享 Catalog，但当前成员代理不能用于历史/PIT 宽度回放；
-- 独立市场数据库已有同步运行、价格快照、当前成员、当前宽度和风险偏好快照，没有实际利率、基本面、预期或事件；
-- Web API 与 Vue 已交付价格型市场雷达和当前宽度；风险偏好已完成后端同步、计算和发布，但尚未开放查询与页面，完整宏观四象限、盈利、基本面和事件仍未实现；
-- 没有 FRED/Cboe 适配器，没有常驻调度器，也没有可靠的未来美股交易日历能力；
+- 独立市场数据库已有同步运行、价格快照、当前成员、当前宽度、风险偏好、FRED 当前修订观测和宏观象限快照；没有基本面、预期或事件；
+- Web API 与 Vue 已交付价格、当前宽度及完整宏观象限只读展示；盈利、基本面和事件仍未实现；
+- 已有 FRED DFII10 适配器，但没有 Cboe 适配器、常驻调度器或可靠的未来美股交易日历能力；
 - 当前 EODHD Token 已证明 EOD、VIX 与 VIX3M 可用，Calendar、Fundamentals、Economic Events、当前成分和历史成分仍受套餐权限阻塞。
 
 因此不能直接从“画完整页面”开始。推荐采用**数据能力门禁 → 价格纵向切片 → 宽度 → 宏观 → 盈利/基本面/事件 → 完整 UI**的顺序。每一步都能独立验收，缺少数据时返回明确状态，不用占位数据伪装完成。
@@ -60,15 +60,15 @@ Vue 3 八个一级页面
 | 监测宇宙 | 25 只固定监测池 + 503 只动态成员已实现 | 与交易清单隔离，Catalog 存在不代表可交易 |
 | 当前市场成员 | State Street SPY 每日持仓适配器已实现；EODHD 成分接口仍为 403 | 继续明确标注当前代理，不实现历史/PIT 成分 |
 | 市场宽度 | 已离线计算并原子发布四项当前快照 | API 只读快照，不现场扫描 500 只股票 |
-| FRED 实际利率/信用 | 未实现 | 新建只读来源适配；信用源受许可和历史范围门禁 |
+| FRED 实际利率/信用 | DFII10 当前修订适配、存储、计算、页面和真实 bootstrap 已完成 | 首版信用继续使用 HYG/LQD，不接入受限 HY OAS |
 | VIX/VIX3M | 已作为 NT `IndexInstrument` 接入 EODHD EOD 与共享 Catalog | R4A 已验证；任一序列缺失时风险偏好模块失败关闭 |
 | EPS Trends/财报日历 | 未实现 | 先探测 EODHD Calendar 权限和字段，再每日留存快照 |
 | Fundamentals | 未实现 | 先探测字段、更新语义和额度；不把当前基本面伪装成历史 PIT 数据 |
 | Economic Events | 未实现 | 先探测端点；MVP 使用明确的日历日期窗口 |
 | 未来 10 个交易日 | 没有可靠未来交易日历 | MVP 改为 14 个日历日并准确标注；若必须精确 10 个交易日，单独申请日历依赖 |
-| 监测数据库 | 已实现运行、价格、当前成员、宽度与风险偏好五张表 | 继续使用独立 `market-radar.db`，后续按真实调用方增加表 |
-| 查询/API | 价格与当前宽度均已有只读分层 | 保持请求路径不访问供应商、Catalog 或计算器 |
-| Vue/ECharts | 市场雷达三视图与当前宽度卡片已具备 | 后续模块继续使用独立状态和相同设计语言 |
+| 监测数据库 | 已实现运行、价格、当前成员、宽度、风险偏好、宏观观测与象限七张表 | 继续使用独立 `market-radar.db`，后续按真实调用方增加表 |
+| 查询/API | 价格、当前宽度和宏观象限均已有只读分层 | 保持请求路径不访问供应商、Catalog 或计算器 |
+| Vue/ECharts | 市场雷达三视图、当前宽度卡片和宏观象限图已具备 | 后续模块继续使用独立状态和相同设计语言 |
 | 调度 | 没有常驻调度 | 第一阶段仅提供一次性 CLI；由人工或宿主机外部调度触发 |
 | 交易联动 | 唯一执行链路已有硬约束 | 市场雷达永不发布 `TradeSignalEvent`，不提供下单或审批操作 |
 
@@ -160,7 +160,8 @@ config/
 scripts/
 ├── check_market_radar_sources.py     权限/字段/额度探测，不保存原始响应
 ├── sync_market_radar.py              固定价格池 bootstrap/daily/reconcile 与快照
-└── sync_market_breadth.py            当前成员 bootstrap/daily 与宽度快照
+├── sync_market_breadth.py            当前成员 bootstrap/daily 与宽度快照
+└── sync_market_macro.py              宏观价格、FRED 实际利率与象限原子发布
 
 src/trading_assistant/
 ├── data/
@@ -173,6 +174,9 @@ src/trading_assistant/
 │   ├── storage.py                    独立 SQLAlchemy Base、运行状态与只读/写仓储
 │   ├── prices.py                     InstrumentSpec 装配与 INTERNAL Catalog 读取适配
 │   ├── metrics.py                    无 IO 的价格指标、覆盖率和有效性计算
+│   ├── macro.py                      无 IO 的风险偏好计算与严格 payload
+│   ├── fred.py                       FRED 当前修订观测来源适配器
+│   ├── regime.py                     无 IO 的实际利率压力、as-of 对齐与象限计算
 │   └── service.py                    同步、质量检查、计算与事务发布编排
 ├── application/
 │   └── market_radar.py               与 HTTP 无关的只读查询服务
@@ -180,8 +184,8 @@ src/trading_assistant/
     └── routes/market_radar.py        只读 GET 路由
 
 web-ui/src/
-├── pages/MarketRadarPage.vue         一级页面与三个内部视图的 URL 状态
-└── components/market-radar/          实际使用到的矩阵、轨迹、时间轴和详情组件
+├── pages/MarketRadarPage.vue         一级页面、三个内部视图和模块独立状态
+└── components/MacroRegimeChart.vue   后端坐标驱动的响应式宏观象限图
 
 tests/
 ├── market_radar/                     配置、来源解析、存储、指标和编排测试
@@ -266,7 +270,7 @@ MARKET_RADAR_DATABASE_URL=sqlite:///./data/market-radar.db
 MARKET_RADAR_REPORT_ROOT=./reports/market-radar
 ```
 
-`EODHD_API_TOKEN` 复用已有变量。只有确认采用需要凭据的 FRED API 时才加入 `FRED_API_KEY`；R1 没有预设未使用的凭据变量。
+`EODHD_API_TOKEN` 复用已有变量。R4B 已确认采用 FRED v1 API，因此 `.env.example` 包含 `FRED_API_KEY`；实际 key 仍只允许填写在未提交的本地 `.env`。
 
 ## 6. 数据源与现实门禁
 
@@ -330,6 +334,8 @@ R0 已使用本地有效 Token 串行执行 10 次 EODHD 和 2 次 FRED 只读�
 | `VIX3M.INDX` | `available`，HTTP 200 | EOD 序列和候选代码有效 | R4 期限结构价格输入可用 |
 | FRED `DFII10` | `unknown` | 官方 CSV 可由 `curl` 通过 HTTP/2 访问，但当前 Python 标准库 HTTP 请求断开或超时 | R4 实际利率阻塞；优先申请 FRED API Key，不增加临时依赖绕过 |
 | FRED HY OAS | `unknown` | 与 DFII10 相同的程序化连接问题，且仍有历史与许可限制 | 不作为首版信用输入；首版保留 HYG/LQD 代理 |
+
+以上保留 R0 当时的原始结论。R4B 在 2026-09-04 配置 FRED API Key 后已通过 v1 JSON 适配器完成真实 DFII10 bootstrap；HY OAS 仍未启用。
 
 由于同一 Token 对 EOD 与波动率端点返回 200，对附加端点返回 403，可以证明 Token 本身有效；403 更可能是套餐授权边界，但最终仍以 EODHD 账户套餐页面或官方支持回复为准。
 
@@ -401,15 +407,15 @@ R3A 当前宽度只开放 `bootstrap` 与 `daily`。它不开放 `reconcile`，�
 
 派生结果可以在单一 `payload_json` 中保存模块专用结构，因为它只由一个计算器写、一个查询服务读，当前没有跨版本兼容需求。必须有 Pydantic/dataclass 校验和唯一键，但不引入 `schema_version`、版本注册表或内容哈希。
 
-### 8.2 R1–R4A 实际存储边界
+### 8.2 R1–R4B 实际存储边界
 
-R1 创建 `sync_runs`；R2A 新增 `price_snapshots`；R3A 新增 `current_market_members` 与 `current_breadth_snapshots`；R4A 新增 `risk_appetite_snapshots`。运行表记录 `RUNNING → COMPLETE/FAILED`、请求日期、标的数量和 Bar 计数。三类派生快照都以 `as_of_date` 唯一保存严格 dataclass 校验的无版本 payload。当前成员只保存来源代码、规范标识、EODHD data symbol、来源和成员日期，不保存原始工作簿或历史成员区间。R4A 的四条原始输入仍是 Catalog 中的 NT Bar，不复制到宏观观测表；实际利率、基本面和事件尚无生产写入方，因此不提前建表。
+R1 创建 `sync_runs`；R2A 新增 `price_snapshots`；R3A 新增 `current_market_members` 与 `current_breadth_snapshots`；R4A 新增 `risk_appetite_snapshots`；R4B 新增 `macro_observations` 与 `macro_regime_snapshots`。运行表记录 `RUNNING → COMPLETE/FAILED`、请求日期、标的数量和 Bar 计数。四类派生快照都以 `as_of_date` 唯一保存严格 dataclass 校验的无版本 payload。当前成员只保存来源代码、规范标识、EODHD data symbol、来源和成员日期，不保存原始工作簿或历史成员区间。R4A 的四条原始输入仍是 Catalog 中的 NT Bar；`macro_observations` 只保存 DFII10 当前修订值、FRED realtime 日期、采集时间和所属运行，不保存原始响应或历史 vintage。基本面和事件尚无生产写入方，因此不提前建表。
 
-- `MarketRadarBase` 与交易审计 `Base` 完全分离；market DB 只包含以上五张已有真实写入方的表；
+- `MarketRadarBase` 与交易审计 `Base` 完全分离；market DB 只包含以上七张已有真实写入方的表；
 - Web 后续使用 `MarketRadarRepository(..., read_only=True)`，SQLite 自身拒绝写入；
 - 失败详情只保存异常类型或 `data_quality`，不保存 Token、URL 或供应商 payload；
-- `latest_complete_run()`、`latest_price_snapshot()`、`latest_current_membership()`、`latest_current_breadth_snapshot()` 与 `latest_risk_appetite_snapshot()` 都忽略失败运行；
-- 快照 upsert 与 `RUNNING → COMPLETE` 在同一数据库事务内发生，任一更新失败会整体回滚；
+- `latest_complete_run()`、各价格/宽度读取方法和 `latest_macro_bundle()` 都忽略失败运行；宏观 bundle 只返回同一 COMPLETE 运行的风险偏好和象限；
+- 快照 upsert 与 `RUNNING → COMPLETE` 在同一数据库事务内发生；R4B 的当前修订观测、风险偏好、象限和运行完成也一次提交，任一更新失败会整体回滚；
 - EOD Bar 和 Instrument 继续只保存在 NT `ParquetDataCatalog`，不会复制到 SQLite。
 
 ### 8.3 发布规则
@@ -508,7 +514,7 @@ R3 只发布最新横截面原始值、分项分母和覆盖率，不保存或�
 
 ### 10.2 宏观四象限
 
-R4A 先交付可独立验收的风险偏好纵轴，尚不生成象限：
+R4A 交付风险偏好纵轴：
 
 - 信用项为 `Δ20 log(HYG/LQD)`；
 - 波动率期限项为 `log(VIX/VIX3M)`；
@@ -519,15 +525,16 @@ R4A 先交付可独立验收的风险偏好纵轴，尚不生成象限：
 
 四条 EOD 序列只按精确共同日期内连接，不前向填充，且最新日期必须一致。关键输入缺失直接使同步失败；共同历史不足时可以发布 `insufficient_history` 快照，但不暴露分数或轨迹。
 
-R4B 再决定横轴：候选为 `DFII10` 20 日变化的三年 Robust Z-score。只有实际利率数据源、日期语义和新鲜度规则通过精确契约与真实验收后，后端才组合完整象限；Vue 始终只绘制后端结果。
+R4B 已冻结并实现实际利率横轴：FRED v1 JSON 的 `DFII10` 当前修订值相对 20 个有效观测前的变化。变化序列使用最多 756 个观测、至少 504 个观测计算 Robust Z，并截断至 `[-3, 3]`；同时披露当前利率水平和三年窗口百分位。当前修订值可被后续同步按相同日期更新，但不声称具备历史 vintage/PIT 语义。
 
 关键规则：
 
 - VIX3M 不可用时不计算风险偏好分数；
-- DFII10、信用和波动率日期不在 R4B 约定的共同窗口时不拼接；
-- 三年窗口少于 504 个有效共同观测时标记 `insufficient_history`；
+- 风险纵轴仍只在四条价格精确共同日期上计算；DFII10 则按每个风险日期向后选择最近观测，不允许未来值且最多滞后 3 个日历日；
+- 实际利率或风险纵轴少于 504 个有效变化观测时标记 `insufficient_history`；
 - Robust Z 截断到 `[-3, 3]`；
-- 中性带和象限标签由后端计算，Vue 只绘图。
+- 中性带固定为 `±0.35`；任一轴落入中性带时为“过渡区”，其余四区为“宽松型 Risk-on”“增长 / 再通胀”“增长担忧”“紧缩冲击”；
+- 快照最多保存 60 个成功对齐的轨迹点，象限、中文标签和连续状态观测数由后端计算，Vue 只绘图。
 
 ### 10.3 板块领导力
 
@@ -564,7 +571,7 @@ R4B 再决定横轴：候选为 `DFII10` 20 日变化的三年 Robust Z-score。
 |---|---|---|
 | `GET /summary` | 顶部状态条与总览卡片 | 六项摘要、各模块有效性、最近完整日期 |
 | `GET /breadth` | 总览当前宽度卡片 | B50/B200、AD10、NHNL、各自覆盖、持仓与价格日期、代理来源 |
-| `GET /macro?window=1y` | 宏观四象限 | 当前点、轨迹、组成序列、来源与回退标记 |
+| `GET /macro` | 宏观四象限 | 当前点、最多 60 点轨迹、两轴状态、来源、当前修订口径与新鲜度 |
 | `GET /sectors` | 总览摘要和板块页 | 11 行矩阵、排名、覆盖、有效性 |
 | `GET /sectors/{sector_id}?window=1y` | 板块详情抽屉 | RS、宽度、修正、估值时间序列 |
 | `GET /earnings-revisions?scope=market&window=1y` | 总览/板块 | 修正宽度、幅度、surprise 和覆盖 |
@@ -575,7 +582,7 @@ R4B 再决定横轴：候选为 `DFII10` 20 日变化的三年 Robust Z-score。
 约束：
 
 - 全部只有 GET；
-- `window` 只接受白名单值，不能构造任意大查询；
+- 已实现的无窗口端点不接受任意范围参数；后续时间序列端点的 `window` 只允许白名单值；
 - 列表沿用 `offset/limit/has_more`；
 - `sector_id` 和 `instrument_id` 必须由数据库实体白名单解析；
 - 统一 `application/problem+json`；
@@ -912,17 +919,28 @@ uv run --frozen --env-file .env python scripts/sync_market_breadth.py \
 - 质量报告无 error，4 个 warning 均为既有序列的历史修订检测；
 - 完整 Python 测试为 406 项通过，总覆盖率 90.89%，ruff 与 mypy strict 通过。
 
-### R4B：实际利率横轴、只读查询与页面（下一步）
+### R4B：实际利率横轴、只读查询与页面（已完成）
 
-前提：先确认 DFII10 的可靠程序化来源、发布日期语义、新鲜度和历史覆盖，并冻结象限中性带与标签规则。
+状态：已完成（2026-09-04）。
 
-计划交付：
+实际交付：
 
-- 实际利率观测同步与独立来源适配；
-- 后端组合完整四象限、当前点与轨迹；
-- 只读 repository/query/API/OpenAPI 契约；
-- Vue 宏观图表与缺失、陈旧、历史不足状态；
-- 查询路径不访问供应商、Catalog 或计算器，Vue 不计算 Z-score 或象限。
+- 新增最小 `FredObservationSource` 契约和 FRED v1 JSON 适配器，只请求 `DFII10` 当前修订观测；认证、429/5xx、网络中断、坏 JSON、`.` 缺失值和重试均失败关闭且不泄露 key；
+- `sync_market_macro.py` 现同时编排 EODHD 四条价格和 FRED 实际利率，并原子发布当前修订观测、风险偏好、宏观象限和 COMPLETE 运行；
+- 横轴固定为 DFII10 的 20 个有效观测变化 Robust Z，纵轴复用 R4A；按不晚于风险日期且最多滞后 3 个日历日作 as-of 对齐，后端输出中性带、象限标签、连续状态和最多 60 点轨迹；
+- 新增无参数 `GET /api/market-radar/macro`；repository/query/API 只读取同次完整运行，不在请求中访问供应商、Catalog 或计算器；
+- Vue 总览增加独立宏观状态、来源/当前修订/双轴新鲜度、指标卡和 ECharts 象限图；缺失、损坏、陈旧、历史不足不会拖垮价格和宽度模块；
+- OpenAPI 生成 TypeScript 契约，浏览器不计算 Z-score 或象限，也没有交易按钮和写请求。
+
+已完成验收：
+
+- 认证与 HTTP 错误脱敏、缺失值、日期顺序、最小历史、零 MAD、未来观测过滤、3 日对齐边界、中性带/四象限、payload 严格恢复和事务回滚均有 Python 测试；
+- API 覆盖缺失、空库、损坏、完整与陈旧状态；前端覆盖完整/缺失/历史不足等独立状态，集中客户端保持只读 GET；
+- 合成原子快照在本机 1440、768、375 三档通过浏览器验收，无页面级横向溢出，手机端卡片和象限图正确堆叠，控制台无错误，服务端网络记录只有 GET；
+- 完整 Python 回归为 438 项通过、总覆盖率 90.26%；前端 14 个测试文件共 43 项通过，Prettier、ESLint、TypeScript strict、生产构建、ruff、mypy strict 与 Compose 配置校验均通过；
+- 使用本地 EODHD/FRED 凭据在 `/private/tmp` 隔离目录完成 `2022-01-01` 起的真实 bootstrap：4/4 个价格标的、9,468 根双 BarType、1,167 个 DFII10 有效观测和 51 个显式缺失值，质量报告为 0 error、0 warning；
+- 原子快照日期为 2026-09-03，最新 DFII10 观测为 2026-09-02，滞后 1 个日历日；风险偏好和象限均为 `complete`，轨迹 60 点，当前状态为“过渡区”且已连续 7 个有效观测；
+- 对轨迹首、中、末三个真实坐标复算 `0.60 × credit_z - 0.40 × volatility_z` 并核对实际利率日期，公式与最多 3 日的 as-of 约束全部通过；真实 payload、隔离 Catalog、数据库和报告均未进入 Git。
 
 ### R5：盈利、基本面与事件
 
@@ -1086,6 +1104,6 @@ R0–R2 没有新增第三方依赖。R3A 经用户明确批准新增直接生�
 
 ## 20. 推荐下一步
 
-R4A 已形成“HYG/LQD + VIX/VIX3M → 同一 EODHD/NT Catalog → 纯风险偏好计算 → 独立数据库原子快照”的后端纵向链路，并通过真实数据与全量自动化验收。
+R4B 已形成“EODHD/NT Catalog 风险纵轴 + FRED DFII10 当前修订横轴 → 有界 as-of 对齐 → 独立数据库原子 bundle → 只读 API → Vue 象限图”的完整工程链路，并通过真实数据、自动化与三档响应式浏览器验收。
 
-下一步是 **R4B：实际利率横轴、只读查询与页面**。开始编码前必须先确认 DFII10 的可靠程序化来源、可用日期语义、新鲜度、中性带、象限标签、精确文件清单和页面状态；未取得可靠来源的字段继续保持 unavailable，不得以代理值静默替换。
+下一阶段是否进入 R5 取决于 EODHD Calendar、Fundamentals 和 Economic Events 权限；R0 的现有 Token 对这些端点均为 403，在权限未变化前不应编写无法用真实数据验收的业务模型或以替代值伪装完成。

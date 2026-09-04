@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import RiskAppetiteSnapshot
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
@@ -20,11 +21,14 @@ from trading_assistant.market_radar.metrics import CurrentBreadthSnapshot, Price
 from trading_assistant.market_radar.models import (
     CurrentBreadthSnapshotRecord,
     CurrentMarketMemberRecord,
+    MacroObservationRecord,
+    MacroRegimeSnapshotRecord,
     MarketRadarBase,
     MarketRadarSyncRunRecord,
     PriceSnapshotRecord,
     RiskAppetiteSnapshotRecord,
 )
+from trading_assistant.market_radar.regime import MacroRegimeSnapshot
 
 SyncRunStatus = Literal["RUNNING", "COMPLETE", "FAILED"]
 _SYNC_RUN_STATUSES = frozenset({"RUNNING", "COMPLETE", "FAILED"})
@@ -320,40 +324,115 @@ class MarketRadarRepository:
                 raise RuntimeError("persisted current breadth snapshot metadata is inconsistent")
             return snapshot
 
-    def publish_risk_appetite_and_complete(
+    def publish_macro_bundle_and_complete(
         self,
         run_id: str,
         *,
-        snapshot: RiskAppetiteSnapshot,
+        risk_snapshot: RiskAppetiteSnapshot,
+        observations: tuple[FredObservation, ...],
+        regime_snapshot: MacroRegimeSnapshot,
+        ingested_at_utc: datetime,
         completed_at_utc: datetime,
         instruments_processed: int,
         bars_fetched: int,
         bars_written: int,
     ) -> None:
-        """在一个事务内发布风险偏好快照并完成运行。"""
+        """在一个事务内发布两类宏观快照、当前修订观测和 COMPLETE。"""
         if min(instruments_processed, bars_fetched, bars_written) < 0:
             raise ValueError("market radar sync counts cannot be negative")
+        if not observations:
+            raise ValueError("macro publication requires real-rate observations")
+        if (
+            regime_snapshot.as_of_date != risk_snapshot.as_of_date
+            or regime_snapshot.risk_appetite_as_of_date != risk_snapshot.as_of_date
+            or regime_snapshot.credit_source != risk_snapshot.credit_source
+            or regime_snapshot.price_source != risk_snapshot.price_source
+        ):
+            raise ValueError("macro regime snapshot does not match risk appetite snapshot")
+        series_ids = {item.series_id for item in observations}
+        if series_ids != {regime_snapshot.real_rate.series_id}:
+            raise ValueError("macro observations do not match the regime real-rate series")
+        observation_days = tuple(item.observation_date for item in observations)
+        if observation_days != tuple(sorted(set(observation_days))):
+            raise ValueError("macro observations must be unique and increasing")
+        eligible = tuple(
+            item for item in observations if item.observation_date <= regime_snapshot.as_of_date
+        )
+        if not eligible or (
+            eligible[-1].observation_date != regime_snapshot.real_rate.latest_observation_date
+            or eligible[-1].value != regime_snapshot.real_rate.level_percent
+        ):
+            raise ValueError("macro observations do not match the latest real-rate state")
         completed_at = _utc(completed_at_utc)
+        ingested_at = _utc(ingested_at_utc)
         with self._sessions.begin() as session:
             run = session.get(MarketRadarSyncRunRecord, run_id)
             if run is None or run.status != "RUNNING":
                 raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
-            existing = session.get(RiskAppetiteSnapshotRecord, snapshot.as_of_date)
-            payload = snapshot.to_payload()
-            calculated_at = _utc(snapshot.calculated_at_utc)
-            if existing is None:
+
+            for observation in observations:
+                key = ("fred", observation.series_id, observation.observation_date)
+                existing_observation = session.get(MacroObservationRecord, key)
+                if existing_observation is None:
+                    session.add(
+                        MacroObservationRecord(
+                            source="fred",
+                            series_id=observation.series_id,
+                            observation_date=observation.observation_date,
+                            run_id=run_id,
+                            value=observation.value,
+                            realtime_start=observation.realtime_start,
+                            realtime_end=observation.realtime_end,
+                            ingested_at_utc=ingested_at,
+                        )
+                    )
+                else:
+                    existing_observation.run_id = run_id
+                    existing_observation.value = observation.value
+                    existing_observation.realtime_start = observation.realtime_start
+                    existing_observation.realtime_end = observation.realtime_end
+                    existing_observation.ingested_at_utc = ingested_at
+
+            existing_risk = session.get(
+                RiskAppetiteSnapshotRecord,
+                risk_snapshot.as_of_date,
+            )
+            risk_payload = risk_snapshot.to_payload()
+            risk_calculated_at = _utc(risk_snapshot.calculated_at_utc)
+            if existing_risk is None:
                 session.add(
                     RiskAppetiteSnapshotRecord(
-                        as_of_date=snapshot.as_of_date,
+                        as_of_date=risk_snapshot.as_of_date,
                         run_id=run_id,
-                        calculated_at_utc=calculated_at,
-                        payload_json=payload,
+                        calculated_at_utc=risk_calculated_at,
+                        payload_json=risk_payload,
                     )
                 )
             else:
-                existing.run_id = run_id
-                existing.calculated_at_utc = calculated_at
-                existing.payload_json = payload
+                existing_risk.run_id = run_id
+                existing_risk.calculated_at_utc = risk_calculated_at
+                existing_risk.payload_json = risk_payload
+
+            existing_regime = session.get(
+                MacroRegimeSnapshotRecord,
+                regime_snapshot.as_of_date,
+            )
+            regime_payload = regime_snapshot.to_payload()
+            regime_calculated_at = _utc(regime_snapshot.calculated_at_utc)
+            if existing_regime is None:
+                session.add(
+                    MacroRegimeSnapshotRecord(
+                        as_of_date=regime_snapshot.as_of_date,
+                        run_id=run_id,
+                        calculated_at_utc=regime_calculated_at,
+                        payload_json=regime_payload,
+                    )
+                )
+            else:
+                existing_regime.run_id = run_id
+                existing_regime.calculated_at_utc = regime_calculated_at
+                existing_regime.payload_json = regime_payload
+
             run.status = "COMPLETE"
             run.completed_at_utc = completed_at
             run.instruments_processed = instruments_processed
@@ -391,6 +470,55 @@ class MarketRadarRepository:
             ):
                 raise RuntimeError("persisted risk appetite snapshot metadata is inconsistent")
             return snapshot
+
+    def latest_macro_regime_snapshot(self) -> MacroRegimeSnapshot | None:
+        """返回最近 COMPLETE 运行发布的宏观象限快照。"""
+        bundle = self.latest_macro_bundle()
+        return None if bundle is None else bundle[1]
+
+    def latest_macro_bundle(
+        self,
+    ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
+        """在一个只读事务中返回同次运行发布的两类宏观快照。"""
+        with self._sessions() as session:
+            row = session.execute(
+                select(MacroRegimeSnapshotRecord, RiskAppetiteSnapshotRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == MacroRegimeSnapshotRecord.run_id,
+                )
+                .join(
+                    RiskAppetiteSnapshotRecord,
+                    RiskAppetiteSnapshotRecord.run_id == MacroRegimeSnapshotRecord.run_id,
+                )
+                .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                .order_by(
+                    MacroRegimeSnapshotRecord.as_of_date.desc(),
+                    MacroRegimeSnapshotRecord.calculated_at_utc.desc(),
+                )
+                .limit(1)
+            ).one_or_none()
+            if row is None:
+                return None
+            regime_record, risk_record = row
+            try:
+                regime = MacroRegimeSnapshot.from_payload(regime_record.payload_json)
+                risk = RiskAppetiteSnapshot.from_payload(risk_record.payload_json)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("persisted macro snapshot bundle is invalid") from exc
+            regime_calculated_at = _loaded_utc(regime_record.calculated_at_utc)
+            risk_calculated_at = _loaded_utc(risk_record.calculated_at_utc)
+            if (
+                regime.as_of_date != regime_record.as_of_date
+                or risk.as_of_date != risk_record.as_of_date
+                or regime.as_of_date != risk.as_of_date
+                or regime_calculated_at is None
+                or risk_calculated_at is None
+                or regime.calculated_at_utc != regime_calculated_at
+                or risk.calculated_at_utc != risk_calculated_at
+            ):
+                raise RuntimeError("persisted macro snapshot bundle metadata is inconsistent")
+            return risk, regime
 
     def latest_current_membership(self) -> CurrentMarketMembership | None:
         """返回最近成功发布的规范当前成员快照。"""

@@ -24,6 +24,19 @@ MarketBreadthValidity = Literal[
     "insufficient_coverage",
     "unavailable",
 ]
+MacroRegimeValidity = Literal[
+    "complete",
+    "insufficient_history",
+    "stale",
+    "unavailable",
+]
+MacroRegimeCode = Literal[
+    "transition",
+    "easing_risk_on",
+    "growth_reflation",
+    "growth_concern",
+    "tightening_shock",
+]
 RadarModuleState = Literal[
     "complete",
     "partial",
@@ -441,6 +454,83 @@ class MarketBreadthView:
     b200: BreadthMetricView | None
     ad10: BreadthMetricView | None
     nhnl: BreadthMetricView | None
+
+
+@dataclass(frozen=True)
+class MacroFreshnessView:
+    """宏观双轴相对查询时点的新鲜度。"""
+
+    risk_appetite_age_days: int
+    real_rate_age_days: int
+    stale_after_days: int
+
+
+@dataclass(frozen=True)
+class MacroRealRateView:
+    """FRED 实际利率状态的只读投影。"""
+
+    series_id: str
+    observation_date: date
+    level_percent: float
+    change_20_percentage_points: float | None
+    pressure_z: float | None
+    percentile_3y: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+@dataclass(frozen=True)
+class MacroRiskAppetiteView:
+    """信用与波动率组合轴的只读投影。"""
+
+    as_of_date: date
+    score: float | None
+    credit_z: float | None
+    volatility_z: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+@dataclass(frozen=True)
+class MacroRegimePointView:
+    """一个已在后端完成分类的宏观象限点。"""
+
+    day: date
+    real_rate_observation_date: date
+    real_rate_level_percent: float
+    real_rate_change_20_percentage_points: float
+    real_rate_pressure_z: float
+    real_rate_percentile_3y: float
+    risk_appetite_score: float
+    credit_z: float
+    volatility_z: float
+    regime: MacroRegimeCode
+    regime_label: str
+
+
+@dataclass(frozen=True)
+class MacroRegimeView:
+    """宏观双轴、象限轨迹和来源边界的只读投影。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MacroRegimeValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    freshness: MacroFreshnessView | None
+    neutral_band: float | None
+    alignment_max_age_days: int | None
+    real_rate_source: str | None
+    real_rate_vintage: str | None
+    credit_source: str | None
+    price_source: str | None
+    real_rate: MacroRealRateView | None
+    risk_appetite: MacroRiskAppetiteView | None
+    current: MacroRegimePointView | None
+    trajectory: tuple[MacroRegimePointView, ...]
+    duration_observations: int
 
 
 @dataclass(frozen=True)

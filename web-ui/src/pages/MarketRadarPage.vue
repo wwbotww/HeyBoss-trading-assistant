@@ -13,6 +13,7 @@ import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
   marketRadarBreadthQuery,
+  marketRadarMacroQuery,
   marketRadarSectorQuery,
   marketRadarSectorsQuery,
   marketRadarStockQuery,
@@ -22,12 +23,13 @@ import {
 import type { BreadthMetric, RadarMetric, StockRadarQuery } from '../api/types'
 import DataState from '../components/DataState.vue'
 import DataTable from '../components/DataTable.vue'
+import MacroRegimeChart from '../components/MacroRegimeChart.vue'
 import PaginationControls from '../components/PaginationControls.vue'
 import RadarMetricValue from '../components/RadarMetricValue.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
 import SideDrawer from '../components/SideDrawer.vue'
 import StatusPill from '../components/StatusPill.vue'
-import { formatDateTime, formatPercent, formatSourceState } from '../utils/format'
+import { formatDateTime, formatNumber, formatPercent, formatSourceState } from '../utils/format'
 import { PAGE_SIZE, pageOffset, readPage, readQueryText, withPage } from '../utils/pagination'
 
 type RadarView = 'overview' | 'sectors' | 'stocks'
@@ -107,6 +109,7 @@ const stockParams = computed<StockRadarQuery>(() => {
 
 const summary = useQuery(marketRadarSummaryQuery())
 const breadth = useQuery(marketRadarBreadthQuery())
+const macro = useQuery(marketRadarMacroQuery())
 const sectors = useQuery(marketRadarSectorsQuery())
 const stocks = useQuery(computed(() => marketRadarStocksQuery(stockParams.value)))
 const sectorDetail = useQuery(
@@ -278,6 +281,10 @@ async function retryBreadth(): Promise<void> {
   await breadth.refetch()
 }
 
+async function retryMacro(): Promise<void> {
+  await macro.refetch()
+}
+
 async function retrySectors(): Promise<void> {
   await sectors.refetch()
 }
@@ -292,7 +299,7 @@ async function retryStocks(): Promise<void> {
     <div class="page-intro">
       <div>
         <h1>市场雷达</h1>
-        <p>读取最近一次原子发布的价格与当前宽度快照，观察市场结构；不生成交易信号。</p>
+        <p>读取最近一次原子发布的价格、宽度与宏观快照，观察市场结构；不生成交易信号。</p>
       </div>
       <StatusPill
         v-if="summary.data.value"
@@ -395,6 +402,128 @@ async function retryStocks(): Promise<void> {
             </div>
           </section>
         </template>
+
+        <section class="macro-section" aria-labelledby="macro-title">
+          <header class="macro-header">
+            <div>
+              <p class="eyebrow">Macro regime</p>
+              <h3 id="macro-title">实际利率 × 风险偏好</h3>
+              <p>横轴使用 DFII10 的 20 观测变化 Robust Z，纵轴组合信用代理与波动率期限结构。</p>
+            </div>
+            <StatusPill
+              v-if="macro.data.value"
+              :status="macro.data.value.validity"
+              :label="moduleStateLabel(macro.data.value.validity)"
+            />
+          </header>
+
+          <DataState v-if="macro.isPending.value" state="loading" />
+          <DataState
+            v-else-if="macro.isError.value"
+            state="error"
+            :detail="macro.error.value?.message"
+            retry-label="重新读取宏观象限"
+            @retry="retryMacro"
+          />
+          <DataState
+            v-else-if="macro.data.value?.source_state !== 'available'"
+            :state="macro.data.value?.source_state || 'empty'"
+            title="宏观象限快照不可用"
+            detail="先运行宏观离线同步；页面不会连接 FRED、扫描 Catalog 或临时计算象限。"
+          />
+          <template v-else-if="macro.data.value">
+            <div class="macro-meta">
+              <div>
+                <span>状态日期</span>
+                <strong class="tabular">{{ macro.data.value.as_of_date || '—' }}</strong>
+              </div>
+              <div>
+                <span>实际利率来源</span>
+                <strong>FRED · {{ macro.data.value.real_rate?.series_id || '—' }}</strong>
+              </div>
+              <div>
+                <span>修订口径</span>
+                <strong>{{
+                  macro.data.value.real_rate_vintage === 'current' ? '当前修订' : '—'
+                }}</strong>
+              </div>
+              <div>
+                <span>双轴新鲜度</span>
+                <strong v-if="macro.data.value.freshness" class="tabular">
+                  利率 {{ macro.data.value.freshness.real_rate_age_days }} 天 · 风险
+                  {{ macro.data.value.freshness.risk_appetite_age_days }} 天
+                </strong>
+                <strong v-else>—</strong>
+              </div>
+            </div>
+
+            <div class="macro-layout">
+              <aside class="macro-reading">
+                <div class="macro-current">
+                  <span>当前宏观状态</span>
+                  <strong>{{
+                    macro.data.value.current?.regime_label ||
+                    moduleStateLabel(macro.data.value.validity)
+                  }}</strong>
+                  <small v-if="macro.data.value.current">
+                    已连续 {{ macro.data.value.duration_observations }} 个有效观测
+                  </small>
+                  <small v-else>当前双轴不足以完成后端分类</small>
+                </div>
+                <div class="macro-axis-grid">
+                  <article>
+                    <span>实际利率</span>
+                    <strong class="tabular">
+                      {{ formatNumber(macro.data.value.real_rate?.level_percent, 2) }}%
+                    </strong>
+                    <small class="tabular">
+                      20 期变化
+                      {{ formatNumber(macro.data.value.real_rate?.change_20_percentage_points, 3) }}
+                      pp
+                    </small>
+                  </article>
+                  <article>
+                    <span>利率压力 Z</span>
+                    <strong class="tabular">{{
+                      formatNumber(macro.data.value.real_rate?.pressure_z, 2)
+                    }}</strong>
+                    <small>
+                      {{ macro.data.value.real_rate?.observations || 0 }} /
+                      {{ macro.data.value.real_rate?.required || 0 }} 个变化观测
+                    </small>
+                  </article>
+                  <article>
+                    <span>风险偏好</span>
+                    <strong class="tabular">{{
+                      formatNumber(macro.data.value.risk_appetite?.score, 2)
+                    }}</strong>
+                    <small class="tabular">
+                      Credit Z {{ formatNumber(macro.data.value.risk_appetite?.credit_z, 2) }} · Vol
+                      Z
+                      {{ formatNumber(macro.data.value.risk_appetite?.volatility_z, 2) }}
+                    </small>
+                  </article>
+                </div>
+                <p class="macro-provenance">
+                  信用轴为 HYG/LQD ETF 代理；价格来自 EODHD → NT Catalog。FRED 仅保存当前修订，
+                  不具备历史 vintage / PIT 回放语义。
+                </p>
+              </aside>
+              <div class="macro-visual">
+                <MacroRegimeChart v-if="macro.data.value.current" :macro="macro.data.value" />
+                <DataState
+                  v-else
+                  state="empty"
+                  title="暂不能绘制宏观象限"
+                  detail="只有双轴历史和日期对齐均满足契约时，页面才展示当前点与轨迹。"
+                />
+              </div>
+            </div>
+            <p v-if="macro.data.value.validity === 'stale'" class="macro-notice">
+              至少一条宏观轴已超过 3 个日历日未更新；图中保留最后可追溯状态，但不视为当前状态。
+            </p>
+          </template>
+        </section>
 
         <section class="breadth-section" aria-labelledby="breadth-title">
           <header class="breadth-header">
@@ -995,6 +1124,177 @@ async function retryStocks(): Promise<void> {
   font-weight: 620;
 }
 
+.macro-section {
+  margin: 0 24px 24px;
+  overflow: hidden;
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+}
+
+.macro-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.macro-header h3 {
+  margin: 3px 0 0;
+  font-size: 1.08rem;
+  letter-spacing: -0.025em;
+}
+
+.macro-header > div > p:last-child {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: var(--color-text-soft);
+  font-size: 0.73rem;
+  line-height: 1.55;
+}
+
+.macro-section > :deep(.data-state) {
+  margin: 20px;
+}
+
+.macro-meta {
+  display: grid;
+  gap: 18px 24px;
+  padding: 18px 24px;
+  background: var(--color-surface-soft);
+  border-bottom: 1px solid var(--color-line);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.macro-meta > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.macro-meta span,
+.macro-axis-grid span {
+  color: var(--color-text-faint);
+  font-size: 0.66rem;
+}
+
+.macro-meta strong {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.macro-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.28fr);
+}
+
+.macro-reading {
+  min-width: 0;
+  padding: 28px;
+  border-right: 1px solid var(--color-line);
+}
+
+.macro-current {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: 22px;
+  overflow: hidden;
+  color: #fff;
+  background: var(--color-surface-strong);
+  border-radius: var(--radius-md);
+}
+
+.macro-current::before {
+  position: absolute;
+  top: -35px;
+  right: -25px;
+  width: 125px;
+  height: 100px;
+  content: '';
+  background: var(--gradient-brand);
+  border-radius: 50%;
+  filter: blur(42px);
+  opacity: 0.52;
+}
+
+.macro-current span,
+.macro-current strong,
+.macro-current small {
+  position: relative;
+}
+
+.macro-current span {
+  color: rgb(255 255 255 / 56%);
+  font-size: 0.67rem;
+}
+
+.macro-current strong {
+  font-size: clamp(1.55rem, 2.3vw, 2.3rem);
+  font-weight: 620;
+  letter-spacing: -0.045em;
+}
+
+.macro-current small {
+  color: rgb(255 255 255 / 62%);
+  font-size: 0.66rem;
+}
+
+.macro-axis-grid {
+  display: grid;
+  gap: 0;
+  margin-top: 18px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+}
+
+.macro-axis-grid article {
+  display: grid;
+  gap: 7px;
+  padding: 17px;
+  border-top: 1px solid var(--color-line);
+}
+
+.macro-axis-grid article:first-child {
+  border-top: 0;
+}
+
+.macro-axis-grid strong {
+  font-size: 1.35rem;
+  font-weight: 620;
+  letter-spacing: -0.035em;
+}
+
+.macro-axis-grid small,
+.macro-provenance {
+  color: var(--color-text-faint);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.macro-provenance {
+  margin: 17px 2px 0;
+}
+
+.macro-visual {
+  display: grid;
+  min-width: 0;
+  min-height: 420px;
+  align-items: center;
+}
+
+.macro-notice {
+  margin: 0;
+  padding: 13px 24px;
+  color: var(--color-warning);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  background: var(--color-warning-bg);
+  border-top: 1px solid color-mix(in srgb, var(--color-warning) 18%, transparent);
+}
+
 .breadth-section {
   margin: 0 24px 24px;
   overflow: hidden;
@@ -1387,6 +1687,15 @@ async function retryStocks(): Promise<void> {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .macro-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .macro-reading {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-line);
+  }
+
   .breadth-card:nth-child(3) {
     border-left: 0;
   }
@@ -1428,6 +1737,10 @@ async function retryStocks(): Promise<void> {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .macro-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .table-intro > p {
     text-align: left;
   }
@@ -1461,23 +1774,34 @@ async function retryStocks(): Promise<void> {
     grid-template-columns: 1fr;
   }
 
-  .breadth-header {
+  .breadth-header,
+  .macro-header {
     align-items: stretch;
     flex-direction: column;
     padding: 19px;
   }
 
-  .breadth-section {
+  .breadth-section,
+  .macro-section {
     margin: 0 19px 19px;
   }
 
   .breadth-meta,
-  .breadth-grid {
+  .breadth-grid,
+  .macro-meta {
     grid-template-columns: 1fr;
   }
 
   .breadth-meta {
     padding: 18px 19px;
+  }
+
+  .macro-meta {
+    padding: 18px 19px;
+  }
+
+  .macro-reading {
+    padding: 19px;
   }
 
   .breadth-card,

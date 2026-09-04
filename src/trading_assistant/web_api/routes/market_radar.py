@@ -10,6 +10,7 @@ from trading_assistant.application.models import SortDirection, StockRadarSort
 from trading_assistant.web_api.dependencies import ApplicationServices, get_services
 from trading_assistant.web_api.schemas import (
     ERROR_RESPONSES,
+    MacroRegimeResponse,
     MarketBreadthResponse,
     MarketRadarSummaryResponse,
     SectorRadarListResponse,
@@ -41,6 +42,14 @@ def get_breadth(
 ) -> MarketBreadthResponse:
     """返回最近完整运行发布的 SPY 当前持仓代理宽度。"""
     return MarketBreadthResponse.model_validate(services.market_radar.breadth())
+
+
+@router.get("/macro", response_model=MacroRegimeResponse, operation_id="getMarketRadarMacro")
+def get_macro(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+) -> MacroRegimeResponse:
+    """返回最近完整运行发布的宏观双轴与后端象限分类。"""
+    return MacroRegimeResponse.model_validate(services.market_radar.macro())
 
 
 @router.get(

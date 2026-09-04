@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -26,6 +27,7 @@ EXPECTED_SECTORS = frozenset(
         "utilities",
     }
 )
+_SERIES_ID = re.compile(r"^[A-Z0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class MarketRadarConfig:
     credit_proxy: tuple[str, str]
     vix: str
     vix3m: str
+    real_rate_series: str
     index_membership_symbol: str
     sector_etfs: tuple[tuple[str, str], ...]
     watchlist: tuple[str, ...]
@@ -97,6 +100,13 @@ def _text(value: object, *, name: str) -> str:
     result = value.strip()
     if any(character.isspace() for character in result):
         raise ValueError(f"配置项 {name!r} 不得包含空白字符")
+    return result
+
+
+def _series_id(value: object, *, name: str) -> str:
+    result = _text(value, name=name)
+    if not _SERIES_ID.fullmatch(result):
+        raise ValueError(f"配置项 {name!r} 必须是大写字母或数字组成的序列 ID")
     return result
 
 
@@ -233,6 +243,7 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
             "equal_weight_benchmark",
             "credit_proxy",
             "volatility",
+            "real_rate_series",
             "index_membership_symbol",
         },
         name="market",
@@ -301,6 +312,10 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
         credit_proxy=(credit_proxy[0], credit_proxy[1]),
         vix=vix,
         vix3m=vix3m,
+        real_rate_series=_series_id(
+            market["real_rate_series"],
+            name="real_rate_series",
+        ),
         index_membership_symbol=_symbol(
             market["index_membership_symbol"],
             name="index_membership_symbol",

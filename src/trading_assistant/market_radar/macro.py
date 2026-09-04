@@ -225,7 +225,8 @@ def _raw_points(
     return tuple(points)
 
 
-def _robust_z(values: Sequence[float]) -> float | None:
+def robust_z_score(values: Sequence[float]) -> float | None:
+    """按固定三年窗口计算并截断 Robust Z-score。"""
     if len(values) < MIN_ROBUST_OBSERVATIONS:
         return None
     window = tuple(values[-ROBUST_WINDOW_OBSERVATIONS:])
@@ -243,8 +244,8 @@ def _scored_points(raw: Sequence[_RawPoint]) -> tuple[RiskAppetitePoint, ...]:
     for item in raw:
         credit_values.append(item.credit)
         volatility_values.append(item.volatility)
-        credit_z = _robust_z(credit_values)
-        volatility_z = _robust_z(volatility_values)
+        credit_z = robust_z_score(credit_values)
+        volatility_z = robust_z_score(volatility_values)
         if credit_z is None or volatility_z is None:
             continue
         result.append(

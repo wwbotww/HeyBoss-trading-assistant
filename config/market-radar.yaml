@@ -8,6 +8,7 @@ market:
   volatility:
     vix: VIX.INDX
     vix3m: VIX3M.INDX
+  real_rate_series: DFII10
   index_membership_symbol: GSPC.INDX
 
 sector_etfs:

@@ -11,6 +11,7 @@ import {
   fetchLatestDataQuality,
   fetchLatestFactor,
   fetchMarketRadarBreadth,
+  fetchMarketRadarMacro,
   fetchMarketRadarSector,
   fetchMarketRadarSectors,
   fetchMarketRadarStock,
@@ -60,6 +61,7 @@ export const queryKeys = {
   system: ['system', 'status'] as const,
   marketRadarSummary: ['market-radar', 'summary'] as const,
   marketRadarBreadth: ['market-radar', 'breadth'] as const,
+  marketRadarMacro: ['market-radar', 'macro'] as const,
   marketRadarSectors: ['market-radar', 'sectors'] as const,
   marketRadarSector: (sectorId: string) => ['market-radar', 'sectors', sectorId] as const,
   marketRadarStocks: (query: StockRadarQuery) => ['market-radar', 'stocks', query] as const,
@@ -129,6 +131,8 @@ export const marketRadarSummaryQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarSummary, queryFn: fetchMarketRadarSummary })
 export const marketRadarBreadthQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarBreadth, queryFn: fetchMarketRadarBreadth })
+export const marketRadarMacroQuery = () =>
+  queryOptions({ queryKey: queryKeys.marketRadarMacro, queryFn: fetchMarketRadarMacro })
 export const marketRadarSectorsQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarSectors, queryFn: fetchMarketRadarSectors })
 export const marketRadarSectorQuery = (sectorId: string, enabled = true) =>

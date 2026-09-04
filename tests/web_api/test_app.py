@@ -47,6 +47,7 @@ def test_health_openapi_and_error_contract_are_stable(tmp_path: Path) -> None:
         "/api/system/status",
         "/api/market-radar/summary",
         "/api/market-radar/breadth",
+        "/api/market-radar/macro",
         "/api/market-radar/sectors",
         "/api/market-radar/sectors/{sector_id}",
         "/api/market-radar/stocks",

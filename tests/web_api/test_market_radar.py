@@ -28,8 +28,8 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
         "complete",
         "complete",
         "complete",
-        "unavailable",
-        "unavailable",
+        "complete",
+        "complete",
         "unavailable",
     ]
 
@@ -50,6 +50,16 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
         "history_required": 50,
     }
     assert breadth_payload["b200"]["history_required"] == 200
+
+    macro = client.get("/api/market-radar/macro")
+    assert macro.status_code == 200
+    macro_payload = macro.json()
+    assert macro_payload["source_state"] == "available"
+    assert macro_payload["validity"] == "complete"
+    assert macro_payload["current"]["regime"] == "easing_risk_on"
+    assert macro_payload["current"]["regime_label"] == "宽松型 Risk-on"
+    assert macro_payload["real_rate"]["series_id"] == "DFII10"
+    assert macro_payload["risk_appetite"]["score"] == 0.6
 
     sectors = client.get("/api/market-radar/sectors")
     assert sectors.status_code == 200
@@ -88,6 +98,10 @@ def test_missing_database_and_invalid_entities_have_explicit_boundaries(tmp_path
     assert breadth.json()["source_state"] == "missing"
     assert breadth.json()["validity"] == "unavailable"
     assert breadth.json()["b50"] is None
+    macro = client.get("/api/market-radar/macro")
+    assert macro.status_code == 200
+    assert macro.json()["source_state"] == "missing"
+    assert macro.json()["current"] is None
     assert client.get("/api/market-radar/sectors/unknown").status_code == 404
     assert client.get("/api/market-radar/stocks/AAPL.US").status_code == 404
 
@@ -164,3 +178,25 @@ def test_corrupt_breadth_isolated_from_price_summary(tmp_path: Path) -> None:
         item for item in summary.json()["modules"] if item["module_id"] == "market_breadth"
     )
     assert breadth_module["state"] == "unavailable"
+
+
+def test_corrupt_macro_isolated_from_price_and_breadth(tmp_path: Path) -> None:
+    seed_market_radar_data(tmp_path)
+    with sqlite3.connect(tmp_path / "market-radar.db") as connection:
+        connection.execute(
+            "UPDATE macro_regime_snapshots SET payload_json = ?",
+            ('{"unexpected": true}',),
+        )
+    client = TestClient(
+        create_app(web_settings(tmp_path, account="")), raise_server_exceptions=False
+    )
+
+    macro = client.get("/api/market-radar/macro")
+    assert macro.status_code == 503
+    assert "token" not in macro.text
+    summary = client.get("/api/market-radar/summary")
+    assert summary.status_code == 200
+    assert summary.json()["market"]["spy_return_20"]["value"] == 0.04
+    modules = {item["module_id"]: item for item in summary.json()["modules"]}
+    assert modules["market_breadth"]["state"] == "complete"
+    assert modules["real_rates"]["state"] == "unavailable"

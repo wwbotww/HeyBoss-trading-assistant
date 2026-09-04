@@ -9,6 +9,7 @@ import type {
   FactorSnapshot,
   FillPage,
   Health,
+  MacroRegime,
   MarketBreadth,
   MarketRadarSummary,
   OrderDetail,
@@ -463,14 +464,14 @@ export const marketRadarSummaryFixture = {
     {
       module_id: 'real_rates',
       label: '实际利率',
-      state: 'unavailable',
-      detail: 'R4 宏观观测与日期对齐链路尚未实施。',
+      state: 'complete',
+      detail: 'DFII10 当前修订观测与 20 期变化标准化完整。',
     },
     {
       module_id: 'risk_appetite',
       label: '风险偏好',
-      state: 'unavailable',
-      detail: 'R4 所需的波动率期限结构和信用组合尚未实施。',
+      state: 'complete',
+      detail: 'HYG/LQD 信用代理与 VIX/VIX3M 波动率期限结构完整。',
     },
     {
       module_id: 'earnings_revisions',
@@ -508,6 +509,68 @@ export const marketBreadthFixture = {
     coverage: { eligible: 503, observed: 500, ratio: 500 / 503 },
   },
 } satisfies MarketBreadth
+
+const macroPoint = (
+  day: string,
+  realRatePressure: number,
+  riskAppetite: number,
+  regime: 'transition' | 'easing_risk_on' | 'growth_reflation',
+  regimeLabel: string,
+) => ({
+  day,
+  real_rate_observation_date: day,
+  real_rate_level_percent: 1.72,
+  real_rate_change_20_percentage_points: -0.15,
+  real_rate_pressure_z: realRatePressure,
+  real_rate_percentile_3y: 0.4,
+  risk_appetite_score: riskAppetite,
+  credit_z: 1,
+  volatility_z: 0,
+  regime,
+  regime_label: regimeLabel,
+})
+
+export const marketMacroFixture = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-03T02:00:00Z',
+  validity: 'complete',
+  as_of_date: '2026-09-02',
+  calculated_at_utc: '2026-09-03T01:00:00Z',
+  freshness: { risk_appetite_age_days: 1, real_rate_age_days: 1, stale_after_days: 3 },
+  neutral_band: 0.35,
+  alignment_max_age_days: 3,
+  real_rate_source: 'fred_dfii10',
+  real_rate_vintage: 'current',
+  credit_source: 'etf_proxy',
+  price_source: 'eodhd_nt_catalog',
+  real_rate: {
+    series_id: 'DFII10',
+    observation_date: '2026-09-02',
+    level_percent: 1.72,
+    change_20_percentage_points: -0.15,
+    pressure_z: -1,
+    percentile_3y: 0.4,
+    validity: 'complete',
+    observations: 504,
+    required: 504,
+  },
+  risk_appetite: {
+    as_of_date: '2026-09-02',
+    score: 0.6,
+    credit_z: 1,
+    volatility_z: 0,
+    validity: 'complete',
+    observations: 504,
+    required: 504,
+  },
+  current: macroPoint('2026-09-02', -1, 0.6, 'easing_risk_on', '宽松型 Risk-on'),
+  trajectory: [
+    macroPoint('2026-08-31', 0.5, 0.2, 'transition', '过渡区'),
+    macroPoint('2026-09-01', 0.7, 0.6, 'growth_reflation', '增长 / 再通胀'),
+    macroPoint('2026-09-02', -1, 0.6, 'easing_risk_on', '宽松型 Risk-on'),
+  ],
+  duration_observations: 1,
+} satisfies MacroRegime
 
 export const marketRadarSectorsFixture = {
   source_state: 'available',
@@ -589,6 +652,7 @@ const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/system/status': systemFixture,
   '/api/market-radar/summary': marketRadarSummaryFixture,
   '/api/market-radar/breadth': marketBreadthFixture,
+  '/api/market-radar/macro': marketMacroFixture,
   '/api/market-radar/sectors': marketRadarSectorsFixture,
   '/api/market-radar/sectors/information_technology': firstItem(marketRadarSectorsFixture.items),
   '/api/market-radar/stocks': marketRadarStocksFixture,

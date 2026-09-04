@@ -48,6 +48,7 @@ def test_project_config_loads_price_universe_and_probe_contract() -> None:
     assert len(config.price_instrument_ids) == 25
     assert config.vix == "VIX.INDX"
     assert config.vix3m == "VIX3M.INDX"
+    assert config.real_rate_series == "DFII10"
     assert config.macro_price_instrument_ids == (
         "HYG.US",
         "LQD.US",
@@ -101,6 +102,10 @@ def _invalid_benchmark(value: dict[str, Any]) -> None:
     value["market"]["benchmark"] = "SPY"
 
 
+def _invalid_real_rate_series(value: dict[str, Any]) -> None:
+    value["market"]["real_rate_series"] = "dfii10.bad"
+
+
 def _benchmark_with_space(value: dict[str, Any]) -> None:
     value["market"]["benchmark"] = "SPY .US"
 
@@ -147,6 +152,7 @@ def _invalid_watchlist_sector(value: dict[str, Any]) -> None:
         (_invalid_volatility_kind, "index"),
         (_invalid_monitor_kind, "equity 或 index"),
         (_invalid_benchmark, "市场后缀"),
+        (_invalid_real_rate_series, "序列 ID"),
         (_benchmark_with_space, "空白"),
         (_empty_watchlist, "非空列表"),
         (_duplicate_watchlist, "重复"),

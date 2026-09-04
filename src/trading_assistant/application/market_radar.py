@@ -10,6 +10,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from trading_assistant.application.models import (
     BreadthMetricView,
+    MacroFreshnessView,
+    MacroRealRateView,
+    MacroRegimePointView,
+    MacroRegimeValidity,
+    MacroRegimeView,
+    MacroRiskAppetiteView,
     MarketBreadthView,
     MarketRadarSummaryView,
     QuerySourceError,
@@ -34,10 +40,15 @@ from trading_assistant.market_radar.metrics import (
     MetricValue,
     PriceRadarSnapshot,
 )
+from trading_assistant.market_radar.regime import (
+    ALIGNMENT_MAX_AGE_DAYS,
+    MacroRegimePoint,
+)
 from trading_assistant.market_radar.storage import MarketRadarRepository
 
 StockRadarMetricSort = Literal["momentum", "relative_momentum", "volatility", "drawdown"]
 _BREADTH_STALE_AFTER_DAYS = 7
+_MACRO_STALE_AFTER_DAYS = ALIGNMENT_MAX_AGE_DAYS
 
 
 def _utc_now() -> datetime:
@@ -63,6 +74,22 @@ def _breadth_metric(value: BreadthMetric) -> BreadthMetricView:
             ratio=value.ratio,
         ),
         history_required=value.history_required,
+    )
+
+
+def _macro_point(value: MacroRegimePoint) -> MacroRegimePointView:
+    return MacroRegimePointView(
+        day=value.day,
+        real_rate_observation_date=value.real_rate_observation_date,
+        real_rate_level_percent=value.real_rate_level_percent,
+        real_rate_change_20_percentage_points=value.real_rate_change_20_percentage_points,
+        real_rate_pressure_z=value.real_rate_pressure_z,
+        real_rate_percentile_3y=value.real_rate_percentile_3y,
+        risk_appetite_score=value.risk_appetite_score,
+        credit_z=value.credit_z,
+        volatility_z=value.volatility_z,
+        regime=value.regime,
+        regime_label=value.regime_label,
     )
 
 
@@ -126,6 +153,10 @@ class MarketRadarQueryService:
             breadth = self._breadth_at(observed_at)
         except QuerySourceError:
             breadth = None
+        try:
+            macro = self._macro_at(observed_at)
+        except QuerySourceError:
+            macro = None
         market = None
         coverage = None
         if snapshot is not None:
@@ -146,12 +177,16 @@ class MarketRadarQueryService:
             calculated_at_utc=None if snapshot is None else snapshot.calculated_at_utc,
             coverage=coverage,
             market=market,
-            modules=self._modules(snapshot, source_state, breadth),
+            modules=self._modules(snapshot, source_state, breadth, macro),
         )
 
     def breadth(self) -> MarketBreadthView:
         """返回最近完整运行发布的当前宽度快照。"""
         return self._breadth_at(self._clock().astimezone(UTC))
+
+    def macro(self) -> MacroRegimeView:
+        """返回同次完整运行原子发布的宏观双轴快照。"""
+        return self._macro_at(self._clock().astimezone(UTC))
 
     def sectors(self) -> SectorRadarListView:
         """返回最新快照中的 11 个板块价格指标。"""
@@ -293,6 +328,75 @@ class MarketRadarQueryService:
             nhnl=_breadth_metric(snapshot.nhnl),
         )
 
+    def _macro_at(self, observed_at: datetime) -> MacroRegimeView:
+        if self._repository is None:
+            return self._empty_macro("missing", observed_at)
+        try:
+            bundle = self._repository.latest_macro_bundle()
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise QuerySourceError(
+                "market_radar_database",
+                "市场雷达宏观象限快照无法安全读取。",
+            ) from exc
+        if bundle is None:
+            return self._empty_macro("empty", observed_at)
+        risk, regime = bundle
+        risk_age_days = (observed_at.date() - risk.as_of_date).days
+        real_rate_age_days = (observed_at.date() - regime.real_rate.latest_observation_date).days
+        if risk_age_days < 0 or real_rate_age_days < 0:
+            raise QuerySourceError(
+                "market_radar_database",
+                "市场雷达宏观象限快照无法安全读取。",
+            )
+        validity: MacroRegimeValidity = regime.validity
+        if (
+            validity == "complete"
+            and max(risk_age_days, real_rate_age_days) > _MACRO_STALE_AFTER_DAYS
+        ):
+            validity = "stale"
+        risk_current = risk.current
+        return MacroRegimeView(
+            source_state="available",
+            observed_at_utc=observed_at,
+            validity=validity,
+            as_of_date=regime.as_of_date,
+            calculated_at_utc=regime.calculated_at_utc,
+            freshness=MacroFreshnessView(
+                risk_appetite_age_days=risk_age_days,
+                real_rate_age_days=real_rate_age_days,
+                stale_after_days=_MACRO_STALE_AFTER_DAYS,
+            ),
+            neutral_band=regime.neutral_band,
+            alignment_max_age_days=regime.alignment_max_age_days,
+            real_rate_source=regime.real_rate_source,
+            real_rate_vintage=regime.real_rate_vintage,
+            credit_source=regime.credit_source,
+            price_source=regime.price_source,
+            real_rate=MacroRealRateView(
+                series_id=regime.real_rate.series_id,
+                observation_date=regime.real_rate.latest_observation_date,
+                level_percent=regime.real_rate.level_percent,
+                change_20_percentage_points=(regime.real_rate.change_20_percentage_points),
+                pressure_z=regime.real_rate.pressure_z,
+                percentile_3y=regime.real_rate.percentile_3y,
+                validity=regime.real_rate.validity,
+                observations=regime.real_rate.observations,
+                required=regime.real_rate.required,
+            ),
+            risk_appetite=MacroRiskAppetiteView(
+                as_of_date=risk.as_of_date,
+                score=None if risk_current is None else risk_current.score,
+                credit_z=None if risk_current is None else risk_current.credit_z,
+                volatility_z=None if risk_current is None else risk_current.volatility_z,
+                validity=risk.validity,
+                observations=risk.observations,
+                required=risk.required,
+            ),
+            current=None if regime.current is None else _macro_point(regime.current),
+            trajectory=tuple(_macro_point(point) for point in regime.trajectory),
+            duration_observations=regime.duration_observations,
+        )
+
     @staticmethod
     def _empty_breadth(source_state: SourceState, observed_at: datetime) -> MarketBreadthView:
         return MarketBreadthView(
@@ -311,10 +415,33 @@ class MarketRadarQueryService:
         )
 
     @staticmethod
+    def _empty_macro(source_state: SourceState, observed_at: datetime) -> MacroRegimeView:
+        return MacroRegimeView(
+            source_state=source_state,
+            observed_at_utc=observed_at,
+            validity="unavailable",
+            as_of_date=None,
+            calculated_at_utc=None,
+            freshness=None,
+            neutral_band=None,
+            alignment_max_age_days=None,
+            real_rate_source=None,
+            real_rate_vintage=None,
+            credit_source=None,
+            price_source=None,
+            real_rate=None,
+            risk_appetite=None,
+            current=None,
+            trajectory=(),
+            duration_observations=0,
+        )
+
+    @staticmethod
     def _modules(
         snapshot: PriceRadarSnapshot | None,
         source_state: SourceState,
         breadth: MarketBreadthView | None,
+        macro: MacroRegimeView | None,
     ) -> tuple[RadarModuleView, ...]:
         if snapshot is None:
             price_state: RadarModuleState = "unavailable"
@@ -379,22 +506,76 @@ class MarketRadarQueryService:
                 breadth.validity,
                 breadth_details[breadth.validity],
             )
+        if macro is None:
+            real_rate_module = RadarModuleView(
+                "real_rates",
+                "实际利率",
+                "unavailable",
+                "宏观象限快照无法安全读取; 其他市场雷达模块不受影响。",
+            )
+            risk_module = RadarModuleView(
+                "risk_appetite",
+                "风险偏好",
+                "unavailable",
+                "宏观象限快照无法安全读取; 其他市场雷达模块不受影响。",
+            )
+        elif macro.source_state != "available":
+            detail = (
+                "市场雷达数据库尚未生成。"
+                if macro.source_state == "missing"
+                else "市场雷达数据库中还没有宏观象限快照。"
+            )
+            real_rate_module = RadarModuleView(
+                "real_rates",
+                "实际利率",
+                "unavailable",
+                detail,
+            )
+            risk_module = RadarModuleView(
+                "risk_appetite",
+                "风险偏好",
+                "unavailable",
+                detail,
+            )
+        else:
+            if macro.real_rate is None or macro.risk_appetite is None or macro.freshness is None:
+                raise AssertionError("available macro view requires both axes and freshness")
+            real_rate_state: RadarModuleState = macro.real_rate.validity
+            if macro.freshness.real_rate_age_days > macro.freshness.stale_after_days:
+                real_rate_state = "stale"
+            risk_state: RadarModuleState = macro.risk_appetite.validity
+            if macro.freshness.risk_appetite_age_days > macro.freshness.stale_after_days:
+                risk_state = "stale"
+            real_rate_details = {
+                "complete": "DFII10 当前修订观测与 20 期变化标准化完整。",
+                "stale": "DFII10 最近观测已超过 3 个日历日。",
+                "insufficient_history": "DFII10 有效变化历史不足 504 个观测。",
+                "unavailable": "DFII10 历史存在, 但当前无法完成稳健标准化。",
+            }
+            risk_details = {
+                "complete": "HYG/LQD 信用代理与 VIX/VIX3M 波动率期限结构完整。",
+                "stale": "风险偏好价格输入已超过 3 个日历日。",
+                "insufficient_history": "风险偏好标准化历史不足 504 个观测。",
+                "unavailable": "风险偏好历史存在, 但当前无法完成稳健标准化。",
+            }
+            real_rate_module = RadarModuleView(
+                "real_rates",
+                "实际利率",
+                real_rate_state,
+                real_rate_details[real_rate_state],
+            )
+            risk_module = RadarModuleView(
+                "risk_appetite",
+                "风险偏好",
+                risk_state,
+                risk_details[risk_state],
+            )
         return (
             spy_module,
             breadth_module,
             equal_weight_module,
-            RadarModuleView(
-                "real_rates",
-                "实际利率",
-                "unavailable",
-                "R4 宏观观测与日期对齐链路尚未实施。",
-            ),
-            RadarModuleView(
-                "risk_appetite",
-                "风险偏好",
-                "unavailable",
-                "R4 所需的波动率期限结构和信用组合尚未实施。",
-            ),
+            real_rate_module,
+            risk_module,
             RadarModuleView(
                 "earnings_revisions",
                 "EPS 修正",

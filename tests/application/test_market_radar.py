@@ -11,6 +11,12 @@ import pytest
 
 from trading_assistant.application.market_radar import MarketRadarQueryService
 from trading_assistant.application.models import QuerySourceError, ResourceNotFoundError
+from trading_assistant.market_radar.fred import FredObservation
+from trading_assistant.market_radar.macro import (
+    RiskAppetiteComponents,
+    RiskAppetitePoint,
+    RiskAppetiteSnapshot,
+)
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
@@ -24,6 +30,13 @@ from trading_assistant.market_radar.metrics import (
     PriceRadarSnapshot,
     SectorPriceMetrics,
     StockPriceMetrics,
+)
+from trading_assistant.market_radar.regime import (
+    ALIGNMENT_MAX_AGE_DAYS,
+    NEUTRAL_BAND,
+    MacroRegimePoint,
+    MacroRegimeSnapshot,
+    RealRateState,
 )
 from trading_assistant.market_radar.storage import MarketRadarRepository
 
@@ -122,6 +135,83 @@ def _membership(snapshot: CurrentBreadthSnapshot) -> CurrentMarketMembership:
     )
 
 
+def _risk_snapshot() -> RiskAppetiteSnapshot:
+    day = date(2026, 9, 2)
+    point = RiskAppetitePoint(day=day, score=0.6, credit_z=1, volatility_z=0)
+    return RiskAppetiteSnapshot(
+        as_of_date=day,
+        calculated_at_utc=NOW,
+        validity="complete",
+        observations=504,
+        required=504,
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        components=RiskAppetiteComponents(
+            day=day,
+            hyg_close=80,
+            lqd_close=100,
+            vix_close=20,
+            vix3m_close=22,
+            credit_log_change_20=0.01,
+            volatility_term_log=-0.09,
+        ),
+        current=point,
+        trajectory=(point,),
+    )
+
+
+def _macro_snapshot() -> MacroRegimeSnapshot:
+    point = MacroRegimePoint(
+        day=date(2026, 9, 2),
+        real_rate_observation_date=date(2026, 9, 1),
+        real_rate_level_percent=1.72,
+        real_rate_change_20_percentage_points=-0.15,
+        real_rate_pressure_z=-1,
+        real_rate_percentile_3y=0.4,
+        risk_appetite_score=0.6,
+        credit_z=1,
+        volatility_z=0,
+        regime="easing_risk_on",
+        regime_label="宽松型 Risk-on",
+    )
+    return MacroRegimeSnapshot(
+        as_of_date=point.day,
+        calculated_at_utc=NOW,
+        validity="complete",
+        neutral_band=NEUTRAL_BAND,
+        alignment_max_age_days=ALIGNMENT_MAX_AGE_DAYS,
+        real_rate_source="fred_dfii10",
+        real_rate_vintage="current",
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        risk_appetite_as_of_date=point.day,
+        real_rate=RealRateState(
+            series_id="DFII10",
+            latest_observation_date=point.real_rate_observation_date,
+            level_percent=1.72,
+            change_20_percentage_points=-0.15,
+            pressure_z=-1,
+            percentile_3y=0.4,
+            validity="complete",
+            observations=504,
+            required=504,
+        ),
+        current=point,
+        trajectory=(point,),
+        duration_observations=1,
+    )
+
+
+def _fred_observation() -> FredObservation:
+    return FredObservation(
+        series_id="DFII10",
+        observation_date=date(2026, 9, 1),
+        value=1.72,
+        realtime_start=date(2026, 9, 3),
+        realtime_end=date(2026, 9, 3),
+    )
+
+
 def _repository(tmp_path: Path) -> MarketRadarRepository:
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/market-radar.db")
     repository.create_schema()
@@ -159,6 +249,25 @@ def _repository(tmp_path: Path) -> MarketRadarRepository:
         bars_fetched=4_000,
         bars_written=4_000,
     )
+    repository.start_sync_run(
+        run_id="macro-run",
+        source="macro_regime",
+        started_at_utc=NOW - timedelta(minutes=1),
+        requested_start_date=date(2022, 9, 2),
+        requested_end_date=date(2026, 9, 2),
+        instrument_count=4,
+    )
+    repository.publish_macro_bundle_and_complete(
+        "macro-run",
+        risk_snapshot=_risk_snapshot(),
+        observations=(_fred_observation(),),
+        regime_snapshot=_macro_snapshot(),
+        ingested_at_utc=NOW,
+        completed_at_utc=NOW,
+        instruments_processed=4,
+        bars_fetched=8_000,
+        bars_written=8_000,
+    )
     return repository
 
 
@@ -172,6 +281,9 @@ def test_missing_and_empty_sources_are_explicit(tmp_path: Path) -> None:
     assert missing_breadth.source_state == "missing"
     assert missing_breadth.validity == "unavailable"
     assert missing_breadth.b50 is None
+    missing_macro = MarketRadarQueryService(repository=None, clock=lambda: NOW).macro()
+    assert missing_macro.source_state == "missing"
+    assert missing_macro.current is None
 
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/empty.db")
     repository.create_schema()
@@ -180,6 +292,9 @@ def test_missing_and_empty_sources_are_explicit(tmp_path: Path) -> None:
     assert empty.items == ()
     empty_breadth = MarketRadarQueryService(repository=repository, clock=lambda: NOW).breadth()
     assert empty_breadth.source_state == "empty"
+    assert MarketRadarQueryService(
+        repository=repository, clock=lambda: NOW
+    ).macro().source_state == ("empty")
     repository.close()
 
 
@@ -198,8 +313,8 @@ def test_summary_and_sector_views_only_project_the_complete_snapshot(tmp_path: P
         "partial",
         "complete",
         "complete",
-        "unavailable",
-        "unavailable",
+        "complete",
+        "complete",
         "unavailable",
     ]
 
@@ -212,6 +327,18 @@ def test_summary_and_sector_views_only_project_the_complete_snapshot(tmp_path: P
     assert breadth.b200 is not None
     assert breadth.b200.coverage == breadth.b50.coverage
     assert breadth.b200.history_required == 200
+
+    macro = service.macro()
+    assert macro.validity == "complete"
+    assert macro.current is not None
+    assert macro.current.regime == "easing_risk_on"
+    assert macro.current.regime_label == "宽松型 Risk-on"
+    assert macro.real_rate is not None
+    assert macro.real_rate.series_id == "DFII10"
+    assert macro.risk_appetite is not None
+    assert macro.risk_appetite.score == pytest.approx(0.6)
+    assert macro.freshness is not None
+    assert macro.freshness.real_rate_age_days == 2
 
     sectors = service.sectors()
     assert [item.sector_id for item in sectors.items] == ["information_technology", "energy"]
@@ -325,6 +452,11 @@ def test_corrupt_breadth_does_not_hide_price_summary() -> None:
         def latest_current_breadth_snapshot(self) -> CurrentBreadthSnapshot:
             raise RuntimeError("/private/token/should-not-leak")
 
+        def latest_macro_bundle(
+            self,
+        ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
+            return None
+
     service = MarketRadarQueryService(
         repository=cast(MarketRadarRepository, BrokenBreadthRepository()),
         clock=lambda: NOW,
@@ -337,4 +469,42 @@ def test_corrupt_breadth_does_not_hide_price_summary() -> None:
     assert "其他市场雷达模块不受影响" in breadth_module.detail
     with pytest.raises(QuerySourceError) as captured:
         service.breadth()
+    assert "token" not in captured.value.public_detail
+
+
+def test_macro_staleness_and_failure_are_isolated_from_price_summary(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    stale_service = MarketRadarQueryService(
+        repository=repository,
+        clock=lambda: datetime(2026, 9, 6, 2, tzinfo=UTC),
+    )
+    macro = stale_service.macro()
+    assert macro.validity == "stale"
+    modules = {item.module_id: item for item in stale_service.summary().modules}
+    assert modules["real_rates"].state == "stale"
+    assert modules["risk_appetite"].state == "stale"
+    repository.close()
+
+    class BrokenMacroRepository:
+        def latest_price_snapshot(self) -> PriceRadarSnapshot:
+            return _snapshot()
+
+        def latest_current_breadth_snapshot(self) -> None:
+            return None
+
+        def latest_macro_bundle(
+            self,
+        ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
+            raise RuntimeError("/private/token/should-not-leak")
+
+    broken = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, BrokenMacroRepository()),
+        clock=lambda: NOW,
+    )
+    summary = broken.summary()
+    assert summary.market is not None
+    modules = {item.module_id: item for item in summary.modules}
+    assert modules["real_rates"].state == "unavailable"
+    with pytest.raises(QuerySourceError) as captured:
+        broken.macro()
     assert "token" not in captured.value.public_detail

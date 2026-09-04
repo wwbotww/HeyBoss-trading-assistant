@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -83,6 +83,36 @@ class RiskAppetiteSnapshotRecord(MarketRadarBase):
     """由一次成功同步原子发布的风险偏好快照。"""
 
     __tablename__ = "risk_appetite_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("sync_runs.run_id"),
+        unique=True,
+        index=True,
+    )
+    calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class MacroObservationRecord(MarketRadarBase):
+    """FRED 当前修订口径的宏观观测。"""
+
+    __tablename__ = "macro_observations"
+
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    series_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    observation_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    value: Mapped[float] = mapped_column(Float)
+    realtime_start: Mapped[date] = mapped_column(Date)
+    realtime_end: Mapped[date] = mapped_column(Date)
+    ingested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MacroRegimeSnapshotRecord(MarketRadarBase):
+    """由宏观同步原子发布的四象限快照。"""
+
+    __tablename__ = "macro_regime_snapshots"
 
     as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
     run_id: Mapped[str] = mapped_column(

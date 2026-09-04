@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""同步宏观价格输入并发布风险偏好快照。"""
+"""同步宏观价格与实际利率并发布四象限快照。"""
 
 from __future__ import annotations
 
@@ -77,6 +77,7 @@ async def _run(
             start_date=args.start,
             end_date=args.end,
             eodhd_api_token=os.getenv("EODHD_API_TOKEN"),
+            fred_api_key=os.getenv("FRED_API_KEY"),
         )
     except ValueError as exc:
         _fail(parser, str(exc))
@@ -92,12 +93,15 @@ def _print_summary(summary: MarketMacroSyncSummary) -> None:
     print(f"bars_written={summary.bars_written}")
     print(f"corporate_actions_written={summary.corporate_actions_written}")
     print(f"snapshot_date={summary.snapshot_date or 'none'}")
-    print(f"snapshot_validity={summary.snapshot_validity or 'none'}")
+    print(f"risk_appetite_validity={summary.risk_appetite_validity or 'none'}")
+    print(f"regime_validity={summary.regime_validity or 'none'}")
+    print(f"real_rate_observations={summary.real_rate_observations}")
+    print(f"real_rate_missing_values={summary.real_rate_missing_values}")
     print(f"quality_report={summary.report_path}")
 
 
 def main() -> int:
-    """运行 R4A 宏观风险偏好同步。"""
+    """运行 R4B 宏观四象限同步。"""
     parser = _parser()
     args = parser.parse_args()
     logging.basicConfig(

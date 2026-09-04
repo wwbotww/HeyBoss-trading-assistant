@@ -16,13 +16,13 @@
 - 提供独立的只读 Python Web API，统一查询审计库、Catalog、回测报告和非敏感配置；
 - 提供独立的 Vue 3 只读交易操作台，覆盖操作总览、账户持仓、策略因子、决策流、订单成交、市场雷达、回测和数据系统状态；
 - 通过可替换成员来源、同一 EODHD/NT Catalog 和独立快照数据库计算并展示当前 SPY 持仓代理的市场宽度；
-- 复用同一行情链路同步 HYG、LQD、VIX 和 VIX3M，并在后端原子发布风险偏好快照。
+- 复用同一行情链路同步 HYG、LQD、VIX 和 VIX3M，从 FRED 同步 DFII10 当前修订观测，并原子发布实际利率 × 风险偏好宏观象限。
 
 当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 E3 FactorBatch。
 
-当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、完整宏观四象限、市场新闻或大语言模型分析。
+当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、市场新闻或大语言模型分析。
 
-Vue 3 八个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。市场雷达页面已经接通价格快照和当前宽度快照；风险偏好快照当前只在后端生成，尚未开放 API 或页面。交易、回测和 Telegram 均不依赖 Web 模块，停止或删除 Web 容器不会改变交易核心状态。
+Vue 3 八个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。市场雷达页面已经接通价格、当前宽度及宏观象限快照；宏观图只读取后端生成的坐标和标签，不在浏览器计算金融指标。交易、回测和 Telegram 均不依赖 Web 模块，停止或删除 Web 容器不会改变交易核心状态。
 
 ## 文档
 
@@ -39,6 +39,7 @@ Vue 3 八个一级页面、只读 API、Compose 本机部署和响应式浏览�
 - Docker 与 Docker Compose；
 - IBKR paper 用户；
 - EODHD API token；
+- FRED API key（同步宏观象限时需要）；
 - 可选的 Telegram Bot。
 
 项目锁定 NautilusTrader 1.230.0。其官方 macOS wheel 要求 macOS 15.0 或更新版本；不满足时应通过项目的 Linux 容器运行。
@@ -69,6 +70,7 @@ TWS_PASSWORD=你的_paper_密码
 TWS_ACCOUNT=DUxxxxxxx
 TRADING_MODE=paper
 EODHD_API_TOKEN=你的_token
+FRED_API_KEY=你的_32位_key
 ```
 
 Telegram 审批还需要：
@@ -170,7 +172,7 @@ uv run --frozen --env-file .env python scripts/sync_market_breadth.py --mode dai
 
 宽度成员来自 State Street 官方 SPY 当日持仓代理，价格仍走 EODHD、NautilusTrader 双 BarType 和同一 Catalog。该成员集合不会写入 `config/instruments.yaml`，也不会成为可交易股票池。宽度脚本不提供 `reconcile`，避免用短观察窗截断共享 Catalog 的长期历史。命令会产生约 1,500 次远端请求，实际额度和耗时取决于 EODHD 套餐。
 
-风险偏好输入首次同步和日常更新：
+宏观象限输入首次同步和日常更新：
 
 ```bash
 uv run --frozen --env-file .env python scripts/sync_market_macro.py \
@@ -179,7 +181,9 @@ uv run --frozen --env-file .env python scripts/sync_market_macro.py \
 uv run --frozen --env-file .env python scripts/sync_market_macro.py --mode daily
 ```
 
-该命令只同步 `HYG.US`、`LQD.US`、`VIX.INDX` 和 `VIX3M.INDX`。ETF 使用 NT `Equity`，指数使用 NT `IndexInstrument`；两者都经 EODHD、共享历史数据管道和同一 Catalog。后端以 HYG/LQD 的 20 个共同观测相对变化和 VIX/VIX3M 期限结构计算风险偏好分数，历史不足或关键输入缺失时不会发布伪完整结果。当前快照尚未在 Web 展示。
+该命令通过 EODHD 同步 `HYG.US`、`LQD.US`、`VIX.INDX` 和 `VIX3M.INDX`，并通过 FRED v1 API 同步 `DFII10`。ETF 使用 NT `Equity`，指数使用 NT `IndexInstrument`；价格仍经共享历史数据管道写入同一 Catalog。后端以 HYG/LQD 的 20 个共同观测相对变化和 VIX/VIX3M 期限结构计算风险偏好，以 DFII10 的 20 个有效观测变化计算实际利率压力；两者至少需要 504 个变化观测，最多使用 756 个观测做 Robust Z 标准化。
+
+实际利率只保存 FRED 当前修订值，不具备历史 vintage/PIT 回放语义。两轴按风险日期作向后 as-of 对齐，实际利率最多允许滞后 3 个日历日；风险偏好、实际利率观测、完整象限和同步运行状态在同一数据库事务发布。历史不足、输入缺失、日期过旧或任一写入失败都不会伪造完整状态。
 
 ## 导入 PatchTST 因子
 
@@ -238,7 +242,7 @@ docker compose --profile web ps web-api web-ui
 
 浏览器访问 `http://127.0.0.1:8080`。如在 `.env` 修改了 `WEB_PORT`，请使用对应端口。启动命令应保留末尾的 `web-ui` 服务名，以免同时启动 Compose 中不属于 Web 的默认服务。
 
-操作台包含八个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统。市场雷达总览中的 B50、B200、AD10 和 NHNL 来自已发布的 SPY 当前持仓代理快照，每项都会披露成员日期、价格日期、真实分母和覆盖率；它不是历史 PIT 指数宽度。R4A 风险偏好后端尚未接入此页面。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
+操作台包含八个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统。市场雷达总览中的 B50、B200、AD10 和 NHNL 来自已发布的 SPY 当前持仓代理快照，每项都会披露成员日期、价格日期、真实分母和覆盖率；它不是历史 PIT 指数宽度。宏观卡片披露 DFII10 当前修订口径、双轴日期和新鲜度，象限标签及最多 60 个轨迹点均来自同次后端原子快照。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
 
 Web API 不暴露宿主机端口，也不读取完整 `.env`。它只获得账户作用域和查询路径，Catalog、`data/` 与 `reports/` 均以只读方式挂载。单独停止并删除 Web：
 

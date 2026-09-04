@@ -109,9 +109,9 @@ def test_zero_mad_is_unavailable_instead_of_neutral() -> None:
 
 def test_robust_z_is_clamped_and_requires_minimum_history() -> None:
     values = [float(index % 13) for index in range(MIN_ROBUST_OBSERVATIONS - 1)]
-    assert macro_module._robust_z(values) is None
-    assert macro_module._robust_z([*values, 1_000_000.0]) == 3.0
-    assert macro_module._robust_z([*values, -1_000_000.0]) == -3.0
+    assert macro_module.robust_z_score(values) is None
+    assert macro_module.robust_z_score([*values, 1_000_000.0]) == 3.0
+    assert macro_module.robust_z_score([*values, -1_000_000.0]) == -3.0
 
 
 def test_input_dates_must_be_ordered_and_share_the_latest_day() -> None:

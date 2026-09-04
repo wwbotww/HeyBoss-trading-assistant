@@ -7,9 +7,11 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import create_engine, event, inspect, select
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session
 
+from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
     RiskAppetitePoint,
@@ -27,7 +29,17 @@ from trading_assistant.market_radar.metrics import (
     PriceCoverage,
     PriceRadarSnapshot,
 )
-from trading_assistant.market_radar.models import MarketRadarSyncRunRecord
+from trading_assistant.market_radar.models import (
+    MacroObservationRecord,
+    MarketRadarSyncRunRecord,
+)
+from trading_assistant.market_radar.regime import (
+    ALIGNMENT_MAX_AGE_DAYS,
+    NEUTRAL_BAND,
+    MacroRegimePoint,
+    MacroRegimeSnapshot,
+    RealRateState,
+)
 from trading_assistant.market_radar.storage import MarketRadarRepository
 
 STARTED = datetime(2026, 9, 3, 1, tzinfo=UTC)
@@ -114,6 +126,72 @@ def _risk_snapshot(*, calculated_at: datetime = STARTED) -> RiskAppetiteSnapshot
     )
 
 
+def _fred_observations(*, value: float = 1.72) -> tuple[FredObservation, ...]:
+    return (
+        FredObservation(
+            series_id="DFII10",
+            observation_date=date(2026, 8, 31),
+            value=value - 0.02,
+            realtime_start=date(2026, 9, 3),
+            realtime_end=date(2026, 9, 3),
+        ),
+        FredObservation(
+            series_id="DFII10",
+            observation_date=date(2026, 9, 1),
+            value=value,
+            realtime_start=date(2026, 9, 3),
+            realtime_end=date(2026, 9, 3),
+        ),
+    )
+
+
+def _regime_snapshot(
+    *,
+    calculated_at: datetime = STARTED,
+    real_rate_level: float = 1.72,
+) -> MacroRegimeSnapshot:
+    day = date(2026, 9, 1)
+    point = MacroRegimePoint(
+        day=day,
+        real_rate_observation_date=day,
+        real_rate_level_percent=real_rate_level,
+        real_rate_change_20_percentage_points=-0.15,
+        real_rate_pressure_z=-1,
+        real_rate_percentile_3y=0.4,
+        risk_appetite_score=0.6,
+        credit_z=1,
+        volatility_z=0,
+        regime="easing_risk_on",
+        regime_label="宽松型 Risk-on",
+    )
+    return MacroRegimeSnapshot(
+        as_of_date=day,
+        calculated_at_utc=calculated_at,
+        validity="complete",
+        neutral_band=NEUTRAL_BAND,
+        alignment_max_age_days=ALIGNMENT_MAX_AGE_DAYS,
+        real_rate_source="fred_dfii10",
+        real_rate_vintage="current",
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        risk_appetite_as_of_date=day,
+        real_rate=RealRateState(
+            series_id="DFII10",
+            latest_observation_date=day,
+            level_percent=real_rate_level,
+            change_20_percentage_points=-0.15,
+            pressure_z=-1,
+            percentile_3y=0.4,
+            validity="complete",
+            observations=504,
+            required=504,
+        ),
+        current=point,
+        trajectory=(point,),
+        duration_observations=1,
+    )
+
+
 def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> None:
     database_url = f"sqlite:///{tmp_path}/market-radar.db"
     repository = MarketRadarRepository(database_url)
@@ -149,6 +227,8 @@ def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> N
     assert inspect(engine).get_table_names() == [
         "current_breadth_snapshots",
         "current_market_members",
+        "macro_observations",
+        "macro_regime_snapshots",
         "price_snapshots",
         "risk_appetite_snapshots",
         "sync_runs",
@@ -437,22 +517,27 @@ def test_breadth_publication_rejects_mismatched_membership(tmp_path: Path) -> No
     repository.close()
 
 
-def test_risk_appetite_snapshot_and_completion_are_published_atomically(tmp_path: Path) -> None:
+def test_macro_bundle_and_completion_are_published_atomically(tmp_path: Path) -> None:
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/risk.db")
     repository.create_schema()
     _start(repository, "risk")
-    snapshot = _risk_snapshot(calculated_at=STARTED + timedelta(seconds=30))
+    risk = _risk_snapshot(calculated_at=STARTED + timedelta(seconds=30))
+    regime = _regime_snapshot(calculated_at=STARTED + timedelta(seconds=30))
 
-    repository.publish_risk_appetite_and_complete(
+    repository.publish_macro_bundle_and_complete(
         "risk",
-        snapshot=snapshot,
+        risk_snapshot=risk,
+        observations=_fred_observations(),
+        regime_snapshot=regime,
+        ingested_at_utc=STARTED + timedelta(seconds=20),
         completed_at_utc=STARTED + timedelta(minutes=1),
         instruments_processed=4,
         bars_fetched=4_000,
         bars_written=4_000,
     )
 
-    assert repository.latest_risk_appetite_snapshot() == snapshot
+    assert repository.latest_risk_appetite_snapshot() == risk
+    assert repository.latest_macro_regime_snapshot() == regime
     run = repository.get_sync_run("risk")
     assert run is not None
     assert run.status == "COMPLETE"
@@ -460,14 +545,18 @@ def test_risk_appetite_snapshot_and_completion_are_published_atomically(tmp_path
     repository.close()
 
 
-def test_failed_risk_run_does_not_replace_last_complete_snapshot(tmp_path: Path) -> None:
+def test_failed_macro_run_does_not_replace_last_complete_snapshot(tmp_path: Path) -> None:
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/risk-failure.db")
     repository.create_schema()
     _start(repository, "complete")
-    snapshot = _risk_snapshot()
-    repository.publish_risk_appetite_and_complete(
+    risk = _risk_snapshot()
+    regime = _regime_snapshot()
+    repository.publish_macro_bundle_and_complete(
         "complete",
-        snapshot=snapshot,
+        risk_snapshot=risk,
+        observations=_fred_observations(),
+        regime_snapshot=regime,
+        ingested_at_utc=STARTED,
         completed_at_utc=STARTED + timedelta(minutes=1),
         instruments_processed=4,
         bars_fetched=4_000,
@@ -480,5 +569,76 @@ def test_failed_risk_run_does_not_replace_last_complete_snapshot(tmp_path: Path)
         error_summary="data_quality",
     )
 
-    assert repository.latest_risk_appetite_snapshot() == snapshot
+    assert repository.latest_risk_appetite_snapshot() == risk
+    assert repository.latest_macro_regime_snapshot() == regime
+    repository.close()
+
+
+def test_macro_current_revision_upsert_and_completion_roll_back_together(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path}/macro-atomic.db"
+    repository = MarketRadarRepository(database_url)
+    repository.create_schema()
+    _start(repository, "old")
+    old_risk = _risk_snapshot()
+    old_regime = _regime_snapshot()
+    repository.publish_macro_bundle_and_complete(
+        "old",
+        risk_snapshot=old_risk,
+        observations=_fred_observations(value=1.72),
+        regime_snapshot=old_regime,
+        ingested_at_utc=STARTED,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=4,
+        bars_fetched=4_000,
+        bars_written=4_000,
+    )
+    _start(repository, "new")
+
+    def fail_completion(
+        _mapper: object,
+        _connection: object,
+        target: MarketRadarSyncRunRecord,
+    ) -> None:
+        if target.run_id == "new" and target.status == "COMPLETE":
+            raise RuntimeError("simulated macro completion failure")
+
+    event.listen(MarketRadarSyncRunRecord, "before_update", fail_completion)
+    try:
+        with pytest.raises(RuntimeError, match="simulated"):
+            repository.publish_macro_bundle_and_complete(
+                "new",
+                risk_snapshot=replace(
+                    old_risk,
+                    calculated_at_utc=STARTED + timedelta(minutes=2),
+                ),
+                observations=_fred_observations(value=1.80),
+                regime_snapshot=replace(
+                    _regime_snapshot(real_rate_level=1.80),
+                    calculated_at_utc=STARTED + timedelta(minutes=2),
+                ),
+                ingested_at_utc=STARTED + timedelta(minutes=2),
+                completed_at_utc=STARTED + timedelta(minutes=3),
+                instruments_processed=4,
+                bars_fetched=4_000,
+                bars_written=4_000,
+            )
+    finally:
+        event.remove(MarketRadarSyncRunRecord, "before_update", fail_completion)
+
+    assert repository.latest_risk_appetite_snapshot() == old_risk
+    assert repository.latest_macro_regime_snapshot() == old_regime
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        value = session.scalar(
+            select(MacroObservationRecord.value).where(
+                MacroObservationRecord.observation_date == date(2026, 9, 1)
+            )
+        )
+    engine.dispose()
+    assert value == 1.72
+    run = repository.get_sync_run("new")
+    assert run is not None
+    assert run.status == "RUNNING"
     repository.close()

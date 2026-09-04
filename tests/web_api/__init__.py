@@ -13,6 +13,12 @@ from tests.data.helpers import make_bar, utc_ns
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.execution.events import TradeSignalEvent
+from trading_assistant.market_radar.fred import FredObservation
+from trading_assistant.market_radar.macro import (
+    RiskAppetiteComponents,
+    RiskAppetitePoint,
+    RiskAppetiteSnapshot,
+)
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
@@ -26,6 +32,13 @@ from trading_assistant.market_radar.metrics import (
     PriceRadarSnapshot,
     SectorPriceMetrics,
     StockPriceMetrics,
+)
+from trading_assistant.market_radar.regime import (
+    ALIGNMENT_MAX_AGE_DAYS,
+    NEUTRAL_BAND,
+    MacroRegimePoint,
+    MacroRegimeSnapshot,
+    RealRateState,
 )
 from trading_assistant.market_radar.storage import MarketRadarRepository
 from trading_assistant.storage.repository import PositionSnapshotInput, TradingRepository
@@ -295,5 +308,97 @@ def seed_market_radar_data(
         instruments_processed=breadth.member_count,
         bars_fetched=4_000,
         bars_written=4_000,
+    )
+    risk_point = RiskAppetitePoint(
+        day=today,
+        score=0.6,
+        credit_z=1,
+        volatility_z=0,
+    )
+    risk = RiskAppetiteSnapshot(
+        as_of_date=today,
+        calculated_at_utc=timestamp,
+        validity="complete",
+        observations=504,
+        required=504,
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        components=RiskAppetiteComponents(
+            day=today,
+            hyg_close=80,
+            lqd_close=100,
+            vix_close=20,
+            vix3m_close=22,
+            credit_log_change_20=0.01,
+            volatility_term_log=-0.09,
+        ),
+        current=risk_point,
+        trajectory=(risk_point,),
+    )
+    regime_point = MacroRegimePoint(
+        day=today,
+        real_rate_observation_date=today,
+        real_rate_level_percent=1.72,
+        real_rate_change_20_percentage_points=-0.15,
+        real_rate_pressure_z=-1,
+        real_rate_percentile_3y=0.4,
+        risk_appetite_score=0.6,
+        credit_z=1,
+        volatility_z=0,
+        regime="easing_risk_on",
+        regime_label="宽松型 Risk-on",
+    )
+    regime = MacroRegimeSnapshot(
+        as_of_date=today,
+        calculated_at_utc=timestamp,
+        validity="complete",
+        neutral_band=NEUTRAL_BAND,
+        alignment_max_age_days=ALIGNMENT_MAX_AGE_DAYS,
+        real_rate_source="fred_dfii10",
+        real_rate_vintage="current",
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        risk_appetite_as_of_date=today,
+        real_rate=RealRateState(
+            series_id="DFII10",
+            latest_observation_date=today,
+            level_percent=1.72,
+            change_20_percentage_points=-0.15,
+            pressure_z=-1,
+            percentile_3y=0.4,
+            validity="complete",
+            observations=504,
+            required=504,
+        ),
+        current=regime_point,
+        trajectory=(regime_point,),
+        duration_observations=1,
+    )
+    repository.start_sync_run(
+        run_id="web-macro-run",
+        source="macro_regime",
+        started_at_utc=timestamp,
+        requested_start_date=today - timedelta(days=365 * 4),
+        requested_end_date=today,
+        instrument_count=4,
+    )
+    repository.publish_macro_bundle_and_complete(
+        "web-macro-run",
+        risk_snapshot=risk,
+        observations=(
+            FredObservation(
+                series_id="DFII10",
+                observation_date=today,
+                value=1.72,
+                realtime_start=today,
+                realtime_end=today,
+            ),
+        ),
+        regime_snapshot=regime,
+        ingested_at_utc=timestamp,
+        completed_at_utc=timestamp,
+        instruments_processed=4,
+        bars_fetched=8_000,
+        bars_written=8_000,
     )
     repository.close()

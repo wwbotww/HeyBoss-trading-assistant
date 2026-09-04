@@ -2,11 +2,16 @@ import { flushPromises } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 
 import MarketRadarPage from '../src/pages/MarketRadarPage.vue'
-import { installApiMock, marketBreadthFixture, marketRadarSummaryFixture } from './fixtures'
+import {
+  installApiMock,
+  marketBreadthFixture,
+  marketMacroFixture,
+  marketRadarSummaryFixture,
+} from './fixtures'
 import { mountPage } from './helpers'
 
 describe('市场雷达页面', () => {
-  it('总览展示真实价格和 SPY 当前持仓代理宽度', async () => {
+  it('总览展示真实价格、宏观象限和 SPY 当前持仓代理宽度', async () => {
     installApiMock()
     const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
     await flushPromises()
@@ -25,7 +30,81 @@ describe('市场雷达页面', () => {
     expect(wrapper.text()).toContain('501 / 503')
     expect(wrapper.text()).toContain('只描述当前结构，不代表历史 PIT 指数宽度')
     expect(wrapper.text()).toContain('数据库尚未保存可供图表使用的连续时间序列')
+    expect(wrapper.text()).toContain('实际利率 × 风险偏好')
+    expect(wrapper.text()).toContain('宽松型 Risk-on')
+    expect(wrapper.text()).toContain('FRED · DFII10')
+    expect(wrapper.text()).toContain('当前修订')
+    expect(wrapper.text()).toContain('HYG/LQD ETF 代理')
+    expect(wrapper.get('[role="img"]').attributes('aria-label')).toContain('共 3 个轨迹点')
     expect(wrapper.text()).not.toContain('下单')
+  })
+
+  it.each([
+    {
+      name: 'stale',
+      response: {
+        ...marketMacroFixture,
+        validity: 'stale',
+        freshness: { risk_appetite_age_days: 4, real_rate_age_days: 5, stale_after_days: 3 },
+      },
+      expected: ['已陈旧', '利率 5 天 · 风险 4 天', '超过 3 个日历日未更新'],
+    },
+    {
+      name: 'insufficient history',
+      response: {
+        ...marketMacroFixture,
+        validity: 'insufficient_history',
+        current: null,
+        trajectory: [],
+        duration_observations: 0,
+        real_rate: {
+          ...marketMacroFixture.real_rate,
+          validity: 'insufficient_history',
+          pressure_z: null,
+          observations: 300,
+        },
+      },
+      expected: ['历史不足', '暂不能绘制宏观象限', '300 / 504 个变化观测'],
+    },
+  ])('宏观 $name 状态不被前端改写', async ({ response, expected }) => {
+    installApiMock({ '/api/market-radar/macro': response })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
+    await flushPromises()
+
+    for (const text of expected) {
+      expect(wrapper.text()).toContain(text)
+    }
+  })
+
+  it('宏观快照缺失不影响价格和宽度', async () => {
+    installApiMock({
+      '/api/market-radar/macro': {
+        ...marketMacroFixture,
+        source_state: 'missing',
+        validity: 'unavailable',
+        as_of_date: null,
+        calculated_at_utc: null,
+        freshness: null,
+        neutral_band: null,
+        alignment_max_age_days: null,
+        real_rate_source: null,
+        real_rate_vintage: null,
+        credit_source: null,
+        price_source: null,
+        real_rate: null,
+        risk_appetite: null,
+        current: null,
+        trajectory: [],
+        duration_observations: 0,
+      },
+    })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('SPY · 20 日收益')
+    expect(wrapper.text()).toContain('48.11%')
+    expect(wrapper.text()).toContain('宏观象限快照不可用')
+    expect(wrapper.text()).toContain('页面不会连接 FRED')
   })
 
   it.each([

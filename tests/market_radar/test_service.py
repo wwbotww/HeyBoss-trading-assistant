@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +14,10 @@ from trading_assistant.data.config import InstrumentSpec
 from trading_assistant.data.pipeline import PipelineSummary
 from trading_assistant.data.quality import QualityIssue
 from trading_assistant.market_radar import service
+from trading_assistant.market_radar.fred import (
+    FredObservation,
+    FredObservationBatch,
+)
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
@@ -490,6 +495,7 @@ def _macro_paths(tmp_path: Path) -> dict[str, object]:
         "start_date": date(2022, 9, 1),
         "end_date": date(2026, 9, 2),
         "eodhd_api_token": "secret-token",
+        "fred_source": _FakeFredSource(_fred_batch()),
     }
 
 
@@ -503,6 +509,42 @@ def _macro_bars(multiplier: float) -> tuple[PriceBar, ...]:
         )
         for index in range(50)
     )
+
+
+def _fred_batch() -> FredObservationBatch:
+    observations = tuple(
+        FredObservation(
+            series_id="DFII10",
+            observation_date=date(2026, 7, 15) + timedelta(days=index),
+            value=1.5 + 0.01 * index + 0.05 * math.sin(index / 5),
+            realtime_start=date(2026, 9, 3),
+            realtime_end=date(2026, 9, 3),
+        )
+        for index in range(50)
+    )
+    return FredObservationBatch(
+        series_id="DFII10",
+        observations=observations,
+        missing_values=1,
+    )
+
+
+class _FakeFredSource:
+    def __init__(self, batch: FredObservationBatch, *, error: Exception | None = None) -> None:
+        self.batch = batch
+        self.error = error
+        self.calls: list[tuple[str, date, date]] = []
+
+    async def request_observations(
+        self,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> FredObservationBatch:
+        self.calls.append((series_id, start, end))
+        if self.error is not None:
+            raise self.error
+        return self.batch
 
 
 @pytest.mark.parametrize(
@@ -546,6 +588,7 @@ def test_macro_sync_uses_native_price_pipeline_and_publishes_snapshot(
     moments = iter((STARTED, STARTED + timedelta(minutes=1)))
     arguments = _macro_paths(tmp_path)
     arguments["mode"] = mode
+    fred_source = cast(_FakeFredSource, arguments["fred_source"])
 
     result = asyncio.run(
         service.sync_market_macro(
@@ -557,7 +600,10 @@ def test_macro_sync_uses_native_price_pipeline_and_publishes_snapshot(
 
     assert result.status == "COMPLETE"
     assert result.mode == mode
-    assert result.snapshot_validity == "insufficient_history"
+    assert result.risk_appetite_validity == "insufficient_history"
+    assert result.regime_validity == "insufficient_history"
+    assert result.real_rate_observations == 50
+    assert result.real_rate_missing_values == 1
     assert result.snapshot_date == date(2026, 9, 2)
     assert not result.has_errors
     instruments = cast(tuple[InstrumentSpec, ...], captured["instruments"])
@@ -580,6 +626,7 @@ def test_macro_sync_uses_native_price_pipeline_and_publishes_snapshot(
         "VIX.INDX",
         "VIX3M.INDX",
     )
+    assert fred_source.calls == [("DFII10", date(2022, 9, 1), date(2026, 9, 2))]
 
     repository = MarketRadarRepository(
         str(_macro_paths(tmp_path)["database_url"]),
@@ -588,9 +635,10 @@ def test_macro_sync_uses_native_price_pipeline_and_publishes_snapshot(
     run = repository.get_sync_run("macro-success")
     assert run is not None
     assert run.status == "COMPLETE"
-    assert run.source == "risk_appetite"
+    assert run.source == "macro_regime"
     assert run.instrument_count == 4
     assert repository.latest_risk_appetite_snapshot() is not None
+    assert repository.latest_macro_regime_snapshot() is not None
     repository.close()
 
 
@@ -615,7 +663,9 @@ def test_macro_quality_and_metric_failures_do_not_publish_snapshot(
         )
     )
     assert result.status == "FAILED"
-    assert result.snapshot_validity is None
+    assert result.risk_appetite_validity is None
+    assert result.regime_validity is None
+    assert result.real_rate_observations == 0
 
     async def successful_quality(**_kwargs: object) -> PipelineSummary:
         return _pipeline_summary(
@@ -652,6 +702,56 @@ def test_macro_quality_and_metric_failures_do_not_publish_snapshot(
     assert quality_run.error_summary == "data_quality"
     assert metric_run is not None
     assert metric_run.error_summary == "KeyError"
+    repository.close()
+
+
+def test_fred_failure_marks_macro_run_failed_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def successful_quality(**_kwargs: object) -> PipelineSummary:
+        return _pipeline_summary(
+            tmp_path / "quality.json",
+            instruments_processed=4,
+        )
+
+    monkeypatch.setattr(service, "sync_historical_specs", successful_quality)
+    monkeypatch.setattr(
+        service,
+        "load_internal_price_bars",
+        lambda *_args: {
+            "HYG.US": _macro_bars(0.8),
+            "LQD.US": _macro_bars(1.0),
+            "VIX.INDX": _macro_bars(0.2),
+            "VIX3M.INDX": _macro_bars(0.22),
+        },
+    )
+    arguments = _macro_paths(tmp_path)
+    arguments["fred_source"] = _FakeFredSource(
+        _fred_batch(),
+        error=ConnectionError("supplier unavailable"),
+    )
+    moments = iter((STARTED, STARTED + timedelta(minutes=1)))
+
+    with pytest.raises(ConnectionError, match="supplier unavailable"):
+        asyncio.run(
+            service.sync_market_macro(
+                **arguments,  # type: ignore[arg-type]
+                clock=lambda: next(moments),
+                run_id_factory=lambda: "macro-fred-failed",
+            )
+        )
+
+    repository = MarketRadarRepository(
+        str(_macro_paths(tmp_path)["database_url"]),
+        read_only=True,
+    )
+    run = repository.get_sync_run("macro-fred-failed")
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.error_summary == "ConnectionError"
+    assert repository.latest_risk_appetite_snapshot() is None
+    assert repository.latest_macro_regime_snapshot() is None
     repository.close()
 
 

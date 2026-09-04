@@ -264,6 +264,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/market-radar/macro": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Macro
+         * @description 返回最近完整运行发布的宏观双轴与后端象限分类。
+         */
+        get: operations["getMarketRadarMacro"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/market-radar/sectors": {
         parameters: {
             query?: never;
@@ -850,6 +870,141 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /** MacroFreshnessResponse */
+        MacroFreshnessResponse: {
+            /** Real Rate Age Days */
+            real_rate_age_days: number;
+            /** Risk Appetite Age Days */
+            risk_appetite_age_days: number;
+            /** Stale After Days */
+            stale_after_days: number;
+        };
+        /** MacroRealRateResponse */
+        MacroRealRateResponse: {
+            /** Change 20 Percentage Points */
+            change_20_percentage_points: number | null;
+            /** Level Percent */
+            level_percent: number;
+            /**
+             * Observation Date
+             * Format: date
+             */
+            observation_date: string;
+            /** Observations */
+            observations: number;
+            /** Percentile 3Y */
+            percentile_3y: number | null;
+            /** Pressure Z */
+            pressure_z: number | null;
+            /** Required */
+            required: number;
+            /** Series Id */
+            series_id: string;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "insufficient_history" | "unavailable";
+        };
+        /** MacroRegimePointResponse */
+        MacroRegimePointResponse: {
+            /** Credit Z */
+            credit_z: number;
+            /**
+             * Day
+             * Format: date
+             */
+            day: string;
+            /** Real Rate Change 20 Percentage Points */
+            real_rate_change_20_percentage_points: number;
+            /** Real Rate Level Percent */
+            real_rate_level_percent: number;
+            /**
+             * Real Rate Observation Date
+             * Format: date
+             */
+            real_rate_observation_date: string;
+            /** Real Rate Percentile 3Y */
+            real_rate_percentile_3y: number;
+            /** Real Rate Pressure Z */
+            real_rate_pressure_z: number;
+            /**
+             * Regime
+             * @enum {string}
+             */
+            regime: "transition" | "easing_risk_on" | "growth_reflation" | "growth_concern" | "tightening_shock";
+            /** Regime Label */
+            regime_label: string;
+            /** Risk Appetite Score */
+            risk_appetite_score: number;
+            /** Volatility Z */
+            volatility_z: number;
+        };
+        /** MacroRegimeResponse */
+        MacroRegimeResponse: {
+            /** Alignment Max Age Days */
+            alignment_max_age_days: number | null;
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            /** Credit Source */
+            credit_source: string | null;
+            current: components["schemas"]["MacroRegimePointResponse"] | null;
+            /** Duration Observations */
+            duration_observations: number;
+            freshness: components["schemas"]["MacroFreshnessResponse"] | null;
+            /** Neutral Band */
+            neutral_band: number | null;
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /** Price Source */
+            price_source: string | null;
+            real_rate: components["schemas"]["MacroRealRateResponse"] | null;
+            /** Real Rate Source */
+            real_rate_source: string | null;
+            /** Real Rate Vintage */
+            real_rate_vintage: string | null;
+            risk_appetite: components["schemas"]["MacroRiskAppetiteResponse"] | null;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /** Trajectory */
+            trajectory: components["schemas"]["MacroRegimePointResponse"][];
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "insufficient_history" | "stale" | "unavailable";
+        };
+        /** MacroRiskAppetiteResponse */
+        MacroRiskAppetiteResponse: {
+            /**
+             * As Of Date
+             * Format: date
+             */
+            as_of_date: string;
+            /** Credit Z */
+            credit_z: number | null;
+            /** Observations */
+            observations: number;
+            /** Required */
+            required: number;
+            /** Score */
+            score: number | null;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "insufficient_history" | "unavailable";
+            /** Volatility Z */
+            volatility_z: number | null;
         };
         /** MarketBreadthResponse */
         MarketBreadthResponse: {
@@ -2020,6 +2175,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketBreadthResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarMacro: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MacroRegimeResponse"];
                 };
             };
             /** @description 查询对象不存在 */

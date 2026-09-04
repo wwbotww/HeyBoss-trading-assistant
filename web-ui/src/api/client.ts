@@ -13,6 +13,7 @@ import type {
   FillQuery,
   FillPage,
   Health,
+  MacroRegime,
   MarketBreadth,
   MarketRadarSummary,
   OrderDetail,
@@ -231,6 +232,10 @@ export function fetchMarketRadarSummary(): Promise<MarketRadarSummary> {
 
 export function fetchMarketRadarBreadth(): Promise<MarketBreadth> {
   return read(http.GET('/api/market-radar/breadth'))
+}
+
+export function fetchMarketRadarMacro(): Promise<MacroRegime> {
+  return read(http.GET('/api/market-radar/macro'))
 }
 
 export function fetchMarketRadarSectors(): Promise<SectorRadarList> {
