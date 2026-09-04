@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
-from http.client import HTTPResponse
+from http.client import HTTPException, HTTPResponse
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -64,6 +64,8 @@ def download(url: str, timeout_seconds: int) -> bytes:
     except URLError as exc:
         reason = type(exc.reason).__name__
         raise ConnectionError(f"EODHD connection failed: {reason}") from None
+    except (HTTPException, OSError) as exc:
+        raise ConnectionError(f"EODHD connection interrupted: {type(exc).__name__}") from None
 
 
 class EodhdHttpClient:

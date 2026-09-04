@@ -7,15 +7,23 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from trading_assistant.market_radar.metrics import PriceRadarSnapshot
+from trading_assistant.market_radar.macro import RiskAppetiteSnapshot
+from trading_assistant.market_radar.membership import (
+    CurrentMarketMember,
+    CurrentMarketMembership,
+)
+from trading_assistant.market_radar.metrics import CurrentBreadthSnapshot, PriceRadarSnapshot
 from trading_assistant.market_radar.models import (
+    CurrentBreadthSnapshotRecord,
+    CurrentMarketMemberRecord,
     MarketRadarBase,
     MarketRadarSyncRunRecord,
     PriceSnapshotRecord,
+    RiskAppetiteSnapshotRecord,
 )
 
 SyncRunStatus = Literal["RUNNING", "COMPLETE", "FAILED"]
@@ -208,6 +216,224 @@ class MarketRadarRepository:
             ):
                 raise RuntimeError("persisted market radar price snapshot metadata is inconsistent")
             return snapshot
+
+    def publish_current_breadth_and_complete(
+        self,
+        run_id: str,
+        *,
+        membership: CurrentMarketMembership,
+        snapshot: CurrentBreadthSnapshot,
+        completed_at_utc: datetime,
+        instruments_processed: int,
+        bars_fetched: int,
+        bars_written: int,
+    ) -> None:
+        """在同一事务内发布成员、宽度快照和 COMPLETE 状态。"""
+        if min(instruments_processed, bars_fetched, bars_written) < 0:
+            raise ValueError("market radar sync counts cannot be negative")
+        if (
+            snapshot.membership_date != membership.membership_date
+            or snapshot.membership_source != membership.source
+            or snapshot.member_count != len(membership.members)
+        ):
+            raise ValueError("breadth snapshot does not match its market membership")
+        completed_at = _utc(completed_at_utc)
+        with self._sessions.begin() as session:
+            run = session.get(MarketRadarSyncRunRecord, run_id)
+            if run is None or run.status != "RUNNING":
+                raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
+            if run.instrument_count != len(membership.members):
+                raise ValueError("breadth run instrument count does not match membership")
+
+            session.execute(
+                delete(CurrentMarketMemberRecord).where(
+                    CurrentMarketMemberRecord.membership_date == membership.membership_date
+                )
+            )
+            session.add_all(
+                CurrentMarketMemberRecord(
+                    membership_date=membership.membership_date,
+                    instrument_id=member.instrument_id,
+                    run_id=run_id,
+                    source=membership.source,
+                    source_symbol=member.source_symbol,
+                    data_symbol=member.data_symbol,
+                )
+                for member in membership.members
+            )
+
+            existing = session.get(CurrentBreadthSnapshotRecord, snapshot.as_of_date)
+            payload = snapshot.to_payload()
+            calculated_at = _utc(snapshot.calculated_at_utc)
+            if existing is None:
+                session.add(
+                    CurrentBreadthSnapshotRecord(
+                        as_of_date=snapshot.as_of_date,
+                        run_id=run_id,
+                        membership_date=snapshot.membership_date,
+                        calculated_at_utc=calculated_at,
+                        payload_json=payload,
+                    )
+                )
+            else:
+                existing.run_id = run_id
+                existing.membership_date = snapshot.membership_date
+                existing.calculated_at_utc = calculated_at
+                existing.payload_json = payload
+
+            run.status = "COMPLETE"
+            run.completed_at_utc = completed_at
+            run.instruments_processed = instruments_processed
+            run.bars_fetched = bars_fetched
+            run.bars_written = bars_written
+            run.error_summary = None
+
+    def latest_current_breadth_snapshot(self) -> CurrentBreadthSnapshot | None:
+        """返回最近 COMPLETE 运行发布的当前宽度快照。"""
+        with self._sessions() as session:
+            record = session.scalar(
+                select(CurrentBreadthSnapshotRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == CurrentBreadthSnapshotRecord.run_id,
+                )
+                .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                .order_by(
+                    CurrentBreadthSnapshotRecord.as_of_date.desc(),
+                    CurrentBreadthSnapshotRecord.calculated_at_utc.desc(),
+                )
+                .limit(1)
+            )
+            if record is None:
+                return None
+            try:
+                snapshot = CurrentBreadthSnapshot.from_payload(record.payload_json)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("persisted current breadth snapshot is invalid") from exc
+            calculated_at = _loaded_utc(record.calculated_at_utc)
+            if (
+                snapshot.as_of_date != record.as_of_date
+                or snapshot.membership_date != record.membership_date
+                or calculated_at is None
+                or snapshot.calculated_at_utc != calculated_at
+            ):
+                raise RuntimeError("persisted current breadth snapshot metadata is inconsistent")
+            return snapshot
+
+    def publish_risk_appetite_and_complete(
+        self,
+        run_id: str,
+        *,
+        snapshot: RiskAppetiteSnapshot,
+        completed_at_utc: datetime,
+        instruments_processed: int,
+        bars_fetched: int,
+        bars_written: int,
+    ) -> None:
+        """在一个事务内发布风险偏好快照并完成运行。"""
+        if min(instruments_processed, bars_fetched, bars_written) < 0:
+            raise ValueError("market radar sync counts cannot be negative")
+        completed_at = _utc(completed_at_utc)
+        with self._sessions.begin() as session:
+            run = session.get(MarketRadarSyncRunRecord, run_id)
+            if run is None or run.status != "RUNNING":
+                raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
+            existing = session.get(RiskAppetiteSnapshotRecord, snapshot.as_of_date)
+            payload = snapshot.to_payload()
+            calculated_at = _utc(snapshot.calculated_at_utc)
+            if existing is None:
+                session.add(
+                    RiskAppetiteSnapshotRecord(
+                        as_of_date=snapshot.as_of_date,
+                        run_id=run_id,
+                        calculated_at_utc=calculated_at,
+                        payload_json=payload,
+                    )
+                )
+            else:
+                existing.run_id = run_id
+                existing.calculated_at_utc = calculated_at
+                existing.payload_json = payload
+            run.status = "COMPLETE"
+            run.completed_at_utc = completed_at
+            run.instruments_processed = instruments_processed
+            run.bars_fetched = bars_fetched
+            run.bars_written = bars_written
+            run.error_summary = None
+
+    def latest_risk_appetite_snapshot(self) -> RiskAppetiteSnapshot | None:
+        """返回最近 COMPLETE 运行发布的风险偏好快照。"""
+        with self._sessions() as session:
+            record = session.scalar(
+                select(RiskAppetiteSnapshotRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == RiskAppetiteSnapshotRecord.run_id,
+                )
+                .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                .order_by(
+                    RiskAppetiteSnapshotRecord.as_of_date.desc(),
+                    RiskAppetiteSnapshotRecord.calculated_at_utc.desc(),
+                )
+                .limit(1)
+            )
+            if record is None:
+                return None
+            try:
+                snapshot = RiskAppetiteSnapshot.from_payload(record.payload_json)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("persisted risk appetite snapshot is invalid") from exc
+            calculated_at = _loaded_utc(record.calculated_at_utc)
+            if (
+                snapshot.as_of_date != record.as_of_date
+                or calculated_at is None
+                or snapshot.calculated_at_utc != calculated_at
+            ):
+                raise RuntimeError("persisted risk appetite snapshot metadata is inconsistent")
+            return snapshot
+
+    def latest_current_membership(self) -> CurrentMarketMembership | None:
+        """返回最近成功发布的规范当前成员快照。"""
+        with self._sessions() as session:
+            membership_date = session.scalar(
+                select(CurrentMarketMemberRecord.membership_date)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == CurrentMarketMemberRecord.run_id,
+                )
+                .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                .order_by(CurrentMarketMemberRecord.membership_date.desc())
+                .limit(1)
+            )
+            if membership_date is None:
+                return None
+            records = session.scalars(
+                select(CurrentMarketMemberRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == CurrentMarketMemberRecord.run_id,
+                )
+                .where(
+                    CurrentMarketMemberRecord.membership_date == membership_date,
+                    MarketRadarSyncRunRecord.status == "COMPLETE",
+                )
+                .order_by(CurrentMarketMemberRecord.instrument_id)
+            ).all()
+            sources = {record.source for record in records}
+            if len(sources) != 1:
+                raise RuntimeError("persisted current market membership is inconsistent")
+            return CurrentMarketMembership(
+                source=sources.pop(),
+                membership_date=membership_date,
+                members=tuple(
+                    CurrentMarketMember(
+                        source_symbol=record.source_symbol,
+                        instrument_id=record.instrument_id,
+                        data_symbol=record.data_symbol,
+                    )
+                    for record in records
+                ),
+            )
 
     def fail_sync_run(
         self,

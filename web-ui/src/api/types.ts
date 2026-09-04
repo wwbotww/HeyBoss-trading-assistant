@@ -28,6 +28,15 @@ export type CatalogCoverage = components['schemas']['CatalogCoverageResponse']
 export type DataQuality = components['schemas']['DataQualityResponse']
 export type SystemStatus = components['schemas']['SystemStatusResponse']
 export type SourceStatus = components['schemas']['SourceStatusResponse']
+export type MarketRadarSummary = components['schemas']['MarketRadarSummaryResponse']
+export type MarketBreadth = components['schemas']['MarketBreadthResponse']
+export type BreadthMetric = components['schemas']['BreadthMetricResponse']
+export type RadarMetric = components['schemas']['RadarMetricResponse']
+export type RadarModule = components['schemas']['RadarModuleResponse']
+export type SectorRadarList = components['schemas']['SectorRadarListResponse']
+export type SectorRadar = components['schemas']['SectorRadarResponse']
+export type StockRadarPage = components['schemas']['StockRadarPageResponse']
+export type StockRadar = components['schemas']['StockRadarResponse']
 export type Problem = components['schemas']['ProblemResponse']
 export type SourceState = Portfolio['source_state']
 
@@ -40,5 +49,8 @@ export type OrderQuery = NonNullable<operations['listOrders']['parameters']['que
 export type FillQuery = NonNullable<operations['listFills']['parameters']['query']>
 export type BacktestQuery = NonNullable<operations['listBacktests']['parameters']['query']>
 export type ReportTableQuery = NonNullable<operations['getBacktestEquity']['parameters']['query']>
+export type StockRadarQuery = NonNullable<
+  operations['listMarketRadarStocks']['parameters']['query']
+>
 
 export type BacktestTableName = 'equity' | 'orders' | 'fills' | 'positions' | 'account'

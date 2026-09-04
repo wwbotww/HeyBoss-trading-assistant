@@ -244,6 +244,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/market-radar/breadth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Breadth
+         * @description 返回最近完整运行发布的 SPY 当前持仓代理宽度。
+         */
+        get: operations["getMarketRadarBreadth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/sectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sectors
+         * @description 返回最近完整快照中的板块相对强弱。
+         */
+        get: operations["listMarketRadarSectors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/sectors/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sector
+         * @description 返回完整快照白名单中的一个板块。
+         */
+        get: operations["getMarketRadarSector"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/stocks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Stocks
+         * @description 筛选、排序并分页返回 watchlist 的价格趋势与风险。
+         */
+        get: operations["listMarketRadarStocks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/stocks/{instrument_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Stock
+         * @description 返回完整快照白名单中的一个 watchlist 标的。
+         */
+        get: operations["getMarketRadarStock"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Summary
+         * @description 返回最近完整价格快照和六个雷达能力状态。
+         */
+        get: operations["getMarketRadarSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders": {
         parameters: {
             query?: never;
@@ -528,6 +648,19 @@ export interface components {
             /** Strategy Name */
             strategy_name: string | null;
         };
+        /** BreadthMetricResponse */
+        BreadthMetricResponse: {
+            coverage: components["schemas"]["RadarCoverageResponse"];
+            /** History Required */
+            history_required: number;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "partial" | "insufficient_coverage";
+            /** Value */
+            value: number | null;
+        };
         /** CatalogCoverageResponse */
         CatalogCoverageResponse: {
             /** Bar Type */
@@ -717,6 +850,58 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /** MarketBreadthResponse */
+        MarketBreadthResponse: {
+            ad10: components["schemas"]["BreadthMetricResponse"] | null;
+            /** As Of Date */
+            as_of_date: string | null;
+            b200: components["schemas"]["BreadthMetricResponse"] | null;
+            b50: components["schemas"]["BreadthMetricResponse"] | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            freshness: components["schemas"]["RadarFreshnessResponse"] | null;
+            /** Membership Date */
+            membership_date: string | null;
+            /** Membership Source */
+            membership_source: string | null;
+            nhnl: components["schemas"]["BreadthMetricResponse"] | null;
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "partial" | "stale" | "insufficient_coverage" | "unavailable";
+        };
+        /** MarketRadarSummaryResponse */
+        MarketRadarSummaryResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            coverage: components["schemas"]["RadarCoverageResponse"] | null;
+            market: components["schemas"]["RadarMarketResponse"] | null;
+            /** Modules */
+            modules: components["schemas"]["RadarModuleResponse"][];
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
         };
         /** OrderDetailResponse */
         OrderDetailResponse: {
@@ -910,6 +1095,56 @@ export interface components {
             /** Timestamp Utc */
             timestamp_utc: string | null;
         };
+        /** RadarCoverageResponse */
+        RadarCoverageResponse: {
+            /** Eligible */
+            eligible: number;
+            /** Observed */
+            observed: number;
+            /** Ratio */
+            ratio: number;
+        };
+        /** RadarFreshnessResponse */
+        RadarFreshnessResponse: {
+            /** Membership Age Days */
+            membership_age_days: number;
+            /** Stale After Days */
+            stale_after_days: number;
+        };
+        /** RadarMarketResponse */
+        RadarMarketResponse: {
+            rsp_spy_return_20: components["schemas"]["RadarMetricResponse"];
+            spy_distance_ma_200: components["schemas"]["RadarMetricResponse"];
+            spy_return_20: components["schemas"]["RadarMetricResponse"];
+        };
+        /** RadarMetricResponse */
+        RadarMetricResponse: {
+            /** Observations */
+            observations: number;
+            /** Required */
+            required: number;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "insufficient_history" | "unavailable";
+            /** Value */
+            value: number | null;
+        };
+        /** RadarModuleResponse */
+        RadarModuleResponse: {
+            /** Detail */
+            detail: string;
+            /** Label */
+            label: string;
+            /** Module Id */
+            module_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "complete" | "partial" | "stale" | "insufficient_history" | "insufficient_coverage" | "unavailable";
+        };
         /** ReportTableResponse */
         ReportTableResponse: {
             /** Columns */
@@ -924,6 +1159,34 @@ export interface components {
             rows: {
                 [key: string]: string | number | boolean | null;
             }[];
+        };
+        /** SectorRadarListResponse */
+        SectorRadarListResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            /** Items */
+            items: components["schemas"]["SectorRadarResponse"][];
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+        };
+        /** SectorRadarResponse */
+        SectorRadarResponse: {
+            /** Instrument Id */
+            instrument_id: string;
+            relative_strength_20: components["schemas"]["RadarMetricResponse"];
+            relative_strength_60: components["schemas"]["RadarMetricResponse"];
+            /** Sector Id */
+            sector_id: string;
         };
         /** SignalPageResponse */
         SignalPageResponse: {
@@ -976,6 +1239,46 @@ export interface components {
              * @enum {string}
              */
             state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+        };
+        /** StockRadarPageResponse */
+        StockRadarPageResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            /** Has More */
+            has_more: boolean;
+            /** Items */
+            items: components["schemas"]["StockRadarResponse"][];
+            /** Limit */
+            limit: number;
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /** Offset */
+            offset: number;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+        };
+        /** StockRadarResponse */
+        StockRadarResponse: {
+            atr_20_ratio: components["schemas"]["RadarMetricResponse"];
+            distance_ma_200: components["schemas"]["RadarMetricResponse"];
+            /** Instrument Id */
+            instrument_id: string;
+            max_drawdown_126: components["schemas"]["RadarMetricResponse"];
+            momentum_126_21: components["schemas"]["RadarMetricResponse"];
+            realized_volatility_20: components["schemas"]["RadarMetricResponse"];
+            /** Sector Id */
+            sector_id: string;
+            sector_relative_momentum_126_21: components["schemas"]["RadarMetricResponse"];
+            /** Symbol */
+            symbol: string;
         };
         /** StrategyResponse */
         StrategyResponse: {
@@ -1670,6 +1973,299 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarBreadth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketBreadthResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    listMarketRadarSectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorRadarListResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarSector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorRadarResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    listMarketRadarStocks: {
+        parameters: {
+            query?: {
+                sector?: string | null;
+                query?: string | null;
+                sort?: "instrument" | "momentum" | "relative_momentum" | "volatility" | "drawdown";
+                direction?: "asc" | "desc";
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StockRadarPageResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarStock: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StockRadarResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarSummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketRadarSummaryResponse"];
                 };
             };
             /** @description 查询对象不存在 */

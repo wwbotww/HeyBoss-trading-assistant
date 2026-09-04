@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from nautilus_trader.model.data import CustomData
@@ -12,6 +13,21 @@ from tests.data.helpers import make_bar, utc_ns
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.execution.events import TradeSignalEvent
+from trading_assistant.market_radar.membership import (
+    CurrentMarketMember,
+    CurrentMarketMembership,
+)
+from trading_assistant.market_radar.metrics import (
+    BreadthMetric,
+    CurrentBreadthSnapshot,
+    MarketPriceMetrics,
+    MetricValue,
+    PriceCoverage,
+    PriceRadarSnapshot,
+    SectorPriceMetrics,
+    StockPriceMetrics,
+)
+from trading_assistant.market_radar.storage import MarketRadarRepository
 from trading_assistant.storage.repository import PositionSnapshotInput, TradingRepository
 from trading_assistant.web_api.config import WebApiSettings
 
@@ -23,6 +39,7 @@ def web_settings(tmp_path: Path, *, account: str = "DU123") -> WebApiSettings:
     environ = {
         "LIVE_DATABASE_URL": f"sqlite:///{tmp_path}/live.db",
         "BACKTEST_DATABASE_URL": f"sqlite:///{tmp_path}/backtest.db",
+        "MARKET_RADAR_DATABASE_URL": f"sqlite:///{tmp_path}/market-radar.db",
         "CATALOG_PATH": str(tmp_path / "catalog"),
         "REPORT_ROOT": str(tmp_path / "reports"),
         "DATA_QUALITY_REPORT_ROOT": str(tmp_path / "quality"),
@@ -174,3 +191,109 @@ def seed_web_data(tmp_path: Path) -> str:
         encoding="utf-8",
     )
     return workflow.event_id
+
+
+def seed_market_radar_data(
+    tmp_path: Path,
+    *,
+    breadth_metric: BreadthMetric | None = None,
+    membership_age_days: int = 1,
+) -> None:
+    """写入完整价格和可定制状态的当前宽度快照。"""
+    database_url = f"sqlite:///{tmp_path}/market-radar.db"
+    repository = MarketRadarRepository(database_url)
+    repository.create_schema()
+    timestamp = datetime(2026, 9, 3, 1, tzinfo=UTC)
+
+    def complete(value: float) -> MetricValue:
+        return MetricValue(value, "complete", 220, 20)
+
+    snapshot = PriceRadarSnapshot(
+        as_of_date=date(2026, 9, 2),
+        calculated_at_utc=timestamp,
+        coverage=PriceCoverage(eligible=25, observed=25, ratio=1),
+        market=MarketPriceMetrics(
+            spy_return_20=complete(0.04),
+            spy_distance_ma_200=complete(0.12),
+            rsp_spy_return_20=complete(-0.01),
+        ),
+        sectors=(
+            SectorPriceMetrics(
+                sector="information_technology",
+                instrument_id="XLK.US",
+                relative_strength_20=complete(0.03),
+                relative_strength_60=complete(0.08),
+            ),
+        ),
+        stocks=(
+            StockPriceMetrics(
+                instrument_id="AAPL.US",
+                sector="information_technology",
+                momentum_126_21=complete(0.15),
+                sector_relative_momentum_126_21=complete(0.07),
+                distance_ma_200=complete(0.11),
+                realized_volatility_20=complete(0.2),
+                max_drawdown_126=complete(-0.14),
+                atr_20_ratio=complete(0.025),
+            ),
+        ),
+    )
+    repository.start_sync_run(
+        run_id="web-radar-run",
+        source="eodhd_prices",
+        started_at_utc=timestamp,
+        requested_start_date=date(2025, 9, 2),
+        requested_end_date=date(2026, 9, 2),
+        instrument_count=25,
+    )
+    repository.publish_price_snapshot_and_complete(
+        "web-radar-run",
+        snapshot=snapshot,
+        completed_at_utc=timestamp,
+        instruments_processed=25,
+        bars_fetched=5_000,
+        bars_written=5_000,
+    )
+    today = datetime.now(UTC).date()
+    membership_date = today - timedelta(days=membership_age_days)
+    complete_breadth = breadth_metric or BreadthMetric(0.5, "complete", 20, 20, 1, 50)
+    membership = CurrentMarketMembership(
+        source="state_street_spy_holdings",
+        membership_date=membership_date,
+        members=tuple(
+            CurrentMarketMember(
+                source_symbol=f"WEB{index:02d}",
+                instrument_id=f"WEB{index:02d}.US",
+                data_symbol=f"WEB{index:02d}.US",
+            )
+            for index in range(complete_breadth.eligible)
+        ),
+    )
+    breadth = CurrentBreadthSnapshot(
+        as_of_date=today,
+        membership_date=membership_date,
+        membership_source=membership.source,
+        calculated_at_utc=timestamp,
+        b50=complete_breadth,
+        b200=replace(complete_breadth, history_required=200),
+        ad10=replace(complete_breadth, history_required=11),
+        nhnl=replace(complete_breadth, history_required=252),
+    )
+    repository.start_sync_run(
+        run_id="web-breadth-run",
+        source="spy_current_members",
+        started_at_utc=timestamp,
+        requested_start_date=today - timedelta(days=400),
+        requested_end_date=today,
+        instrument_count=breadth.member_count,
+    )
+    repository.publish_current_breadth_and_complete(
+        "web-breadth-run",
+        membership=membership,
+        snapshot=breadth,
+        completed_at_utc=timestamp,
+        instruments_processed=breadth.member_count,
+        bars_fetched=4_000,
+        bars_written=4_000,
+    )
+    repository.close()

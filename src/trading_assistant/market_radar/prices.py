@@ -10,6 +10,7 @@ from nautilus_trader.model.data import Bar, BarType
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec
 from trading_assistant.market_radar.config import MarketRadarConfig
+from trading_assistant.market_radar.membership import CurrentMarketMembership
 from trading_assistant.market_radar.metrics import PriceBar
 
 _INTERNAL_BAR_SUFFIX = "1-DAY-LAST-INTERNAL"
@@ -40,6 +41,56 @@ def build_price_instrument_specs(
     ids = tuple(spec.instrument_id for spec in resolved)
     if len(ids) != len(set(ids)):
         raise ValueError("market radar price universe contains duplicate instruments")
+    return tuple(resolved)
+
+
+def build_macro_price_instrument_specs(
+    config: MarketRadarConfig,
+) -> tuple[InstrumentSpec, ...]:
+    """按稳定角色顺序返回信用与波动率价格输入。"""
+    monitor_by_id = {spec.instrument_id: spec for spec in config.monitor_instruments}
+    missing = sorted(set(config.macro_price_instrument_ids) - monitor_by_id.keys())
+    if missing:
+        raise ValueError("market radar macro instrument is not configured: " + ", ".join(missing))
+    return tuple(
+        monitor_by_id[instrument_id] for instrument_id in config.macro_price_instrument_ids
+    )
+
+
+def build_membership_instrument_specs(
+    membership: CurrentMarketMembership,
+    trading_instruments: tuple[InstrumentSpec, ...],
+) -> tuple[InstrumentSpec, ...]:
+    """为当前成员生成分析专用标的, 并优先复用已有交易标的定义。"""
+    trading_by_id = {spec.instrument_id: spec for spec in trading_instruments}
+    if len(trading_by_id) != len(trading_instruments):
+        raise ValueError("trading instruments contain duplicate instrument IDs")
+
+    resolved: list[InstrumentSpec] = []
+    for member in membership.members:
+        existing = trading_by_id.get(member.instrument_id)
+        if existing is not None:
+            if existing.data_symbol != member.data_symbol:
+                raise ValueError(
+                    "market membership conflicts with trading instrument data symbol: "
+                    f"{member.instrument_id}"
+                )
+            resolved.append(existing)
+            continue
+        symbol = member.data_symbol.removesuffix(".US")
+        resolved.append(
+            InstrumentSpec(
+                symbol=symbol,
+                instrument_id=member.instrument_id,
+                data_symbol=member.data_symbol,
+                exchange="SMART",
+                primary_exchange="SMART",
+                currency="USD",
+                price_precision=4,
+                price_increment="0.0100",
+                lot_size=1,
+            )
+        )
     return tuple(resolved)
 
 

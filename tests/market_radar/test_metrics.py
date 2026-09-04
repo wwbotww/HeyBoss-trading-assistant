@@ -11,9 +11,16 @@ from pathlib import Path
 import pytest
 
 from trading_assistant.market_radar.config import MarketRadarConfig, load_market_radar_config
+from trading_assistant.market_radar.membership import (
+    CurrentMarketMember,
+    CurrentMarketMembership,
+)
 from trading_assistant.market_radar.metrics import (
+    BreadthMetric,
+    CurrentBreadthSnapshot,
     PriceBar,
     PriceRadarSnapshot,
+    calculate_current_breadth_snapshot,
     calculate_price_snapshot,
 )
 
@@ -204,3 +211,207 @@ def test_invalid_inputs_fail_before_snapshot_publication() -> None:
         )
     with pytest.raises(ValueError, match="positive"):
         PriceBar(date(2026, 9, 1), high=1, low=0, close=1)
+
+
+def _breadth_membership(count: int, *, membership_date: date) -> CurrentMarketMembership:
+    return CurrentMarketMembership(
+        source="test_current_members",
+        membership_date=membership_date,
+        members=tuple(
+            CurrentMarketMember(
+                source_symbol=f"S{index:03d}",
+                instrument_id=f"S{index:03d}.US",
+                data_symbol=f"S{index:03d}.US",
+            )
+            for index in range(count)
+        ),
+    )
+
+
+def _breadth_bars(
+    count: int, *, rising: bool, start: date = date(2025, 1, 1)
+) -> tuple[PriceBar, ...]:
+    values = [100 + index if rising else 500 - index for index in range(count)]
+    return tuple(
+        PriceBar(
+            day=start + timedelta(days=index),
+            high=float(close + 1),
+            low=float(close - 1),
+            close=float(close),
+        )
+        for index, close in enumerate(values)
+    )
+
+
+def _ending_breadth_bars(count: int, *, as_of: date) -> tuple[PriceBar, ...]:
+    return _breadth_bars(
+        count,
+        rising=True,
+        start=as_of - timedelta(days=count - 1),
+    )
+
+
+def test_current_breadth_metrics_are_reproducible_and_versionless() -> None:
+    membership = _breadth_membership(20, membership_date=date(2025, 9, 8))
+    inputs = {
+        member.instrument_id: _breadth_bars(252, rising=index < 10)
+        for index, member in enumerate(membership.members)
+    }
+    benchmark = _breadth_bars(252, rising=True)
+
+    snapshot = calculate_current_breadth_snapshot(
+        membership,
+        inputs,
+        benchmark,
+        calculated_at_utc=CALCULATED_AT,
+    )
+
+    assert snapshot.as_of_date == date(2025, 9, 9)
+    assert snapshot.member_count == 20
+    assert snapshot.b50.value == pytest.approx(0.5)
+    assert snapshot.b200.value == pytest.approx(0.5)
+    assert snapshot.ad10.value == pytest.approx(0)
+    assert snapshot.nhnl.value == pytest.approx(0)
+    assert all(
+        metric.validity == "complete"
+        and metric.eligible == 20
+        and metric.observed == 20
+        and metric.ratio == 1
+        for metric in (snapshot.b50, snapshot.b200, snapshot.ad10, snapshot.nhnl)
+    )
+    assert snapshot.b50.history_required == 50
+    assert snapshot.b200.history_required == 200
+    assert snapshot.ad10.history_required == 11
+    assert snapshot.nhnl.history_required == 252
+    payload = snapshot.to_payload()
+    assert "schema_version" not in payload
+    assert CurrentBreadthSnapshot.from_payload(payload) == snapshot
+    payload["unknown"] = True
+    with pytest.raises(ValueError, match="unknown"):
+        CurrentBreadthSnapshot.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("observed", "validity", "has_value"),
+    [
+        (19, "complete", True),
+        (18, "partial", True),
+        (17, "insufficient_coverage", False),
+    ],
+)
+def test_breadth_coverage_thresholds_use_each_metric_real_denominator(
+    observed: int,
+    validity: str,
+    has_value: bool,
+) -> None:
+    membership = _breadth_membership(20, membership_date=date(2025, 9, 8))
+    as_of = date(2025, 9, 9)
+    inputs = {
+        member.instrument_id: _ending_breadth_bars(
+            50 if index < observed else 49,
+            as_of=as_of,
+        )
+        for index, member in enumerate(membership.members)
+    }
+
+    snapshot = calculate_current_breadth_snapshot(
+        membership,
+        inputs,
+        _breadth_bars(252, rising=True),
+        calculated_at_utc=CALCULATED_AT,
+    )
+
+    assert snapshot.b50.observed == observed
+    assert snapshot.b50.ratio == pytest.approx(observed / 20)
+    assert snapshot.b50.validity == validity
+    assert (snapshot.b50.value is not None) is has_value
+    assert snapshot.b200.validity == "insufficient_coverage"
+    assert snapshot.b200.observed == 0
+
+
+def test_ad10_uses_ten_aligned_daily_advance_decline_ratios() -> None:
+    membership = _breadth_membership(1, membership_date=date(2025, 1, 10))
+    benchmark = _breadth_bars(11, rising=True)
+    closes = (100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100)
+    bars = tuple(
+        PriceBar(
+            day=date(2025, 1, 1) + timedelta(days=index),
+            high=close + 1,
+            low=close - 1,
+            close=close,
+        )
+        for index, close in enumerate(closes)
+    )
+    expected = 1.0
+    alpha = 2 / 11
+    for value in (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0):
+        expected = alpha * value + (1 - alpha) * expected
+
+    snapshot = calculate_current_breadth_snapshot(
+        membership,
+        {membership.members[0].instrument_id: bars},
+        benchmark,
+        calculated_at_utc=CALCULATED_AT,
+    )
+
+    assert snapshot.ad10.value == pytest.approx(expected)
+    assert snapshot.ad10.observed == 1
+
+
+def test_current_breadth_rejects_stale_future_and_invalid_inputs() -> None:
+    benchmark = _breadth_bars(252, rising=True)
+    as_of = benchmark[-1].day
+    fresh = _breadth_membership(1, membership_date=as_of - timedelta(days=7))
+    bars = {fresh.members[0].instrument_id: benchmark}
+    calculate_current_breadth_snapshot(
+        fresh,
+        bars,
+        benchmark,
+        calculated_at_utc=CALCULATED_AT,
+    )
+    with pytest.raises(ValueError, match="stale"):
+        calculate_current_breadth_snapshot(
+            _breadth_membership(1, membership_date=as_of - timedelta(days=8)),
+            bars,
+            benchmark,
+            calculated_at_utc=CALCULATED_AT,
+        )
+    with pytest.raises(ValueError, match="later"):
+        calculate_current_breadth_snapshot(
+            _breadth_membership(1, membership_date=as_of + timedelta(days=1)),
+            bars,
+            benchmark,
+            calculated_at_utc=CALCULATED_AT,
+        )
+    with pytest.raises(ValueError, match="benchmark"):
+        calculate_current_breadth_snapshot(
+            fresh,
+            bars,
+            (),
+            calculated_at_utc=CALCULATED_AT,
+        )
+    with pytest.raises(ValueError, match="outside"):
+        calculate_current_breadth_snapshot(
+            fresh,
+            {**bars, "UNKNOWN.US": benchmark},
+            benchmark,
+            calculated_at_utc=CALCULATED_AT,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        calculate_current_breadth_snapshot(
+            fresh,
+            bars,
+            benchmark,
+            calculated_at_utc=datetime(2026, 9, 3),
+        )
+
+
+def test_breadth_metric_validates_coverage_and_value_contract() -> None:
+    with pytest.raises(ValueError, match="ratio"):
+        BreadthMetric(1, "complete", 10, 10, 0.9, 50)
+    with pytest.raises(ValueError, match="validity"):
+        BreadthMetric(1, "partial", 10, 10, 1, 50)
+    with pytest.raises(ValueError, match="must not expose"):
+        BreadthMetric(1, "insufficient_coverage", 10, 8, 0.8, 50)
+    with pytest.raises(ValueError, match="within"):
+        BreadthMetric(2, "complete", 10, 10, 1, 50)

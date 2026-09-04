@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   ListOrdered,
   Menu,
+  Radar,
   RefreshCw,
   ShieldCheck,
   WalletCards,
@@ -38,6 +39,13 @@ const navigation: readonly NavigationItem[] = [
     label: '策略与因子',
     shortLabel: '策略',
     icon: BrainCircuit,
+    group: 'research',
+  },
+  {
+    to: '/market-radar',
+    label: '市场雷达',
+    shortLabel: '雷达',
+    icon: Radar,
     group: 'research',
   },
   {

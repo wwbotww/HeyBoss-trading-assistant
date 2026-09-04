@@ -9,13 +9,17 @@ import type {
   FactorSnapshot,
   FillPage,
   Health,
+  MarketBreadth,
+  MarketRadarSummary,
   OrderDetail,
   OrderPage,
   Overview,
   Portfolio,
   ReportTable,
+  SectorRadarList,
   SignalPage,
   Strategy,
+  StockRadarPage,
   SystemStatus,
   WorkflowDetail,
   WorkflowPage,
@@ -419,6 +423,147 @@ export const systemFixture = {
   ],
 } satisfies SystemStatus
 
+const completeMetric = (value: number) => ({
+  value,
+  validity: 'complete' as const,
+  observations: 220,
+  required: 20,
+})
+
+export const marketRadarSummaryFixture = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-03T02:00:00Z',
+  as_of_date: '2026-09-02',
+  calculated_at_utc: '2026-09-03T01:00:00Z',
+  coverage: { eligible: 25, observed: 25, ratio: 1 },
+  market: {
+    spy_return_20: completeMetric(0.04),
+    spy_distance_ma_200: completeMetric(0.12),
+    rsp_spy_return_20: completeMetric(-0.01),
+  },
+  modules: [
+    {
+      module_id: 'spy_trend',
+      label: 'SPY 趋势',
+      state: 'complete',
+      detail: '20 日趋势与 MA200 距离均来自完整价格快照。',
+    },
+    {
+      module_id: 'market_breadth',
+      label: '市场宽度',
+      state: 'complete',
+      detail: 'SPY 当前持仓代理的四项宽度指标完整。',
+    },
+    {
+      module_id: 'equal_weight',
+      label: '等权确认',
+      state: 'complete',
+      detail: 'RSP/SPY 20 日相对表现可用。',
+    },
+    {
+      module_id: 'real_rates',
+      label: '实际利率',
+      state: 'unavailable',
+      detail: 'R4 宏观观测与日期对齐链路尚未实施。',
+    },
+    {
+      module_id: 'risk_appetite',
+      label: '风险偏好',
+      state: 'unavailable',
+      detail: 'R4 所需的波动率期限结构和信用组合尚未实施。',
+    },
+    {
+      module_id: 'earnings_revisions',
+      label: 'EPS 修正',
+      state: 'unavailable',
+      detail: 'R5 盈利预期端点当前无可用权限; 尚未采集。',
+    },
+  ],
+} satisfies MarketRadarSummary
+
+const completeBreadthMetric = (value: number, historyRequired: number) => ({
+  value,
+  validity: 'complete' as const,
+  coverage: { eligible: 503, observed: 503, ratio: 1 },
+  history_required: historyRequired,
+})
+
+export const marketBreadthFixture = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-03T02:00:00Z',
+  validity: 'complete',
+  as_of_date: '2026-09-02',
+  calculated_at_utc: '2026-09-03T01:00:00Z',
+  membership_date: '2026-09-01',
+  membership_source: 'state_street_spy_holdings',
+  freshness: { membership_age_days: 2, stale_after_days: 7 },
+  b50: completeBreadthMetric(0.481113, 50),
+  b200: {
+    ...completeBreadthMetric(0.664671, 200),
+    coverage: { eligible: 503, observed: 501, ratio: 501 / 503 },
+  },
+  ad10: completeBreadthMetric(-0.15022, 11),
+  nhnl: {
+    ...completeBreadthMetric(0.022, 252),
+    coverage: { eligible: 503, observed: 500, ratio: 500 / 503 },
+  },
+} satisfies MarketBreadth
+
+export const marketRadarSectorsFixture = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-03T02:00:00Z',
+  as_of_date: '2026-09-02',
+  calculated_at_utc: '2026-09-03T01:00:00Z',
+  items: [
+    {
+      sector_id: 'information_technology',
+      instrument_id: 'XLK.US',
+      relative_strength_20: completeMetric(0.03),
+      relative_strength_60: completeMetric(0.08),
+    },
+    {
+      sector_id: 'energy',
+      instrument_id: 'XLE.US',
+      relative_strength_20: completeMetric(-0.02),
+      relative_strength_60: completeMetric(-0.04),
+    },
+  ],
+} satisfies SectorRadarList
+
+export const marketRadarStocksFixture = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-03T02:00:00Z',
+  as_of_date: '2026-09-02',
+  calculated_at_utc: '2026-09-03T01:00:00Z',
+  items: [
+    {
+      instrument_id: 'AAPL.US',
+      symbol: 'AAPL',
+      sector_id: 'information_technology',
+      momentum_126_21: completeMetric(0.15),
+      sector_relative_momentum_126_21: completeMetric(0.07),
+      distance_ma_200: completeMetric(0.11),
+      realized_volatility_20: completeMetric(0.2),
+      max_drawdown_126: completeMetric(-0.14),
+      atr_20_ratio: completeMetric(0.025),
+    },
+    {
+      instrument_id: 'XOM.US',
+      symbol: 'XOM',
+      sector_id: 'energy',
+      momentum_126_21: completeMetric(0.06),
+      sector_relative_momentum_126_21: completeMetric(0.01),
+      distance_ma_200: completeMetric(0.03),
+      realized_volatility_20: completeMetric(0.24),
+      max_drawdown_126: completeMetric(-0.19),
+      atr_20_ratio: completeMetric(0.03),
+    },
+  ],
+  offset: 0,
+  limit: 20,
+  has_more: false,
+} satisfies StockRadarPage
+
 const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/health': healthFixture,
   '/api/overview': overviewFixture,
@@ -442,6 +587,12 @@ const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/data/catalog': catalogFixture,
   '/api/data/quality/latest': qualityFixture,
   '/api/system/status': systemFixture,
+  '/api/market-radar/summary': marketRadarSummaryFixture,
+  '/api/market-radar/breadth': marketBreadthFixture,
+  '/api/market-radar/sectors': marketRadarSectorsFixture,
+  '/api/market-radar/sectors/information_technology': firstItem(marketRadarSectorsFixture.items),
+  '/api/market-radar/stocks': marketRadarStocksFixture,
+  '/api/market-radar/stocks/AAPL.US': firstItem(marketRadarStocksFixture.items),
 }
 
 export type FetchFunction = (input: string | URL | Request, init?: RequestInit) => Promise<Response>

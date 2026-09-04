@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from trading_assistant.application.models import Scalar, SourceState
+from trading_assistant.application.models import (
+    BreadthMetricValidity,
+    MarketBreadthValidity,
+    RadarMetricValidity,
+    RadarModuleState,
+    Scalar,
+    SourceState,
+)
 
 
 class ApiSchema(BaseModel):
@@ -314,6 +321,107 @@ class DataQualityResponse(ApiSchema):
     warning_count: int
     issues: list[QualityIssueResponse]
     instruments: list[QualityInstrumentResponse]
+
+
+class RadarMetricResponse(ApiSchema):
+    value: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+class RadarCoverageResponse(ApiSchema):
+    eligible: int
+    observed: int
+    ratio: float
+
+
+class RadarFreshnessResponse(ApiSchema):
+    membership_age_days: int
+    stale_after_days: int
+
+
+class BreadthMetricResponse(ApiSchema):
+    value: float | None
+    validity: BreadthMetricValidity
+    coverage: RadarCoverageResponse
+    history_required: int
+
+
+class MarketBreadthResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MarketBreadthValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    membership_date: date | None
+    membership_source: str | None
+    freshness: RadarFreshnessResponse | None
+    b50: BreadthMetricResponse | None
+    b200: BreadthMetricResponse | None
+    ad10: BreadthMetricResponse | None
+    nhnl: BreadthMetricResponse | None
+
+
+class RadarMarketResponse(ApiSchema):
+    spy_return_20: RadarMetricResponse
+    spy_distance_ma_200: RadarMetricResponse
+    rsp_spy_return_20: RadarMetricResponse
+
+
+class RadarModuleResponse(ApiSchema):
+    module_id: str
+    label: str
+    state: RadarModuleState
+    detail: str
+
+
+class MarketRadarSummaryResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    coverage: RadarCoverageResponse | None
+    market: RadarMarketResponse | None
+    modules: list[RadarModuleResponse]
+
+
+class SectorRadarResponse(ApiSchema):
+    sector_id: str
+    instrument_id: str
+    relative_strength_20: RadarMetricResponse
+    relative_strength_60: RadarMetricResponse
+
+
+class SectorRadarListResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    items: list[SectorRadarResponse]
+
+
+class StockRadarResponse(ApiSchema):
+    instrument_id: str
+    symbol: str
+    sector_id: str
+    momentum_126_21: RadarMetricResponse
+    sector_relative_momentum_126_21: RadarMetricResponse
+    distance_ma_200: RadarMetricResponse
+    realized_volatility_20: RadarMetricResponse
+    max_drawdown_126: RadarMetricResponse
+    atr_20_ratio: RadarMetricResponse
+
+
+class StockRadarPageResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    items: list[StockRadarResponse]
+    offset: int
+    limit: int
+    has_more: bool
 
 
 class SourceStatusResponse(ApiSchema):

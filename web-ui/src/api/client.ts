@@ -13,6 +13,8 @@ import type {
   FillQuery,
   FillPage,
   Health,
+  MarketBreadth,
+  MarketRadarSummary,
   OrderDetail,
   OrderQuery,
   OrderPage,
@@ -22,9 +24,14 @@ import type {
   Problem,
   ReportTable,
   ReportTableQuery,
+  SectorRadar,
+  SectorRadarList,
   SignalQuery,
   SignalPage,
   Strategy,
+  StockRadar,
+  StockRadarPage,
+  StockRadarQuery,
   SystemStatus,
   WorkflowDetail,
   WorkflowQuery,
@@ -216,4 +223,36 @@ export function fetchLatestDataQuality(): Promise<DataQuality> {
 
 export function fetchSystemStatus(): Promise<SystemStatus> {
   return read(http.GET('/api/system/status'))
+}
+
+export function fetchMarketRadarSummary(): Promise<MarketRadarSummary> {
+  return read(http.GET('/api/market-radar/summary'))
+}
+
+export function fetchMarketRadarBreadth(): Promise<MarketBreadth> {
+  return read(http.GET('/api/market-radar/breadth'))
+}
+
+export function fetchMarketRadarSectors(): Promise<SectorRadarList> {
+  return read(http.GET('/api/market-radar/sectors'))
+}
+
+export function fetchMarketRadarSector(sectorId: string): Promise<SectorRadar> {
+  return read(
+    http.GET('/api/market-radar/sectors/{sector_id}', {
+      params: { path: { sector_id: sectorId } },
+    }),
+  )
+}
+
+export function fetchMarketRadarStocks(query: StockRadarQuery): Promise<StockRadarPage> {
+  return read(http.GET('/api/market-radar/stocks', { params: { query } }))
+}
+
+export function fetchMarketRadarStock(instrumentId: string): Promise<StockRadar> {
+  return read(
+    http.GET('/api/market-radar/stocks/{instrument_id}', {
+      params: { path: { instrument_id: instrumentId } },
+    }),
+  )
 }

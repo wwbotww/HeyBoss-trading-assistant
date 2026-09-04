@@ -35,6 +35,12 @@ const router = createRouter({
       meta: { title: '订单与成交', kicker: 'Execution ledger' },
     },
     {
+      path: '/market-radar',
+      name: 'market-radar',
+      component: () => import('./pages/MarketRadarPage.vue'),
+      meta: { title: '市场雷达', kicker: 'Market intelligence' },
+    },
+    {
       path: '/backtests',
       name: 'backtests',
       component: () => import('./pages/BacktestsPage.vue'),

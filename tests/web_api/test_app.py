@@ -45,9 +45,18 @@ def test_health_openapi_and_error_contract_are_stable(tmp_path: Path) -> None:
         "/api/data/catalog",
         "/api/data/quality/latest",
         "/api/system/status",
+        "/api/market-radar/summary",
+        "/api/market-radar/breadth",
+        "/api/market-radar/sectors",
+        "/api/market-radar/sectors/{sector_id}",
+        "/api/market-radar/stocks",
+        "/api/market-radar/stocks/{instrument_id}",
     }
     assert expected_paths <= set(schema["paths"])
     assert not any(path.startswith("/api/v") for path in schema["paths"])
+    for path, methods in schema["paths"].items():
+        if path.startswith("/api/market-radar"):
+            assert set(methods) == {"get"}
     operation_ids = [
         operation["operationId"]
         for methods in schema["paths"].values()
@@ -73,6 +82,8 @@ def test_settings_and_unexpected_errors_do_not_expose_internal_values(tmp_path: 
     assert sqlite_database_path("sqlite:///./data.db", tmp_path) == tmp_path / "data.db"
     assert sqlite_database_path("sqlite:///:memory:", tmp_path) is None
     assert sqlite_database_path("postgresql://localhost/db", tmp_path) is None
+    settings = WebApiSettings.from_environment({}, project_root=tmp_path)
+    assert settings.market_radar_database_path == tmp_path / "data" / "market-radar.db"
     with pytest.raises(ValueError, match="positive"):
         WebApiSettings.from_environment(
             {"PORTFOLIO_SNAPSHOT_STALE_SECONDS": "0"},

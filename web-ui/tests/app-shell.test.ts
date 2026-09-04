@@ -6,7 +6,7 @@ import { installApiMock } from './fixtures'
 import { mountPage } from './helpers'
 
 describe('应用壳', () => {
-  it('提供七个真实入口、只读上下文和全局刷新', async () => {
+  it('提供八个真实入口、只读上下文和全局刷新', async () => {
     const fetchMock = installApiMock()
     const { wrapper } = await mountPage(AppShell)
     await flushPromises()
@@ -17,6 +17,7 @@ describe('应用壳', () => {
     expect(wrapper.text()).toContain('决策流')
     expect(wrapper.text()).toContain('订单与成交')
     expect(wrapper.text()).toContain('策略与因子')
+    expect(wrapper.text()).toContain('市场雷达')
     expect(wrapper.text()).toContain('回测中心')
     expect(wrapper.text()).toContain('数据与系统')
     expect(wrapper.text()).toContain('Paper · 只读')

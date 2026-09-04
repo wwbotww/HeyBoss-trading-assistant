@@ -48,3 +48,47 @@ class PriceSnapshotRecord(MarketRadarBase):
     )
     calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class CurrentMarketMemberRecord(MarketRadarBase):
+    """一次已发布当前成员快照中的最小规范成员。"""
+
+    __tablename__ = "current_market_members"
+
+    membership_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    source_symbol: Mapped[str] = mapped_column(String(16))
+    data_symbol: Mapped[str] = mapped_column(String(32))
+
+
+class CurrentBreadthSnapshotRecord(MarketRadarBase):
+    """由一次成功同步原子发布的当前宽度快照。"""
+
+    __tablename__ = "current_breadth_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("sync_runs.run_id"),
+        unique=True,
+        index=True,
+    )
+    membership_date: Mapped[date] = mapped_column(Date, index=True)
+    calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class RiskAppetiteSnapshotRecord(MarketRadarBase):
+    """由一次成功同步原子发布的风险偏好快照。"""
+
+    __tablename__ = "risk_appetite_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("sync_runs.run_id"),
+        unique=True,
+        index=True,
+    )
+    calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)

@@ -85,6 +85,7 @@ async def sync_historical_specs(
     eodhd_api_token: str | None = None,
     log_level: str = "INFO",
     write_mode: CatalogWriteMode | None = None,
+    require_start_coverage: bool = True,
 ) -> PipelineSummary:
     """同步调用方已解析的标的, 并复用唯一的供应商与 NT Catalog 管道。"""
     if not instruments:
@@ -135,4 +136,5 @@ async def sync_historical_specs(
         start=datetime.combine(resolved_start, time.min),
         end=datetime.combine(resolved_end, time.max),
         write_mode=write_mode,
+        require_start_coverage=require_start_coverage,
     )

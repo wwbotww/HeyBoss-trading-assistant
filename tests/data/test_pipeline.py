@@ -494,6 +494,33 @@ def test_pipeline_uses_explicit_instrument_lifecycle(tmp_path: Path) -> None:
     assert source.action_requests[0][0].date() == first_session
 
 
+def test_pipeline_can_delegate_late_listing_history_to_caller_coverage(
+    tmp_path: Path,
+) -> None:
+    """当前横截面可写入新上市标的已有历史, 默认严格策略保持不变。"""
+    bar = make_bar(date(2026, 7, 13), instrument_id="SPY.US")
+    start = datetime(2026, 7, 1)
+    end = datetime(2026, 7, 15)
+
+    strict, strict_catalog = _pipeline(tmp_path / "strict", FakeSource([bar]))
+    strict_result = asyncio.run(strict.sync([_spec()], start=start, end=end))
+    assert strict_result.has_errors
+    assert strict_result.issues[0].code == "start_coverage_missing"
+    assert strict_catalog.read_bars(bar.bar_type) == []
+
+    partial, partial_catalog = _pipeline(tmp_path / "partial", FakeSource([bar]))
+    partial_result = asyncio.run(
+        partial.sync(
+            [_spec()],
+            start=start,
+            end=end,
+            require_start_coverage=False,
+        )
+    )
+    assert not partial_result.has_errors
+    assert partial_catalog.read_bars(bar.bar_type) == [bar]
+
+
 def test_pipeline_skips_lifecycle_without_window_and_caps_delisted_staleness(
     tmp_path: Path,
 ) -> None:

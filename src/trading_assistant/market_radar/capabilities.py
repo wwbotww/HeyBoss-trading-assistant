@@ -419,11 +419,11 @@ def _eodhd_probes(config: MarketRadarConfig, today: date) -> tuple[_EodhdProbe, 
             expected_shape="list",
         )
     )
-    for label, symbols in (
-        ("vix", config.vix_candidates),
-        ("vix3m", config.vix3m_candidates),
+    for label, symbol in (
+        ("vix", config.vix),
+        ("vix3m", config.vix3m),
     ):
-        probes.extend(
+        probes.append(
             _EodhdProbe(
                 capability=f"volatility_{label}_{symbol.lower().replace('.', '_')}",
                 endpoint=f"eod/{quote(symbol, safe='.-')}",
@@ -436,7 +436,6 @@ def _eodhd_probes(config: MarketRadarConfig, today: date) -> tuple[_EodhdProbe, 
                 },
                 expected_shape="list",
             )
-            for symbol in symbols
         )
     return tuple(probes)
 

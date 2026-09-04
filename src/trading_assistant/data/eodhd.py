@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
-from nautilus_trader.model.instruments import Equity, Instrument
+from nautilus_trader.model.instruments import Equity, IndexInstrument, Instrument
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from trading_assistant.data.config import InstrumentSpec
@@ -107,21 +107,35 @@ class EodhdHistoricalBarSource:
         self,
         specs: Sequence[InstrumentSpec],
     ) -> list[Instrument]:
-        """从受版本控制的最小元数据构造 NT 原生 Equity。"""
+        """从受版本控制的最小元数据构造 NT 原生标的。"""
         self._require_connected()
-        return [
-            Equity(
-                instrument_id=InstrumentId.from_str(spec.instrument_id),
-                raw_symbol=Symbol(spec.symbol),
-                currency=Currency.from_str(spec.currency),
-                price_precision=spec.price_precision,
-                price_increment=Price.from_str(spec.price_increment),
-                lot_size=Quantity.from_int(spec.lot_size),
-                ts_event=0,
-                ts_init=0,
-            )
-            for spec in specs
-        ]
+        instruments: list[Instrument] = []
+        for spec in specs:
+            common = {
+                "instrument_id": InstrumentId.from_str(spec.instrument_id),
+                "raw_symbol": Symbol(spec.symbol),
+                "currency": Currency.from_str(spec.currency),
+                "price_precision": spec.price_precision,
+                "price_increment": Price.from_str(spec.price_increment),
+                "ts_event": 0,
+                "ts_init": 0,
+            }
+            if spec.instrument_kind == "index":
+                instruments.append(
+                    IndexInstrument(
+                        **common,
+                        size_precision=0,
+                        size_increment=Quantity.from_int(1),
+                    )
+                )
+            else:
+                instruments.append(
+                    Equity(
+                        **common,
+                        lot_size=Quantity.from_int(spec.lot_size),
+                    )
+                )
+        return instruments
 
     async def request_daily_bars(
         self,
@@ -155,6 +169,14 @@ class EodhdHistoricalBarSource:
     ) -> CorporateActions:
         """请求完整拆股和现金分红, 并缓存供拆股调整 OHLC 使用。"""
         self._require_connected()
+        if spec.instrument_kind == "index":
+            actions = CorporateActions(
+                instrument_id=spec.instrument_id,
+                dividends=(),
+                splits=(),
+            )
+            self._actions[spec.instrument_id] = actions
+            return actions
         symbol = quote(spec.data_symbol, safe=".-")
         query = {
             "fmt": "json",

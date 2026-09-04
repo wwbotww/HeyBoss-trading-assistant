@@ -96,11 +96,13 @@ def test_sync_constructs_eodhd_source_and_exact_date_bounds(
             start: object,
             end: object,
             write_mode: object,
+            require_start_coverage: object,
         ) -> PipelineSummary:
             captured["instruments"] = instruments
             captured["start"] = start
             captured["end"] = end
             captured["write_mode"] = write_mode
+            captured["require_start_coverage"] = require_start_coverage
             return marker
 
     monkeypatch.setattr(service, "EodhdHistoricalBarSource", cast(Any, FakeSource))
@@ -124,6 +126,7 @@ def test_sync_constructs_eodhd_source_and_exact_date_bounds(
     assert cast(Any, captured["start"]).date() == date(2025, 1, 1)
     assert cast(Any, captured["end"]).date() == date(2025, 2, 1)
     assert captured["write_mode"] is None
+    assert captured["require_start_coverage"] is True
 
 
 def test_sync_historical_specs_forwards_explicit_write_mode(
@@ -157,11 +160,13 @@ def test_sync_historical_specs_forwards_explicit_write_mode(
             start_date=date(2025, 1, 1),
             end_date=date(2025, 2, 1),
             write_mode="replace_range",
+            require_start_coverage=False,
         )
     )
 
     assert result is marker
     assert captured["write_mode"] == "replace_range"
+    assert captured["require_start_coverage"] is False
 
 
 def test_sync_rejects_reversed_dates(tmp_path: Path) -> None:

@@ -14,13 +14,15 @@
 - 记录信号、审批、订单、成交、账户和持仓审计；
 - 生成包含权益、回撤、订单、成交、持仓和账户状态的回测报告；
 - 提供独立的只读 Python Web API，统一查询审计库、Catalog、回测报告和非敏感配置；
-- 提供独立的 Vue 3 只读交易操作台，覆盖操作总览、账户持仓、策略因子、决策流、订单成交、回测和数据系统状态。
+- 提供独立的 Vue 3 只读交易操作台，覆盖操作总览、账户持仓、策略因子、决策流、订单成交、市场雷达、回测和数据系统状态；
+- 通过可替换成员来源、同一 EODHD/NT Catalog 和独立快照数据库计算并展示当前 SPY 持仓代理的市场宽度；
+- 复用同一行情链路同步 HYG、LQD、VIX 和 VIX3M，并在后端原子发布风险偏好快照。
 
 当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 E3 FactorBatch。
 
-当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、市场新闻或大语言模型分析。
+当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、完整宏观四象限、市场新闻或大语言模型分析。
 
-Vue 3 七个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。交易、回测和 Telegram 均不依赖 Web 模块；停止或删除 Web 容器不会改变交易核心状态。
+Vue 3 八个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。市场雷达页面已经接通价格快照和当前宽度快照；风险偏好快照当前只在后端生成，尚未开放 API 或页面。交易、回测和 Telegram 均不依赖 Web 模块，停止或删除 Web 容器不会改变交易核心状态。
 
 ## 文档
 
@@ -84,6 +86,8 @@ BACKTEST_DATABASE_URL=sqlite:///./data/backtest.db
 CATALOG_PATH=./catalog/eodhd
 REPORT_ROOT=./reports/backtests
 DATA_QUALITY_REPORT_ROOT=./reports/data-quality
+MARKET_RADAR_DATABASE_URL=sqlite:///./data/market-radar.db
+MARKET_RADAR_REPORT_ROOT=./reports/market-radar
 WEB_PORT=8080
 ```
 
@@ -148,6 +152,35 @@ uv run --frozen --env-file .env python scripts/fetch_data.py --validate-only
 
 `config/instruments.yaml` 的 `first_trading_date` 和可选 `last_trading_date` 限定每个标的的有效历史区间。同步和回测预检不会再要求标的上市前或退市后的数据。
 
+## 同步市场雷达
+
+固定 25 只价格监测池首次同步和日常更新：
+
+```bash
+uv run --frozen --env-file .env python scripts/sync_market_radar.py --mode bootstrap
+uv run --frozen --env-file .env python scripts/sync_market_radar.py --mode daily
+```
+
+当前市场宽度首次同步和日常更新：
+
+```bash
+uv run --frozen --env-file .env python scripts/sync_market_breadth.py --mode bootstrap
+uv run --frozen --env-file .env python scripts/sync_market_breadth.py --mode daily
+```
+
+宽度成员来自 State Street 官方 SPY 当日持仓代理，价格仍走 EODHD、NautilusTrader 双 BarType 和同一 Catalog。该成员集合不会写入 `config/instruments.yaml`，也不会成为可交易股票池。宽度脚本不提供 `reconcile`，避免用短观察窗截断共享 Catalog 的长期历史。命令会产生约 1,500 次远端请求，实际额度和耗时取决于 EODHD 套餐。
+
+风险偏好输入首次同步和日常更新：
+
+```bash
+uv run --frozen --env-file .env python scripts/sync_market_macro.py \
+  --mode bootstrap \
+  --start 2022-01-01
+uv run --frozen --env-file .env python scripts/sync_market_macro.py --mode daily
+```
+
+该命令只同步 `HYG.US`、`LQD.US`、`VIX.INDX` 和 `VIX3M.INDX`。ETF 使用 NT `Equity`，指数使用 NT `IndexInstrument`；两者都经 EODHD、共享历史数据管道和同一 Catalog。后端以 HYG/LQD 的 20 个共同观测相对变化和 VIX/VIX3M 期限结构计算风险偏好分数，历史不足或关键输入缺失时不会发布伪完整结果。当前快照尚未在 Web 展示。
+
 ## 导入 PatchTST 因子
 
 先按 [FacDigger 因子接入说明](docs/factor-integration.md) 生成正式 FactorBatch，并在 `config/instruments.yaml` 为参与因子交易的标的填写稳定的 `factor_security_id`。不要按 ticker 自动猜测身份。
@@ -205,7 +238,7 @@ docker compose --profile web ps web-api web-ui
 
 浏览器访问 `http://127.0.0.1:8080`。如在 `.env` 修改了 `WEB_PORT`，请使用对应端口。启动命令应保留末尾的 `web-ui` 服务名，以免同时启动 Compose 中不属于 Web 的默认服务。
 
-操作台包含七个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、回测中心、数据与系统。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
+操作台包含八个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统。市场雷达总览中的 B50、B200、AD10 和 NHNL 来自已发布的 SPY 当前持仓代理快照，每项都会披露成员日期、价格日期、真实分母和覆盖率；它不是历史 PIT 指数宽度。R4A 风险偏好后端尚未接入此页面。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
 
 Web API 不暴露宿主机端口，也不读取完整 `.env`。它只获得账户作用域和查询路径，Catalog、`data/` 与 `reports/` 均以只读方式挂载。单独停止并删除 Web：
 

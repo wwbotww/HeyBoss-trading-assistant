@@ -7,11 +7,13 @@ from dataclasses import dataclass
 
 from fastapi import Request
 
+from trading_assistant.application.market_radar import MarketRadarQueryService
 from trading_assistant.application.portfolio import PortfolioQueryService
 from trading_assistant.application.research import ResearchQueryService
 from trading_assistant.application.system_status import SystemStatusQueryService
 from trading_assistant.application.trading_activity import TradingActivityQueryService
 from trading_assistant.data.config import load_data_config, load_instruments
+from trading_assistant.market_radar.storage import MarketRadarRepository
 from trading_assistant.storage.repository import TradingRepository
 from trading_assistant.web_api.config import WebApiSettings
 
@@ -23,9 +25,11 @@ class ApplicationServices:
     portfolio: PortfolioQueryService
     trading: TradingActivityQueryService
     research: ResearchQueryService
+    market_radar: MarketRadarQueryService
     system: SystemStatusQueryService
     live_repository: TradingRepository | None
     backtest_repository: TradingRepository | None
+    market_radar_repository: MarketRadarRepository | None
 
     def close(self) -> None:
         """释放本请求创建的只读连接池。"""
@@ -33,6 +37,8 @@ class ApplicationServices:
             self.live_repository.close()
         if self.backtest_repository is not None:
             self.backtest_repository.close()
+        if self.market_radar_repository is not None:
+            self.market_radar_repository.close()
 
 
 def _repository(database_url: str, database_exists: bool) -> TradingRepository | None:
@@ -40,6 +46,18 @@ def _repository(database_url: str, database_exists: bool) -> TradingRepository |
         return None
     try:
         return TradingRepository(database_url, read_only=True)
+    except ValueError:
+        return None
+
+
+def _market_radar_repository(
+    database_url: str,
+    database_exists: bool,
+) -> MarketRadarRepository | None:
+    if not database_exists:
+        return None
+    try:
+        return MarketRadarRepository(database_url, read_only=True)
     except ValueError:
         return None
 
@@ -53,6 +71,11 @@ def build_services(settings: WebApiSettings) -> ApplicationServices:
     backtest_repository = _repository(
         settings.backtest_database_url,
         settings.backtest_database_path is not None and settings.backtest_database_path.is_file(),
+    )
+    market_radar_repository = _market_radar_repository(
+        settings.market_radar_database_url,
+        settings.market_radar_database_path is not None
+        and settings.market_radar_database_path.is_file(),
     )
     config_root = settings.project_root / "config"
     try:
@@ -82,6 +105,7 @@ def build_services(settings: WebApiSettings) -> ApplicationServices:
             report_root=settings.report_root,
             quality_report_root=settings.quality_report_root,
         ),
+        market_radar=MarketRadarQueryService(repository=market_radar_repository),
         system=SystemStatusQueryService(
             project_root=settings.project_root,
             live_repository=live_repository,
@@ -94,6 +118,7 @@ def build_services(settings: WebApiSettings) -> ApplicationServices:
         ),
         live_repository=live_repository,
         backtest_repository=backtest_repository,
+        market_radar_repository=market_radar_repository,
     )
 
 

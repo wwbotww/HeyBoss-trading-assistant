@@ -23,6 +23,7 @@ def test_load_project_configuration() -> None:
     assert instruments[0].factor_security_id == "eodhd:isin:US0378331005"
     assert instruments[0].first_trading_date == date(1980, 12, 12)
     assert instruments[0].last_trading_date is None
+    assert instruments[0].instrument_kind == "equity"
     assert len(instruments) == 10
     assert all(instrument.factor_security_id is not None for instrument in instruments)
     assert config.historical_data.provider == "eodhd"
@@ -270,4 +271,26 @@ instruments:
 """
     path.write_text(base.format(factor_id="eodhd:isin:duplicate", second=second), encoding="utf-8")
     with pytest.raises(ValueError, match="factor_security_id 不得重复"):
+        load_instruments(path)
+
+
+def test_trading_instrument_config_rejects_non_equity_kind(tmp_path: Path) -> None:
+    path = tmp_path / "instruments.yaml"
+    path.write_text(
+        """
+instruments:
+  - symbol: VIX
+    instrument_id: VIX.INDX
+    data_symbol: VIX.INDX
+    exchange: SMART
+    primary_exchange: CBOE
+    currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
+    instrument_kind: index
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="instrument_kind"):
         load_instruments(path)

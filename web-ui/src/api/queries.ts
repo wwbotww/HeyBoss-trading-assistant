@@ -10,6 +10,12 @@ import {
   fetchHealth,
   fetchLatestDataQuality,
   fetchLatestFactor,
+  fetchMarketRadarBreadth,
+  fetchMarketRadarSector,
+  fetchMarketRadarSectors,
+  fetchMarketRadarStock,
+  fetchMarketRadarStocks,
+  fetchMarketRadarSummary,
   fetchOrder,
   fetchOrders,
   fetchOverview,
@@ -28,6 +34,7 @@ import type {
   PortfolioHistoryQuery,
   ReportTableQuery,
   SignalQuery,
+  StockRadarQuery,
   WorkflowQuery,
 } from './types'
 
@@ -51,6 +58,12 @@ export const queryKeys = {
   catalog: ['data', 'catalog'] as const,
   dataQuality: ['data', 'quality', 'latest'] as const,
   system: ['system', 'status'] as const,
+  marketRadarSummary: ['market-radar', 'summary'] as const,
+  marketRadarBreadth: ['market-radar', 'breadth'] as const,
+  marketRadarSectors: ['market-radar', 'sectors'] as const,
+  marketRadarSector: (sectorId: string) => ['market-radar', 'sectors', sectorId] as const,
+  marketRadarStocks: (query: StockRadarQuery) => ['market-radar', 'stocks', query] as const,
+  marketRadarStock: (instrumentId: string) => ['market-radar', 'stocks', instrumentId] as const,
 }
 
 export const healthQuery = () => queryOptions({ queryKey: queryKeys.health, queryFn: fetchHealth })
@@ -112,3 +125,26 @@ export const dataQualityQuery = () =>
   queryOptions({ queryKey: queryKeys.dataQuality, queryFn: fetchLatestDataQuality })
 export const systemQuery = () =>
   queryOptions({ queryKey: queryKeys.system, queryFn: fetchSystemStatus })
+export const marketRadarSummaryQuery = () =>
+  queryOptions({ queryKey: queryKeys.marketRadarSummary, queryFn: fetchMarketRadarSummary })
+export const marketRadarBreadthQuery = () =>
+  queryOptions({ queryKey: queryKeys.marketRadarBreadth, queryFn: fetchMarketRadarBreadth })
+export const marketRadarSectorsQuery = () =>
+  queryOptions({ queryKey: queryKeys.marketRadarSectors, queryFn: fetchMarketRadarSectors })
+export const marketRadarSectorQuery = (sectorId: string, enabled = true) =>
+  queryOptions({
+    queryKey: queryKeys.marketRadarSector(sectorId),
+    queryFn: () => fetchMarketRadarSector(sectorId),
+    enabled,
+  })
+export const marketRadarStocksQuery = (query: StockRadarQuery) =>
+  queryOptions({
+    queryKey: queryKeys.marketRadarStocks(query),
+    queryFn: () => fetchMarketRadarStocks(query),
+  })
+export const marketRadarStockQuery = (instrumentId: string, enabled = true) =>
+  queryOptions({
+    queryKey: queryKeys.marketRadarStock(instrumentId),
+    queryFn: () => fetchMarketRadarStock(instrumentId),
+    enabled,
+  })

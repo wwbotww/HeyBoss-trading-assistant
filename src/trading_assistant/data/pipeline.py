@@ -290,6 +290,7 @@ class HistoricalDataPipeline:
         start: datetime,
         end: datetime,
         write_mode: CatalogWriteMode | None = None,
+        require_start_coverage: bool = True,
     ) -> PipelineSummary:
         """同步标的定义与日线; 校验后按配置追加或替换 Catalog。"""
         if self._source is None:
@@ -412,9 +413,13 @@ class HistoricalDataPipeline:
                     )
                     for bar_type in bar_types
                 }
-                if must_verify_start and any(
-                    first is None or first.ts_event > coverage_limit_ns
-                    for first in first_by_type.values()
+                if (
+                    require_start_coverage
+                    and must_verify_start
+                    and any(
+                        first is None or first.ts_event > coverage_limit_ns
+                        for first in first_by_type.values()
+                    )
                 ):
                     issues.append(
                         QualityIssue(

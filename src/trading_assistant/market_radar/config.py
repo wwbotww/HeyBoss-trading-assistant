@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
-from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.config import InstrumentKind, InstrumentSpec
 
 EXPECTED_SECTORS = frozenset(
     {
@@ -35,6 +35,8 @@ class MarketRadarConfig:
     benchmark: str
     equal_weight_benchmark: str
     credit_proxy: tuple[str, str]
+    vix: str
+    vix3m: str
     index_membership_symbol: str
     sector_etfs: tuple[tuple[str, str], ...]
     watchlist: tuple[str, ...]
@@ -42,8 +44,6 @@ class MarketRadarConfig:
     monitor_instruments: tuple[InstrumentSpec, ...]
     calendar_symbols: tuple[str, ...]
     fundamentals_symbols: tuple[str, ...]
-    vix_candidates: tuple[str, ...]
-    vix3m_candidates: tuple[str, ...]
 
     @property
     def price_instrument_ids(self) -> tuple[str, ...]:
@@ -55,6 +55,11 @@ class MarketRadarConfig:
             *(instrument_id for _, instrument_id in self.sector_etfs),
             *self.watchlist,
         )
+
+    @property
+    def macro_price_instrument_ids(self) -> tuple[str, ...]:
+        """按信用代理和波动率期限结构顺序返回宏观价格输入。"""
+        return (*self.credit_proxy, self.vix, self.vix3m)
 
 
 def _mapping(value: object, *, name: str) -> dict[str, Any]:
@@ -106,6 +111,12 @@ def _date(value: object, *, name: str) -> date:
     raise ValueError(f"配置项 {name!r} 必须是 ISO 日期")
 
 
+def _instrument_kind(value: object, *, name: str) -> InstrumentKind:
+    if value not in {"equity", "index"}:
+        raise ValueError(f"配置项 {name!r} 只允许 equity 或 index")
+    return cast(InstrumentKind, value)
+
+
 def _monitor_instruments(value: object) -> tuple[InstrumentSpec, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("配置项 'monitor_instruments' 必须是非空列表")
@@ -113,6 +124,7 @@ def _monitor_instruments(value: object) -> tuple[InstrumentSpec, ...]:
         "symbol",
         "instrument_id",
         "data_symbol",
+        "instrument_kind",
         "primary_exchange",
         "first_trading_date",
     }
@@ -151,6 +163,10 @@ def _monitor_instruments(value: object) -> tuple[InstrumentSpec, ...]:
                 first_trading_date=_date(
                     row["first_trading_date"],
                     name=f"monitor_instruments[{index}].first_trading_date",
+                ),
+                instrument_kind=_instrument_kind(
+                    row["instrument_kind"],
+                    name=f"monitor_instruments[{index}].instrument_kind",
                 ),
             )
         )
@@ -209,23 +225,24 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
     )
     market = _mapping(root["market"], name="market")
     probe = _mapping(root["probe"], name="probe")
-    volatility = _mapping(probe.get("volatility_candidates"), name="volatility_candidates")
+    volatility = _mapping(market.get("volatility"), name="volatility")
     _exact_keys(
         market,
         {
             "benchmark",
             "equal_weight_benchmark",
             "credit_proxy",
+            "volatility",
             "index_membership_symbol",
         },
         name="market",
     )
     _exact_keys(
         probe,
-        {"calendar_symbols", "fundamentals_symbols", "volatility_candidates"},
+        {"calendar_symbols", "fundamentals_symbols"},
         name="probe",
     )
-    _exact_keys(volatility, {"vix", "vix3m"}, name="volatility_candidates")
+    _exact_keys(volatility, {"vix", "vix3m"}, name="volatility")
 
     credit_proxy = _symbols(market["credit_proxy"], name="credit_proxy")
     if len(credit_proxy) != 2:
@@ -242,16 +259,31 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
         market["equal_weight_benchmark"],
         name="equal_weight_benchmark",
     )
+    vix = _symbol(volatility["vix"], name="volatility.vix")
+    vix3m = _symbol(volatility["vix3m"], name="volatility.vix3m")
     monitor_role_ids = (
         benchmark,
         equal_weight,
         *credit_proxy,
+        vix,
+        vix3m,
         *(instrument_id for _, instrument_id in sectors),
     )
     if len(monitor_role_ids) != len(set(monitor_role_ids)):
         raise ValueError("市场基准、信用代理与板块 ETF 不得重复使用同一标的")
     if set(monitor_role_ids) != {spec.instrument_id for spec in monitors}:
         raise ValueError("配置项 'monitor_instruments' 必须与全部价格监测角色完全对应")
+    monitors_by_id = {spec.instrument_id: spec for spec in monitors}
+    if any(
+        monitors_by_id[instrument_id].instrument_kind != "index" for instrument_id in (vix, vix3m)
+    ):
+        raise ValueError("VIX 与 VIX3M 监测标的必须声明为 index")
+    if any(
+        spec.instrument_kind != "equity"
+        for instrument_id, spec in monitors_by_id.items()
+        if instrument_id not in {vix, vix3m}
+    ):
+        raise ValueError("除 VIX 与 VIX3M 外的固定监测标的必须声明为 equity")
     if set(watchlist) & set(monitor_role_ids):
         raise ValueError("配置项 'watchlist' 不得重复声明市场 ETF")
 
@@ -267,6 +299,8 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
         benchmark=benchmark,
         equal_weight_benchmark=equal_weight,
         credit_proxy=(credit_proxy[0], credit_proxy[1]),
+        vix=vix,
+        vix3m=vix3m,
         index_membership_symbol=_symbol(
             market["index_membership_symbol"],
             name="index_membership_symbol",
@@ -277,6 +311,4 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
         monitor_instruments=monitors,
         calendar_symbols=calendar_symbols,
         fundamentals_symbols=fundamentals_symbols,
-        vix_candidates=_symbols(volatility["vix"], name="vix"),
-        vix3m_candidates=_symbols(volatility["vix3m"], name="vix3m"),
     )

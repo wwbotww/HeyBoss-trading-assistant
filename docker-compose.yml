@@ -73,6 +73,7 @@ services:
       CATALOG_PATH: ${CATALOG_PATH:-./catalog/eodhd}
       DATA_QUALITY_REPORT_ROOT: ${DATA_QUALITY_REPORT_ROOT:-./reports/data-quality}
       LIVE_DATABASE_URL: ${LIVE_DATABASE_URL:-sqlite:///./data/live.db}
+      MARKET_RADAR_DATABASE_URL: ${MARKET_RADAR_DATABASE_URL:-sqlite:///./data/market-radar.db}
       PORTFOLIO_SNAPSHOT_STALE_SECONDS: ${PORTFOLIO_SNAPSHOT_STALE_SECONDS:-90}
       REPORT_ROOT: ${REPORT_ROOT:-./reports/backtests}
       TWS_ACCOUNT: ${TWS_ACCOUNT:-}

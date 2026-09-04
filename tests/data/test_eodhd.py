@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 
 import pytest
+from nautilus_trader.model.instruments import IndexInstrument
 
 from trading_assistant.data import eodhd as eodhd_module
 from trading_assistant.data.config import InstrumentSpec
@@ -42,6 +43,21 @@ def _payload() -> bytes:
             },
         ],
     ).encode()
+
+
+def _index_spec() -> InstrumentSpec:
+    return InstrumentSpec(
+        symbol="VIX",
+        instrument_id="VIX.INDX",
+        data_symbol="VIX.INDX",
+        exchange="SMART",
+        primary_exchange="CBOE",
+        currency="USD",
+        price_precision=4,
+        price_increment="0.0100",
+        lot_size=1,
+        instrument_kind="index",
+    )
 
 
 def _route_payload(
@@ -157,6 +173,37 @@ def test_adapter_requires_token() -> None:
     """空 token 必须在发起网络请求前失败。"""
     with pytest.raises(ValueError, match="EODHD_API_TOKEN"):
         EodhdHistoricalBarSource(api_token=" ", request_timeout_seconds=30)  # noqa: S106
+
+
+def test_adapter_builds_index_instrument_without_requesting_corporate_actions() -> None:
+    requests: list[str] = []
+
+    def transport(url: str, _timeout: int) -> bytes:
+        requests.append(url)
+        return _payload()
+
+    source = EodhdHistoricalBarSource(
+        api_token="test-token",  # noqa: S106
+        request_timeout_seconds=30,
+        transport=transport,
+    )
+    asyncio.run(source.connect())
+
+    instruments = asyncio.run(source.request_instruments([_index_spec()]))
+    bars = asyncio.run(
+        source.request_daily_bars(
+            _index_spec(),
+            datetime(2026, 7, 1),
+            datetime(2026, 7, 31),
+        )
+    )
+
+    assert isinstance(instruments[0], IndexInstrument)
+    assert instruments[0].id.value == "VIX.INDX"
+    assert len(bars) == 2
+    assert requests
+    assert all("/eod/VIX.INDX?" in url for url in requests)
+    assert not any("/splits/" in url or "/div/" in url for url in requests)
 
 
 def test_adapter_validates_timeout_fields_and_requested_dates() -> None:

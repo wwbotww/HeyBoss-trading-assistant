@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -9,7 +10,18 @@ import pytest
 from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from trading_assistant.market_radar.macro import (
+    RiskAppetiteComponents,
+    RiskAppetitePoint,
+    RiskAppetiteSnapshot,
+)
+from trading_assistant.market_radar.membership import (
+    CurrentMarketMember,
+    CurrentMarketMembership,
+)
 from trading_assistant.market_radar.metrics import (
+    BreadthMetric,
+    CurrentBreadthSnapshot,
     MarketPriceMetrics,
     MetricValue,
     PriceCoverage,
@@ -52,6 +64,56 @@ def _snapshot(
     )
 
 
+def _membership() -> CurrentMarketMembership:
+    return CurrentMarketMembership(
+        source="test_current_members",
+        membership_date=date(2026, 8, 31),
+        members=(
+            CurrentMarketMember("AAPL", "AAPL.US", "AAPL.US"),
+            CurrentMarketMember("MSFT", "MSFT.US", "MSFT.US"),
+        ),
+    )
+
+
+def _breadth_snapshot(*, calculated_at: datetime = STARTED) -> CurrentBreadthSnapshot:
+    complete = BreadthMetric(0.5, "complete", 2, 2, 1, 50)
+    return CurrentBreadthSnapshot(
+        as_of_date=date(2026, 9, 1),
+        membership_date=date(2026, 8, 31),
+        membership_source="test_current_members",
+        calculated_at_utc=calculated_at,
+        b50=complete,
+        b200=replace(complete, history_required=200),
+        ad10=replace(complete, history_required=11),
+        nhnl=replace(complete, history_required=252),
+    )
+
+
+def _risk_snapshot(*, calculated_at: datetime = STARTED) -> RiskAppetiteSnapshot:
+    day = date(2026, 9, 1)
+    point = RiskAppetitePoint(day=day, score=0.6, credit_z=1, volatility_z=0)
+    return RiskAppetiteSnapshot(
+        as_of_date=day,
+        calculated_at_utc=calculated_at,
+        validity="complete",
+        observations=504,
+        required=504,
+        credit_source="etf_proxy",
+        price_source="eodhd_nt_catalog",
+        components=RiskAppetiteComponents(
+            day=day,
+            hyg_close=80,
+            lqd_close=100,
+            vix_close=20,
+            vix3m_close=22,
+            credit_log_change_20=0.01,
+            volatility_term_log=-0.09,
+        ),
+        current=point,
+        trajectory=(point,),
+    )
+
+
 def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> None:
     database_url = f"sqlite:///{tmp_path}/market-radar.db"
     repository = MarketRadarRepository(database_url)
@@ -84,7 +146,13 @@ def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> N
     repository.close()
 
     engine = create_engine(database_url)
-    assert inspect(engine).get_table_names() == ["price_snapshots", "sync_runs"]
+    assert inspect(engine).get_table_names() == [
+        "current_breadth_snapshots",
+        "current_market_members",
+        "price_snapshots",
+        "risk_appetite_snapshots",
+        "sync_runs",
+    ]
     engine.dispose()
 
 
@@ -294,3 +362,123 @@ def test_repository_rejects_unsupported_urls() -> None:
         MarketRadarRepository("postgresql://localhost/market")
     with pytest.raises(ValueError, match="in-memory"):
         MarketRadarRepository("sqlite:///:memory:", read_only=True)
+
+
+def test_breadth_membership_snapshot_and_completion_are_published_atomically(
+    tmp_path: Path,
+) -> None:
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/breadth.db")
+    repository.create_schema()
+    _start(repository, "breadth")
+    membership = _membership()
+    snapshot = _breadth_snapshot(calculated_at=STARTED + timedelta(seconds=30))
+
+    repository.publish_current_breadth_and_complete(
+        "breadth",
+        membership=membership,
+        snapshot=snapshot,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=2,
+        bars_fetched=1_000,
+        bars_written=1_000,
+    )
+
+    assert repository.latest_current_membership() == membership
+    assert repository.latest_current_breadth_snapshot() == snapshot
+    run = repository.get_sync_run("breadth")
+    assert run is not None
+    assert run.status == "COMPLETE"
+    repository.close()
+
+
+def test_failed_breadth_run_does_not_replace_last_complete_snapshot(tmp_path: Path) -> None:
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/breadth-failure.db")
+    repository.create_schema()
+    _start(repository, "complete")
+    membership = _membership()
+    snapshot = _breadth_snapshot()
+    repository.publish_current_breadth_and_complete(
+        "complete",
+        membership=membership,
+        snapshot=snapshot,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=2,
+        bars_fetched=1_000,
+        bars_written=1_000,
+    )
+    _start(repository, "failed")
+    repository.fail_sync_run(
+        "failed",
+        completed_at_utc=STARTED + timedelta(minutes=2),
+        error_summary="data_quality",
+    )
+
+    assert repository.latest_current_membership() == membership
+    assert repository.latest_current_breadth_snapshot() == snapshot
+    repository.close()
+
+
+def test_breadth_publication_rejects_mismatched_membership(tmp_path: Path) -> None:
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/breadth-invalid.db")
+    repository.create_schema()
+    _start(repository, "breadth")
+    with pytest.raises(ValueError, match="does not match"):
+        repository.publish_current_breadth_and_complete(
+            "breadth",
+            membership=replace(_membership(), source="other_source"),
+            snapshot=_breadth_snapshot(),
+            completed_at_utc=STARTED,
+            instruments_processed=2,
+            bars_fetched=0,
+            bars_written=0,
+        )
+    assert repository.get_sync_run("breadth").status == "RUNNING"  # type: ignore[union-attr]
+    assert repository.latest_current_breadth_snapshot() is None
+    repository.close()
+
+
+def test_risk_appetite_snapshot_and_completion_are_published_atomically(tmp_path: Path) -> None:
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/risk.db")
+    repository.create_schema()
+    _start(repository, "risk")
+    snapshot = _risk_snapshot(calculated_at=STARTED + timedelta(seconds=30))
+
+    repository.publish_risk_appetite_and_complete(
+        "risk",
+        snapshot=snapshot,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=4,
+        bars_fetched=4_000,
+        bars_written=4_000,
+    )
+
+    assert repository.latest_risk_appetite_snapshot() == snapshot
+    run = repository.get_sync_run("risk")
+    assert run is not None
+    assert run.status == "COMPLETE"
+    assert run.instruments_processed == 4
+    repository.close()
+
+
+def test_failed_risk_run_does_not_replace_last_complete_snapshot(tmp_path: Path) -> None:
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/risk-failure.db")
+    repository.create_schema()
+    _start(repository, "complete")
+    snapshot = _risk_snapshot()
+    repository.publish_risk_appetite_and_complete(
+        "complete",
+        snapshot=snapshot,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=4,
+        bars_fetched=4_000,
+        bars_written=4_000,
+    )
+    _start(repository, "failed")
+    repository.fail_sync_run(
+        "failed",
+        completed_at_utc=STARTED + timedelta(minutes=2),
+        error_summary="data_quality",
+    )
+
+    assert repository.latest_risk_appetite_snapshot() == snapshot
+    repository.close()

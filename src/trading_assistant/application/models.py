@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 Scalar = str | int | float | bool | None
@@ -15,6 +15,31 @@ SourceState = Literal[
     "unconfigured",
     "unobserved",
 ]
+RadarMetricValidity = Literal["complete", "insufficient_history", "unavailable"]
+BreadthMetricValidity = Literal["complete", "partial", "insufficient_coverage"]
+MarketBreadthValidity = Literal[
+    "complete",
+    "partial",
+    "stale",
+    "insufficient_coverage",
+    "unavailable",
+]
+RadarModuleState = Literal[
+    "complete",
+    "partial",
+    "stale",
+    "insufficient_history",
+    "insufficient_coverage",
+    "unavailable",
+]
+StockRadarSort = Literal[
+    "instrument",
+    "momentum",
+    "relative_momentum",
+    "volatility",
+    "drawdown",
+]
+SortDirection = Literal["asc", "desc"]
 
 
 class QuerySourceError(RuntimeError):
@@ -361,6 +386,143 @@ class DataQualityView:
     warning_count: int
     issues: tuple[QualityIssueView, ...]
     instruments: tuple[QualityInstrumentView, ...]
+
+
+@dataclass(frozen=True)
+class RadarMetricView:
+    """价格指标值及其所需历史边界。"""
+
+    value: float | None
+    validity: RadarMetricValidity
+    observations: int
+    required: int
+
+
+@dataclass(frozen=True)
+class RadarCoverageView:
+    """市场雷达指标的真实覆盖率。"""
+
+    eligible: int
+    observed: int
+    ratio: float
+
+
+@dataclass(frozen=True)
+class RadarFreshnessView:
+    """当前成员代理相对查询时点的新鲜度。"""
+
+    membership_age_days: int
+    stale_after_days: int
+
+
+@dataclass(frozen=True)
+class BreadthMetricView:
+    """当前宽度原始值、历史要求与真实成员覆盖。"""
+
+    value: float | None
+    validity: BreadthMetricValidity
+    coverage: RadarCoverageView
+    history_required: int
+
+
+@dataclass(frozen=True)
+class MarketBreadthView:
+    """一个已发布当前成员代理宽度快照的只读投影。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MarketBreadthValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    membership_date: date | None
+    membership_source: str | None
+    freshness: RadarFreshnessView | None
+    b50: BreadthMetricView | None
+    b200: BreadthMetricView | None
+    ad10: BreadthMetricView | None
+    nhnl: BreadthMetricView | None
+
+
+@dataclass(frozen=True)
+class RadarMarketView:
+    """市场价格型摘要。"""
+
+    spy_return_20: RadarMetricView
+    spy_distance_ma_200: RadarMetricView
+    rsp_spy_return_20: RadarMetricView
+
+
+@dataclass(frozen=True)
+class RadarModuleView:
+    """雷达总览中的一个能力状态。"""
+
+    module_id: str
+    label: str
+    state: RadarModuleState
+    detail: str
+
+
+@dataclass(frozen=True)
+class MarketRadarSummaryView:
+    """最新完整市场雷达价格快照摘要。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    coverage: RadarCoverageView | None
+    market: RadarMarketView | None
+    modules: tuple[RadarModuleView, ...]
+
+
+@dataclass(frozen=True)
+class SectorRadarView:
+    """单个板块的价格相对强弱。"""
+
+    sector_id: str
+    instrument_id: str
+    relative_strength_20: RadarMetricView
+    relative_strength_60: RadarMetricView
+
+
+@dataclass(frozen=True)
+class SectorRadarListView:
+    """最新完整快照中的板块集合。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    items: tuple[SectorRadarView, ...]
+
+
+@dataclass(frozen=True)
+class StockRadarView:
+    """单个 watchlist 标的的价格趋势和风险。"""
+
+    instrument_id: str
+    symbol: str
+    sector_id: str
+    momentum_126_21: RadarMetricView
+    sector_relative_momentum_126_21: RadarMetricView
+    distance_ma_200: RadarMetricView
+    realized_volatility_20: RadarMetricView
+    max_drawdown_126: RadarMetricView
+    atr_20_ratio: RadarMetricView
+
+
+@dataclass(frozen=True)
+class StockRadarPageView:
+    """支持服务端筛选、排序和分页的 watchlist 快照。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    items: tuple[StockRadarView, ...]
+    offset: int
+    limit: int
+    has_more: bool
 
 
 @dataclass(frozen=True)

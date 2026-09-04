@@ -16,9 +16,10 @@
 - 策略运行方式：每次 backtest/live 只允许一个活动策略；
 - 审批方式：Telegram manual 或配置为 auto；
 - 运行形态：本地 Python 或 Docker Compose；
-- Web：只读 Python Web API、Vue 3 七个一级页面、Compose 本机部署与响应式浏览器验收均已完成，具体设计见 `web-rebuild.md`。
+- Web：只读 Python Web API、Vue 3 八个一级页面、Compose 本机部署与响应式浏览器验收均已完成；市场雷达页面已接通价格和 SPY 当前持仓代理宽度快照，具体设计见 `web-rebuild.md` 与 `market-radar-implementation-plan.md`；
+- 市场风险偏好：HYG/LQD、VIX/VIX3M 已经同一 EODHD/NT Catalog 链路同步，并在独立市场数据库原子发布后端快照；当前尚未接入 Web API 或 Vue。
 
-当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、新闻采集、市场监控或大语言模型分析。
+当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、含实际利率横轴的完整宏观四象限、盈利/基本面/事件雷达、新闻采集或大语言模型分析。
 
 ## 技术事实
 
@@ -32,6 +33,7 @@
 | 业务存储 | SQLAlchemy 2.x + SQLite；live/backtest 数据库分离 |
 | 通知与审批 | python-telegram-bot |
 | Web | FastAPI 只读查询边界 + 独立 Vue 3/TypeScript/ECharts 前端；交易核心不得反向依赖 Web |
+| 市场雷达 | 可替换当前成员来源 + EODHD/NT Catalog + 独立 SQLite 原子快照；价格/当前宽度已由 Web 只读，风险偏好当前仅后端可用 |
 | 研究 | Jupyter + NT BacktestNode |
 | 编排 | Docker Compose |
 | 质量 | pytest、ruff、mypy strict、pre-commit |
@@ -63,6 +65,8 @@
 - splits/dividends 保存到固定 JSON sidecar，不维护 manifest、版本号或内容哈希；
 - EODHD 完整响应通过质量校验后替换规范序列；Catalog 与 sidecar 写入必须串行；
 - IBKR 与 EODHD Catalog 不得混写。
+- 市场雷达中的 HYG/LQD ETF 使用 NT `Equity`，VIX/VIX3M 使用 NT `IndexInstrument`；指数只用于分析，Catalog 中存在 Instrument 不代表具备交易资格；
+- 风险偏好计算只在四条正数、有限值序列的精确共同日期上对齐，不做前向填充；信用输入固定为 HYG/LQD ETF 代理，不能静默切换成 HY OAS；
 - 标的的 `first_trading_date` 和可选 `last_trading_date` 是同步、质量检查与回测预检共同使用的显式生命周期边界；不得以“缺失数据”代表尚未上市或已经退市；
 - FacDigger 与 HeyBoss 之间只有 `factors.parquet + manifest.json` FactorBatch 契约；HeyBoss 不加载 checkpoint、不复制特征处理，也不直接读取研究 predictions；
 - FactorBatch 必须先完整校验和显式映射，再转换为已注册的 NT `FactorScoreData` 写入同一 ParquetDataCatalog；内部 DataType 只以 CustomData 类身份路由，不附加 Catalog 查询 metadata，以保证 NT 1.230 回放与历史请求使用同一 Topic；Actor 不得直接读交付文件；

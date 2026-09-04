@@ -9,6 +9,8 @@ from typing import Any, Literal, cast
 
 import yaml
 
+InstrumentKind = Literal["equity", "index"]
+
 
 @dataclass(frozen=True)
 class InstrumentSpec:
@@ -27,6 +29,7 @@ class InstrumentSpec:
     first_trading_date: date | None = None
     last_trading_date: date | None = None
     factor_security_id: str | None = None
+    instrument_kind: InstrumentKind = "equity"
 
     @property
     def canonical_id(self) -> str:
@@ -160,6 +163,10 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
                     if value.get("factor_security_id") is None
                     else str(value["factor_security_id"])
                 ),
+                instrument_kind=cast(
+                    InstrumentKind,
+                    str(value.get("instrument_kind", "equity")),
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, KeyError):
@@ -191,6 +198,8 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
             )
         if instrument.factor_security_id is not None and not instrument.factor_security_id.strip():
             raise ValueError(f"instruments[{index}].factor_security_id 不得为空: {path}")
+        if instrument.instrument_kind != "equity":
+            raise ValueError(f"instruments[{index}].instrument_kind 只允许 equity: {path}")
 
     instrument_ids = [instrument.instrument_id for instrument in instruments]
     if len(instrument_ids) != len(set(instrument_ids)):

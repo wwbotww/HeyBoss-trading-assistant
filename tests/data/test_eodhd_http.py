@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from http.client import HTTPMessage
+from http.client import HTTPMessage, IncompleteRead
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -77,6 +77,19 @@ def test_download_redacts_connection_failure(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(eodhd_http, "urlopen", fail)
     with pytest.raises(ConnectionError, match="TimeoutError") as exc_info:
+        eodhd_http.download("https://eodhd.com/api?api_token=secret", 30)
+    assert "secret" not in str(exc_info.value)
+
+
+def test_download_converts_truncated_response_into_retryable_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TruncatedResponse(_FakeResponse):
+        def read(self) -> bytes:
+            raise IncompleteRead(b"partial", 10)
+
+    monkeypatch.setattr(eodhd_http, "urlopen", lambda *_args, **_kwargs: TruncatedResponse())
+    with pytest.raises(ConnectionError, match="IncompleteRead") as exc_info:
         eodhd_http.download("https://eodhd.com/api?api_token=secret", 30)
     assert "secret" not in str(exc_info.value)
 

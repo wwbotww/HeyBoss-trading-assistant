@@ -99,6 +99,53 @@ def test_market_radar_does_not_import_trading_control_paths() -> None:
         )
 
 
+def test_trading_control_paths_do_not_import_market_radar() -> None:
+    """市场雷达必须保持可删除, 交易核心不得反向依赖它。"""
+    core_packages = (
+        "signals",
+        "strategies",
+        "execution",
+        "risk",
+        "backtest",
+        "live",
+        "notify",
+    )
+    for package in core_packages:
+        for source_path in (PACKAGE_ROOT / package).glob("*.py"):
+            assert not any(
+                imported.startswith("trading_assistant.market_radar")
+                for imported in _imported_modules(source_path)
+            )
+
+
+def test_market_membership_vendor_adapter_stays_at_composition_boundary() -> None:
+    """成员计算和存储只依赖中立契约, 具体来源只能在 CLI 装配。"""
+    radar_root = PACKAGE_ROOT / "market_radar"
+    source_consumers = ("metrics.py", "prices.py", "service.py", "storage.py")
+    for filename in source_consumers:
+        imports = _imported_modules(radar_root / filename)
+        assert "trading_assistant.market_radar.state_street" not in imports
+        assert "openpyxl" not in imports
+
+    membership_imports = _imported_modules(radar_root / "membership.py")
+    assert "openpyxl" not in membership_imports
+    breadth_cli = PROJECT_ROOT / "scripts" / "sync_market_breadth.py"
+    assert "trading_assistant.market_radar.state_street" in _imported_modules(breadth_cli)
+
+
+def test_market_radar_http_query_path_has_no_raw_data_or_provider_dependencies() -> None:
+    """宽度 HTTP 查询只能读取已发布数据库快照。"""
+    forbidden = {
+        "trading_assistant.data.catalog",
+        "trading_assistant.market_radar.service",
+        "trading_assistant.market_radar.state_street",
+    }
+    query_service = PACKAGE_ROOT / "application" / "market_radar.py"
+    route = PACKAGE_ROOT / "web_api" / "routes" / "market_radar.py"
+    assert _imported_modules(query_service).isdisjoint(forbidden)
+    assert _imported_modules(route).isdisjoint(forbidden)
+
+
 def test_legacy_dashboard_is_absent() -> None:
     """新 API 不得重新引入旧 Streamlit 展示层。"""
     assert not (PACKAGE_ROOT / "dashboard").exists()
@@ -140,6 +187,7 @@ def test_web_compose_services_are_isolated_and_read_only() -> None:
         "CATALOG_PATH",
         "DATA_QUALITY_REPORT_ROOT",
         "LIVE_DATABASE_URL",
+        "MARKET_RADAR_DATABASE_URL",
         "PORTFOLIO_SNAPSHOT_STALE_SECONDS",
         "REPORT_ROOT",
         "TWS_ACCOUNT",

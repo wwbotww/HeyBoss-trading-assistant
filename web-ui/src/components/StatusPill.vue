@@ -15,16 +15,27 @@ const props = withDefaults(
 
 const tone = computed(() => {
   const status = props.status.toLowerCase()
-  if (['available', 'ok', 'filled', 'approved', 'accepted', 'executed'].includes(status)) {
+  if (
+    ['available', 'ok', 'filled', 'approved', 'accepted', 'executed', 'complete'].includes(status)
+  ) {
     return 'positive'
   }
   if (['failed', 'rejected', 'denied', 'invalid', 'cancelled'].includes(status)) {
     return 'negative'
   }
   if (
-    ['new', 'pending', 'pending_approval', 'submitted', 'planned', 'partially_filled'].includes(
-      status,
-    )
+    [
+      'new',
+      'pending',
+      'pending_approval',
+      'submitted',
+      'planned',
+      'partially_filled',
+      'partial',
+      'stale',
+      'insufficient_history',
+      'insufficient_coverage',
+    ].includes(status)
   ) {
     return 'warning'
   }

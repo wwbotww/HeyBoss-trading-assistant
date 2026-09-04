@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from trading_assistant.application.models import QuerySourceError, ResourceNotFoundError
 from trading_assistant.web_api.config import WebApiSettings
-from trading_assistant.web_api.routes import portfolio, research, system, trading
+from trading_assistant.web_api.routes import market_radar, portfolio, research, system, trading
 from trading_assistant.web_api.schemas import ProblemResponse
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ def create_app(settings: WebApiSettings | None = None) -> FastAPI:
     app.include_router(portfolio.router)
     app.include_router(trading.router)
     app.include_router(research.router)
+    app.include_router(market_radar.router)
 
     @app.exception_handler(QuerySourceError)
     async def query_source_error(

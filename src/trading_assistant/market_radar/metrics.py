@@ -11,9 +11,14 @@ from itertools import pairwise
 from typing import Any, Literal, cast
 
 from trading_assistant.market_radar.config import MarketRadarConfig
+from trading_assistant.market_radar.membership import CurrentMarketMembership
 
 MetricValidity = Literal["complete", "insufficient_history", "unavailable"]
 _METRIC_VALIDITIES = frozenset({"complete", "insufficient_history", "unavailable"})
+BreadthValidity = Literal["complete", "partial", "insufficient_coverage"]
+_BREADTH_VALIDITIES = frozenset({"complete", "partial", "insufficient_coverage"})
+_COMPLETE_COVERAGE = 0.95
+_PARTIAL_COVERAGE = 0.90
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,119 @@ class PriceRadarSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class BreadthMetric:
+    """宽度原始值及该指标真实成员覆盖。"""
+
+    value: float | None
+    validity: BreadthValidity
+    eligible: int
+    observed: int
+    ratio: float
+    history_required: int
+
+    def __post_init__(self) -> None:
+        if self.eligible < 1 or not 0 <= self.observed <= self.eligible:
+            raise ValueError("breadth metric coverage counts are invalid")
+        if self.history_required < 2:
+            raise ValueError("breadth metric history requirement is invalid")
+        expected_ratio = self.observed / self.eligible
+        if not math.isfinite(self.ratio) or not math.isclose(
+            self.ratio,
+            expected_ratio,
+            rel_tol=0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("breadth metric coverage ratio does not match its counts")
+        if self.validity == "complete":
+            valid_range = self.ratio >= _COMPLETE_COVERAGE
+        elif self.validity == "partial":
+            valid_range = _PARTIAL_COVERAGE <= self.ratio < _COMPLETE_COVERAGE
+        else:
+            valid_range = self.ratio < _PARTIAL_COVERAGE
+        if not valid_range:
+            raise ValueError("breadth metric validity does not match its coverage")
+        if self.validity == "insufficient_coverage":
+            if self.value is not None:
+                raise ValueError("insufficient breadth coverage must not expose a value")
+        elif self.value is None or not math.isfinite(self.value) or not -1 <= self.value <= 1:
+            raise ValueError("available breadth metric requires a finite value within [-1, 1]")
+
+
+@dataclass(frozen=True)
+class CurrentBreadthSnapshot:
+    """使用一个当前成员代理计算的市场宽度横截面。"""
+
+    as_of_date: date
+    membership_date: date
+    membership_source: str
+    calculated_at_utc: datetime
+    b50: BreadthMetric
+    b200: BreadthMetric
+    ad10: BreadthMetric
+    nhnl: BreadthMetric
+
+    def __post_init__(self) -> None:
+        if self.membership_date > self.as_of_date:
+            raise ValueError("breadth membership date cannot be later than price date")
+        if not self.membership_source or self.membership_source != self.membership_source.strip():
+            raise ValueError("breadth membership source must be non-empty and trimmed")
+        if self.calculated_at_utc.tzinfo is None or self.calculated_at_utc.utcoffset() is None:
+            raise ValueError("breadth calculated_at_utc must be timezone-aware")
+        eligible = {metric.eligible for metric in (self.b50, self.b200, self.ad10, self.nhnl)}
+        if len(eligible) != 1:
+            raise ValueError("breadth metrics must use the same eligible membership")
+
+    @property
+    def member_count(self) -> int:
+        """返回各指标共用的当前成员分母。"""
+        return self.b50.eligible
+
+    def to_payload(self) -> dict[str, Any]:
+        """转换成无版本号的稳定 JSON 结构。"""
+        return {
+            "as_of_date": self.as_of_date.isoformat(),
+            "membership_date": self.membership_date.isoformat(),
+            "membership_source": self.membership_source,
+            "calculated_at_utc": self.calculated_at_utc.astimezone(UTC).isoformat(),
+            "b50": asdict(self.b50),
+            "b200": asdict(self.b200),
+            "ad10": asdict(self.ad10),
+            "nhnl": asdict(self.nhnl),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> CurrentBreadthSnapshot:
+        """严格恢复数据库中的当前宽度快照。"""
+        root = _object(payload, name="breadth snapshot")
+        _exact_keys(
+            root,
+            {
+                "as_of_date",
+                "membership_date",
+                "membership_source",
+                "calculated_at_utc",
+                "b50",
+                "b200",
+                "ad10",
+                "nhnl",
+            },
+            name="breadth snapshot",
+        )
+        return cls(
+            as_of_date=_date(root["as_of_date"], name="as_of_date"),
+            membership_date=_date(root["membership_date"], name="membership_date"),
+            membership_source=_text(root["membership_source"], name="membership_source"),
+            calculated_at_utc=_datetime(
+                root["calculated_at_utc"], name="calculated_at_utc"
+            ).astimezone(UTC),
+            b50=_breadth_metric(root["b50"], name="b50"),
+            b200=_breadth_metric(root["b200"], name="b200"),
+            ad10=_breadth_metric(root["ad10"], name="ad10"),
+            nhnl=_breadth_metric(root["nhnl"], name="nhnl"),
+        )
+
+
 def _object(value: object, *, name: str) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{name} must be an object")
@@ -232,6 +350,27 @@ def _metric(value: object, *, name: str = "metric") -> MetricValue:
         validity=cast(MetricValidity, raw_validity),
         observations=_integer(row["observations"], name=f"{name}.observations"),
         required=_integer(row["required"], name=f"{name}.required"),
+    )
+
+
+def _breadth_metric(value: object, *, name: str) -> BreadthMetric:
+    row = _object(value, name=name)
+    _exact_keys(
+        row,
+        {"value", "validity", "eligible", "observed", "ratio", "history_required"},
+        name=name,
+    )
+    raw_validity = row["validity"]
+    if not isinstance(raw_validity, str) or raw_validity not in _BREADTH_VALIDITIES:
+        raise ValueError(f"{name}.validity is invalid")
+    raw_value = row["value"]
+    return BreadthMetric(
+        value=None if raw_value is None else _number(raw_value, name=f"{name}.value"),
+        validity=cast(BreadthValidity, raw_validity),
+        eligible=_integer(row["eligible"], name=f"{name}.eligible"),
+        observed=_integer(row["observed"], name=f"{name}.observed"),
+        ratio=_number(row["ratio"], name=f"{name}.ratio"),
+        history_required=_integer(row["history_required"], name=f"{name}.history_required"),
     )
 
 
@@ -552,4 +691,152 @@ def calculate_price_snapshot(
         market=market,
         sectors=tuple(sector_results),
         stocks=tuple(stocks),
+    )
+
+
+def _breadth_result_from_value(
+    value: float | None,
+    *,
+    eligible: int,
+    observed: int,
+    history_required: int,
+) -> BreadthMetric:
+    ratio = observed / eligible
+    if ratio >= _COMPLETE_COVERAGE:
+        validity: BreadthValidity = "complete"
+    elif ratio >= _PARTIAL_COVERAGE:
+        validity = "partial"
+    else:
+        validity = "insufficient_coverage"
+    return BreadthMetric(
+        value=value if validity != "insufficient_coverage" else None,
+        validity=validity,
+        eligible=eligible,
+        observed=observed,
+        ratio=ratio,
+        history_required=history_required,
+    )
+
+
+def _breadth_result(
+    values: Sequence[float],
+    *,
+    eligible: int,
+    history_required: int,
+) -> BreadthMetric:
+    return _breadth_result_from_value(
+        statistics.fmean(values) if values else None,
+        eligible=eligible,
+        observed=len(values),
+        history_required=history_required,
+    )
+
+
+def _current_series(
+    bars: Sequence[PriceBar],
+    *,
+    as_of_date: date,
+    required: int,
+) -> tuple[PriceBar, ...] | None:
+    selected = tuple(bar for bar in bars if bar.day <= as_of_date)
+    if len(selected) < required or selected[-1].day != as_of_date:
+        return None
+    return selected[-required:]
+
+
+def _ema(values: Sequence[float], *, span: int) -> float:
+    if not values:
+        raise ValueError("EMA requires at least one observation")
+    alpha = 2 / (span + 1)
+    result = values[0]
+    for value in values[1:]:
+        result = alpha * value + (1 - alpha) * result
+    return result
+
+
+def calculate_current_breadth_snapshot(
+    membership: CurrentMarketMembership,
+    bars_by_instrument: Mapping[str, Sequence[PriceBar]],
+    benchmark_bars: Sequence[PriceBar],
+    *,
+    calculated_at_utc: datetime,
+) -> CurrentBreadthSnapshot:
+    """按 SPY 最新日期计算当前成员横截面, 不回填历史成员关系。"""
+    if calculated_at_utc.tzinfo is None or calculated_at_utc.utcoffset() is None:
+        raise ValueError("calculated_at_utc must be timezone-aware")
+    benchmark = _validated_bars(benchmark_bars)
+    if not benchmark:
+        raise ValueError("benchmark INTERNAL history is required for a breadth snapshot")
+    as_of_date = benchmark[-1].day
+    if membership.membership_date > as_of_date:
+        raise ValueError("market membership date cannot be later than the benchmark price date")
+    if (as_of_date - membership.membership_date).days > 7:
+        raise ValueError("market membership snapshot is stale")
+
+    member_ids = tuple(member.instrument_id for member in membership.members)
+    unexpected = set(bars_by_instrument) - set(member_ids)
+    if unexpected:
+        raise ValueError("breadth input contains instruments outside the current membership")
+    series = {
+        instrument_id: _validated_bars(bars_by_instrument.get(instrument_id, ()))
+        for instrument_id in member_ids
+    }
+    eligible = len(member_ids)
+
+    b50_values: list[float] = []
+    b200_values: list[float] = []
+    nhnl_values: list[float] = []
+    for bars in series.values():
+        selected_50 = _current_series(bars, as_of_date=as_of_date, required=50)
+        if selected_50 is not None:
+            b50_values.append(
+                float(selected_50[-1].close > statistics.fmean(bar.close for bar in selected_50))
+            )
+        selected_200 = _current_series(bars, as_of_date=as_of_date, required=200)
+        if selected_200 is not None:
+            b200_values.append(
+                float(selected_200[-1].close > statistics.fmean(bar.close for bar in selected_200))
+            )
+        selected_252 = _current_series(bars, as_of_date=as_of_date, required=252)
+        if selected_252 is not None:
+            is_new_high = selected_252[-1].high >= max(bar.high for bar in selected_252)
+            is_new_low = selected_252[-1].low <= min(bar.low for bar in selected_252)
+            nhnl_values.append(float(int(is_new_high) - int(is_new_low)))
+
+    ad_member_changes: list[tuple[float, ...]] = []
+    ad_dates = tuple(bar.day for bar in benchmark[-11:]) if len(benchmark) >= 11 else ()
+    if ad_dates:
+        for bars in series.values():
+            close_by_date = {bar.day: bar.close for bar in bars if bar.day <= as_of_date}
+            if all(day in close_by_date for day in ad_dates):
+                ad_member_changes.append(
+                    tuple(
+                        float(
+                            (close_by_date[current] > close_by_date[previous])
+                            - (close_by_date[current] < close_by_date[previous])
+                        )
+                        for previous, current in pairwise(ad_dates)
+                    )
+                )
+    ad_value: float | None = None
+    if ad_member_changes:
+        daily_ratios = tuple(
+            statistics.fmean(changes[index] for changes in ad_member_changes) for index in range(10)
+        )
+        ad_value = _ema(daily_ratios, span=10)
+
+    return CurrentBreadthSnapshot(
+        as_of_date=as_of_date,
+        membership_date=membership.membership_date,
+        membership_source=membership.source,
+        calculated_at_utc=calculated_at_utc.astimezone(UTC),
+        b50=_breadth_result(b50_values, eligible=eligible, history_required=50),
+        b200=_breadth_result(b200_values, eligible=eligible, history_required=200),
+        ad10=_breadth_result_from_value(
+            ad_value,
+            eligible=eligible,
+            observed=len(ad_member_changes),
+            history_required=11,
+        ),
+        nhnl=_breadth_result(nhnl_values, eligible=eligible, history_required=252),
     )

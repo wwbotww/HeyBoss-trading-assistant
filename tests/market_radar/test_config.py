@@ -44,8 +44,19 @@ def test_project_config_loads_price_universe_and_probe_contract() -> None:
         "JNJ.US",
         "TSLA.US",
     )
-    assert len(config.monitor_instruments) == 15
+    assert len(config.monitor_instruments) == 17
     assert len(config.price_instrument_ids) == 25
+    assert config.vix == "VIX.INDX"
+    assert config.vix3m == "VIX3M.INDX"
+    assert config.macro_price_instrument_ids == (
+        "HYG.US",
+        "LQD.US",
+        "VIX.INDX",
+        "VIX3M.INDX",
+    )
+    kinds = {spec.instrument_id: spec.instrument_kind for spec in config.monitor_instruments}
+    assert kinds["VIX.INDX"] == "index"
+    assert kinds["VIX3M.INDX"] == "index"
     assert dict(config.watchlist_sectors) == {
         "AAPL.US": "information_technology",
         "MSFT.US": "information_technology",
@@ -60,8 +71,6 @@ def test_project_config_loads_price_universe_and_probe_contract() -> None:
     }
     assert config.calendar_symbols == ("AAPL.US", "MSFT.US")
     assert config.fundamentals_symbols == ("AAPL.US", "JPM.US")
-    assert config.vix_candidates == ("VIX.INDX",)
-    assert config.vix3m_candidates == ("VIX3M.INDX",)
 
 
 def _extra_root(value: dict[str, Any]) -> None:
@@ -77,7 +86,15 @@ def _missing_probe_field(value: dict[str, Any]) -> None:
 
 
 def _missing_volatility_field(value: dict[str, Any]) -> None:
-    value["probe"]["volatility_candidates"].pop("vix3m")
+    value["market"]["volatility"].pop("vix3m")
+
+
+def _invalid_volatility_kind(value: dict[str, Any]) -> None:
+    value["monitor_instruments"][-1]["instrument_kind"] = "equity"
+
+
+def _invalid_monitor_kind(value: dict[str, Any]) -> None:
+    value["monitor_instruments"][0]["instrument_kind"] = "fund"
 
 
 def _invalid_benchmark(value: dict[str, Any]) -> None:
@@ -126,7 +143,9 @@ def _invalid_watchlist_sector(value: dict[str, Any]) -> None:
         (_extra_root, "root"),
         (_extra_market, "market"),
         (_missing_probe_field, "probe"),
-        (_missing_volatility_field, "volatility_candidates"),
+        (_missing_volatility_field, "volatility"),
+        (_invalid_volatility_kind, "index"),
+        (_invalid_monitor_kind, "equity 或 index"),
         (_invalid_benchmark, "市场后缀"),
         (_benchmark_with_space, "空白"),
         (_empty_watchlist, "非空列表"),

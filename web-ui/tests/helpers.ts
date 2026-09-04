@@ -16,6 +16,7 @@ const routes: readonly RouteRecordRaw[] = [
   { path: '/activity', component: EmptyRoute },
   { path: '/orders', component: EmptyRoute },
   { path: '/strategy', component: EmptyRoute },
+  { path: '/market-radar', component: EmptyRoute },
   { path: '/backtests', component: EmptyRoute },
   { path: '/system', component: EmptyRoute },
 ]
