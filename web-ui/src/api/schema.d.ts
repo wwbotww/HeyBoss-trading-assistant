@@ -264,6 +264,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/market-radar/earnings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Earnings
+         * @description 返回最近完整运行发布的统一盈利修正快照。
+         */
+        get: operations["getMarketRadarEarnings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/market-radar/macro": {
         parameters: {
             query?: never;
@@ -770,6 +790,70 @@ export interface components {
              */
             timestamp_utc: string;
         };
+        /** EarningsFreshnessResponse */
+        EarningsFreshnessResponse: {
+            /** Snapshot Age Days */
+            snapshot_age_days: number;
+            /** Stale After Days */
+            stale_after_days: number;
+        };
+        /** EarningsMembershipResponse */
+        EarningsMembershipResponse: {
+            /** Classification Coverage Ratio */
+            classification_coverage_ratio: number;
+            /** Classification Record Count */
+            classification_record_count: number;
+            /** Classification Source */
+            classification_source: string;
+            /**
+             * Classification Validity
+             * @enum {string}
+             */
+            classification_validity: "complete" | "partial" | "unavailable";
+            /** Classified Member Count */
+            classified_member_count: number;
+            /** Member Count */
+            member_count: number;
+            /**
+             * Membership Date
+             * Format: date
+             */
+            membership_date: string;
+            /** Membership Source */
+            membership_source: string;
+            /** Unclassified Member Count */
+            unclassified_member_count: number;
+            /** Unused Classification Count */
+            unused_classification_count: number;
+        };
+        /** EarningsRevisionAggregateResponse */
+        EarningsRevisionAggregateResponse: {
+            /** Breadth */
+            breadth: number | null;
+            /** Coverage Ratio */
+            coverage_ratio: number;
+            /** Downward */
+            downward: number;
+            /** Eligible */
+            eligible: number;
+            /** Magnitude Observed */
+            magnitude_observed: number;
+            /** Median Magnitude */
+            median_magnitude: number | null;
+            /** Non Positive Or Near Zero */
+            non_positive_or_near_zero: number;
+            /** Observed */
+            observed: number;
+            /** Unchanged */
+            unchanged: number;
+            /** Upward */
+            upward: number;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "partial" | "unavailable";
+        };
         /** FactorScoreResponse */
         FactorScoreResponse: {
             /** Canonical Id */
@@ -1036,6 +1120,36 @@ export interface components {
              * @enum {string}
              */
             validity: "complete" | "partial" | "stale" | "insufficient_coverage" | "unavailable";
+        };
+        /** MarketEarningsResponse */
+        MarketEarningsResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            freshness: components["schemas"]["EarningsFreshnessResponse"] | null;
+            market: components["schemas"]["EarningsRevisionAggregateResponse"] | null;
+            membership: components["schemas"]["EarningsMembershipResponse"] | null;
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /** Sectors */
+            sectors: components["schemas"]["SectorEarningsRevisionResponse"][];
+            /** Source */
+            source: string | null;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "partial" | "stale" | "unavailable";
+            watchlist: components["schemas"]["EarningsRevisionAggregateResponse"] | null;
         };
         /** MarketRadarSummaryResponse */
         MarketRadarSummaryResponse: {
@@ -1314,6 +1428,12 @@ export interface components {
             rows: {
                 [key: string]: string | number | boolean | null;
             }[];
+        };
+        /** SectorEarningsRevisionResponse */
+        SectorEarningsRevisionResponse: {
+            revisions: components["schemas"]["EarningsRevisionAggregateResponse"];
+            /** Sector Id */
+            sector_id: string;
         };
         /** SectorRadarListResponse */
         SectorRadarListResponse: {
@@ -2175,6 +2295,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketBreadthResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarEarnings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketEarningsResponse"];
                 };
             };
             /** @description 查询对象不存在 */

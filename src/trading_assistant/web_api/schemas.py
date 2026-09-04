@@ -9,9 +9,11 @@ from pydantic import BaseModel, ConfigDict
 
 from trading_assistant.application.models import (
     BreadthMetricValidity,
+    EarningsRevisionValidity,
     MacroRegimeCode,
     MacroRegimeValidity,
     MarketBreadthValidity,
+    MarketEarningsValidity,
     RadarMetricValidity,
     RadarModuleState,
     Scalar,
@@ -425,6 +427,57 @@ class MacroRegimeResponse(ApiSchema):
     current: MacroRegimePointResponse | None
     trajectory: list[MacroRegimePointResponse]
     duration_observations: int
+
+
+class EarningsFreshnessResponse(ApiSchema):
+    snapshot_age_days: int
+    stale_after_days: int
+
+
+class EarningsRevisionAggregateResponse(ApiSchema):
+    validity: EarningsRevisionValidity
+    eligible: int
+    observed: int
+    coverage_ratio: float
+    upward: int
+    downward: int
+    unchanged: int
+    breadth: float | None
+    magnitude_observed: int
+    non_positive_or_near_zero: int
+    median_magnitude: float | None
+
+
+class EarningsMembershipResponse(ApiSchema):
+    membership_source: str
+    membership_date: date
+    member_count: int
+    classification_source: str
+    classification_record_count: int
+    classified_member_count: int
+    unclassified_member_count: int
+    unused_classification_count: int
+    classification_validity: EarningsRevisionValidity
+    classification_coverage_ratio: float
+
+
+class SectorEarningsRevisionResponse(ApiSchema):
+    sector_id: str
+    revisions: EarningsRevisionAggregateResponse
+
+
+class MarketEarningsResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MarketEarningsValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    source: str | None
+    freshness: EarningsFreshnessResponse | None
+    membership: EarningsMembershipResponse | None
+    watchlist: EarningsRevisionAggregateResponse | None
+    market: EarningsRevisionAggregateResponse | None
+    sectors: list[SectorEarningsRevisionResponse]
 
 
 class RadarMarketResponse(ApiSchema):

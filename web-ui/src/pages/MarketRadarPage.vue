@@ -13,6 +13,7 @@ import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
   marketRadarBreadthQuery,
+  marketRadarEarningsQuery,
   marketRadarMacroQuery,
   marketRadarSectorQuery,
   marketRadarSectorsQuery,
@@ -20,9 +21,15 @@ import {
   marketRadarStocksQuery,
   marketRadarSummaryQuery,
 } from '../api/queries'
-import type { BreadthMetric, RadarMetric, StockRadarQuery } from '../api/types'
+import type {
+  BreadthMetric,
+  EarningsRevisionAggregate,
+  RadarMetric,
+  StockRadarQuery,
+} from '../api/types'
 import DataState from '../components/DataState.vue'
 import DataTable from '../components/DataTable.vue'
+import EarningsRevisionCard from '../components/EarningsRevisionCard.vue'
 import MacroRegimeChart from '../components/MacroRegimeChart.vue'
 import PaginationControls from '../components/PaginationControls.vue'
 import RadarMetricValue from '../components/RadarMetricValue.vue'
@@ -109,6 +116,7 @@ const stockParams = computed<StockRadarQuery>(() => {
 
 const summary = useQuery(marketRadarSummaryQuery())
 const breadth = useQuery(marketRadarBreadthQuery())
+const earnings = useQuery(marketRadarEarningsQuery())
 const macro = useQuery(marketRadarMacroQuery())
 const sectors = useQuery(marketRadarSectorsQuery())
 const stocks = useQuery(computed(() => marketRadarStocksQuery(stockParams.value)))
@@ -159,6 +167,9 @@ const breadthMetrics = computed<
     metric: breadth.data.value?.nhnl ?? null,
   },
 ])
+const selectedSectorEarnings = computed(() =>
+  earnings.data.value?.sectors.find((item) => item.sector_id === selectedSectorId.value),
+)
 
 function sectorName(sectorId: string): string {
   return sectorLabels[sectorId] ?? sectorId.replaceAll('_', ' ')
@@ -181,6 +192,17 @@ function breadthSourceLabel(source: string | null): string {
     return '—'
   }
   return source === 'state_street_spy_holdings' ? 'State Street SPY 官方持仓' : source
+}
+
+function earningsSourceLabel(source: string | null): string {
+  if (!source) {
+    return '—'
+  }
+  return source === 'eodhd_calendar' ? 'EODHD Calendar Trends' : source
+}
+
+function sectorEarnings(sectorId: string): EarningsRevisionAggregate | null {
+  return earnings.data.value?.sectors.find((item) => item.sector_id === sectorId)?.revisions ?? null
 }
 
 function metricCellTone(metric: RadarMetric): string {
@@ -285,6 +307,10 @@ async function retryMacro(): Promise<void> {
   await macro.refetch()
 }
 
+async function retryEarnings(): Promise<void> {
+  await earnings.refetch()
+}
+
 async function retrySectors(): Promise<void> {
   await sectors.refetch()
 }
@@ -299,7 +325,7 @@ async function retryStocks(): Promise<void> {
     <div class="page-intro">
       <div>
         <h1>市场雷达</h1>
-        <p>读取最近一次原子发布的价格、宽度与宏观快照，观察市场结构；不生成交易信号。</p>
+        <p>读取最近一次原子发布的价格、宽度、宏观与盈利快照，观察市场结构；不生成交易信号。</p>
       </div>
       <StatusPill
         v-if="summary.data.value"
@@ -639,6 +665,122 @@ async function retryStocks(): Promise<void> {
             </p>
           </template>
         </section>
+
+        <section class="earnings-section" aria-labelledby="earnings-title">
+          <header class="earnings-header">
+            <div>
+              <p class="eyebrow">Earnings revision pulse</p>
+              <h3 id="earnings-title">盈利预期脉冲</h3>
+              <p>
+                比较 FY1 当前一致预期与 30
+                日前值；宽度描述上调和下调的横截面差异，幅度仅使用正且非近零的 EPS 基准。
+              </p>
+            </div>
+            <StatusPill
+              v-if="earnings.data.value"
+              :status="earnings.data.value.validity"
+              :label="moduleStateLabel(earnings.data.value.validity)"
+            />
+          </header>
+
+          <DataState v-if="earnings.isPending.value" state="loading" />
+          <DataState
+            v-else-if="earnings.isError.value"
+            state="error"
+            :detail="earnings.error.value?.message"
+            retry-label="重新读取盈利修正"
+            @retry="retryEarnings"
+          />
+          <DataState
+            v-else-if="earnings.data.value?.source_state !== 'available'"
+            :state="earnings.data.value?.source_state || 'empty'"
+            title="盈利修正快照不可用"
+            detail="先运行盈利离线同步；页面不会连接 EODHD、读取原始 Trends 或现场计算聚合。"
+          />
+          <template
+            v-else-if="
+              earnings.data.value &&
+              earnings.data.value.market &&
+              earnings.data.value.watchlist &&
+              earnings.data.value.membership
+            "
+          >
+            <div class="earnings-meta">
+              <div>
+                <span>数据来源</span>
+                <strong>{{ earningsSourceLabel(earnings.data.value.source) }}</strong>
+              </div>
+              <div>
+                <span>盈利快照日期</span>
+                <strong class="tabular">{{ earnings.data.value.as_of_date || '—' }}</strong>
+              </div>
+              <div>
+                <span>快照新鲜度</span>
+                <strong v-if="earnings.data.value.freshness" class="tabular">
+                  {{ earnings.data.value.freshness.snapshot_age_days }} 天 / 阈值
+                  {{ earnings.data.value.freshness.stale_after_days }} 天
+                </strong>
+                <strong v-else>—</strong>
+              </div>
+              <div>
+                <span>市场成员</span>
+                <strong class="tabular">
+                  {{ earnings.data.value.membership.member_count }} ·
+                  {{ earnings.data.value.membership.membership_date }}
+                </strong>
+              </div>
+              <div>
+                <span>行业分类覆盖</span>
+                <strong class="tabular">
+                  {{ earnings.data.value.membership.classified_member_count }} /
+                  {{ earnings.data.value.membership.member_count }} ·
+                  {{ formatPercent(earnings.data.value.membership.classification_coverage_ratio) }}
+                </strong>
+              </div>
+              <div>
+                <span>计算时间</span>
+                <strong>{{ formatDateTime(earnings.data.value.calculated_at_utc) }}</strong>
+              </div>
+            </div>
+
+            <div class="earnings-grid">
+              <EarningsRevisionCard
+                title="当前市场"
+                description="当前指数成员横截面"
+                :aggregate="earnings.data.value.market"
+                :status-label="moduleStateLabel(earnings.data.value.market.validity)"
+                featured
+              />
+              <EarningsRevisionCard
+                title="策略 Watchlist"
+                description="配置中的 10 只监测标的"
+                :aggregate="earnings.data.value.watchlist"
+                :status-label="moduleStateLabel(earnings.data.value.watchlist.validity)"
+              />
+            </div>
+
+            <div class="earnings-footnote">
+              <p>
+                成员来源 {{ earnings.data.value.membership.membership_source }}；行业分类来源
+                {{
+                  earnings.data.value.membership.classification_source
+                }}。当前只展示单日聚合，不把采集历史解释为 PIT 分析师预期序列。
+              </p>
+              <p v-if="earnings.data.value.membership.classification_validity !== 'complete'">
+                {{ earnings.data.value.membership.unclassified_member_count }} 个成员未分类，另有
+                {{ earnings.data.value.membership.unused_classification_count }}
+                条供应商分类记录未被当前成员使用。
+              </p>
+            </div>
+            <p v-if="earnings.data.value.validity === 'stale'" class="earnings-notice">
+              盈利修正快照已超过 3 个日历日未更新；保留最后可追溯聚合，但不视为当前状态。
+            </p>
+            <p v-else-if="earnings.data.value.validity === 'partial'" class="earnings-notice">
+              当前只有部分市场成员具备可计算的 FY1 当前值、30
+              日前值和有效分析师覆盖；缺失成员不会被填零。
+            </p>
+          </template>
+        </section>
       </template>
 
       <template v-else-if="activeView === 'sectors'">
@@ -666,17 +808,20 @@ async function retryStocks(): Promise<void> {
           <div class="table-intro">
             <div>
               <p class="eyebrow">Cross-sectional matrix</p>
-              <h3>相对 SPY 强弱</h3>
+              <h3>价格强弱 × 盈利修正</h3>
             </div>
-            <p>色阶只辅助识别方向，单元格始终保留数值和历史有效性。</p>
+            <p>价格和盈利来自独立快照并分别标注日期；盈利接口不可用时，价格矩阵仍然保留。</p>
           </div>
-          <DataTable caption="11 个标准板块的价格相对强弱" min-width="760px">
+          <DataTable caption="11 个标准板块的价格相对强弱与盈利修正" min-width="1080px">
             <thead>
               <tr>
                 <th>板块 / ETF</th>
                 <th>20 日相对强弱</th>
                 <th>60 日相对强弱</th>
-                <th>数据日期</th>
+                <th>EPS 修正宽度</th>
+                <th>EPS 中位幅度</th>
+                <th>盈利覆盖</th>
+                <th>快照日期</th>
                 <th aria-label="详情"></th>
               </tr>
             </thead>
@@ -696,7 +841,42 @@ async function retryStocks(): Promise<void> {
                 <td :class="['heat-cell', metricCellTone(sector.relative_strength_60)]">
                   <RadarMetricValue :metric="sector.relative_strength_60" compact />
                 </td>
-                <td class="tabular">{{ sectors.data.value.as_of_date || '—' }}</td>
+                <td class="earnings-table-cell tabular">
+                  <template v-if="sectorEarnings(sector.sector_id)">
+                    <strong>{{ formatPercent(sectorEarnings(sector.sector_id)?.breadth) }}</strong>
+                    <small>{{
+                      moduleStateLabel(sectorEarnings(sector.sector_id)?.validity || 'unavailable')
+                    }}</small>
+                  </template>
+                  <strong v-else>—</strong>
+                </td>
+                <td class="earnings-table-cell tabular">
+                  <template v-if="sectorEarnings(sector.sector_id)">
+                    <strong>{{
+                      formatPercent(sectorEarnings(sector.sector_id)?.median_magnitude)
+                    }}</strong>
+                    <small>
+                      样本 {{ sectorEarnings(sector.sector_id)?.magnitude_observed ?? 0 }}
+                    </small>
+                  </template>
+                  <strong v-else>—</strong>
+                </td>
+                <td class="earnings-table-cell tabular">
+                  <template v-if="sectorEarnings(sector.sector_id)">
+                    <strong>
+                      {{ sectorEarnings(sector.sector_id)?.observed }} /
+                      {{ sectorEarnings(sector.sector_id)?.eligible }}
+                    </strong>
+                    <small>{{
+                      formatPercent(sectorEarnings(sector.sector_id)?.coverage_ratio)
+                    }}</small>
+                  </template>
+                  <strong v-else>—</strong>
+                </td>
+                <td class="snapshot-date-cell tabular">
+                  <span>价格 {{ sectors.data.value.as_of_date || '—' }}</span>
+                  <small>盈利 {{ earnings.data.value?.as_of_date || '—' }}</small>
+                </td>
                 <td class="align-right">
                   <button
                     class="row-action"
@@ -772,7 +952,7 @@ async function retryStocks(): Promise<void> {
         <div class="dimension-note">
           <ArrowDownUp :size="17" aria-hidden="true" />
           <p>
-            当前只具备价格趋势与风险维度。盈利修正、质量和估值将在有真实数据后独立展示，不填充占位分数。
+            当前个股接口只具备价格趋势与风险维度。盈利数据已用于市场和板块聚合，但尚未暴露个股修正；质量和估值仍未实现。
           </p>
         </div>
 
@@ -858,7 +1038,7 @@ async function retryStocks(): Promise<void> {
     <SideDrawer
       :open="selectedSectorId.length > 0"
       :title="sectorName(selectedSectorId)"
-      description="当前完整价格快照中的板块详情"
+      description="独立日期的价格与盈利聚合；不构成交易建议"
       @close="closeSector"
     >
       <DataState v-if="sectorDetail.isPending.value" state="loading" />
@@ -872,6 +1052,10 @@ async function retryStocks(): Promise<void> {
           <span>板块代理 ETF</span>
           <strong class="mono">{{ sectorDetail.data.value.instrument_id }}</strong>
         </div>
+        <div class="drawer-section-title">
+          <span>价格相对强弱</span>
+          <small class="tabular">{{ sectors.data.value?.as_of_date || '—' }}</small>
+        </div>
         <div class="drawer-metrics">
           <article>
             <span>20 日相对强弱</span
@@ -882,11 +1066,35 @@ async function retryStocks(): Promise<void> {
             ><RadarMetricValue :metric="sectorDetail.data.value.relative_strength_60" />
           </article>
         </div>
+        <div class="drawer-section-title">
+          <span>FY1 盈利修正</span>
+          <small class="tabular">{{ earnings.data.value?.as_of_date || '—' }}</small>
+        </div>
+        <DataState v-if="earnings.isPending.value" state="loading" />
+        <DataState
+          v-else-if="earnings.isError.value"
+          state="error"
+          :detail="earnings.error.value?.message"
+        />
+        <EarningsRevisionCard
+          v-else-if="selectedSectorEarnings"
+          :title="sectorName(selectedSectorId)"
+          description="当前成员行业分类聚合"
+          :aggregate="selectedSectorEarnings.revisions"
+          :status-label="moduleStateLabel(selectedSectorEarnings.revisions.validity)"
+        />
+        <div v-else class="unavailable-block">
+          <CircleOff :size="18" aria-hidden="true" />
+          <div>
+            <strong>该板块盈利修正不可用</strong>
+            <p>盈利快照缺失、读取失败，或该板块不在当前分类结果中；价格详情不受影响。</p>
+          </div>
+        </div>
         <div class="unavailable-block">
           <CircleOff :size="18" aria-hidden="true" />
           <div>
-            <strong>宽度与 EPS 修正尚不可用</strong>
-            <p>当前阶段没有 PIT 成分和盈利预期快照，因此不生成排名或历史走势。</p>
+            <strong>板块历史宽度尚不可用</strong>
+            <p>当前没有历史 PIT 成分，因此不生成板块宽度排名或历史走势。</p>
           </div>
         </div>
       </template>
@@ -943,8 +1151,8 @@ async function retryStocks(): Promise<void> {
         <div class="unavailable-block">
           <CircleOff :size="18" aria-hidden="true" />
           <div>
-            <strong>修正、质量与估值尚不可用</strong>
-            <p>R5 尚未采集可靠的盈利和基本面数据；页面不会使用价格指标替代这些维度。</p>
+            <strong>个股修正、质量与估值尚不可用</strong>
+            <p>当前盈利契约只发布市场与板块聚合；页面不会从原始 Trends 推导第二套个股口径。</p>
           </div>
         </div>
       </template>
@@ -1295,7 +1503,8 @@ async function retryStocks(): Promise<void> {
   border-top: 1px solid color-mix(in srgb, var(--color-warning) 18%, transparent);
 }
 
-.breadth-section {
+.breadth-section,
+.earnings-section {
   margin: 0 24px 24px;
   overflow: hidden;
   background: var(--color-surface);
@@ -1303,7 +1512,8 @@ async function retryStocks(): Promise<void> {
   border-radius: var(--radius-lg);
 }
 
-.breadth-header {
+.breadth-header,
+.earnings-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1312,13 +1522,15 @@ async function retryStocks(): Promise<void> {
   border-bottom: 1px solid var(--color-line);
 }
 
-.breadth-header h3 {
+.breadth-header h3,
+.earnings-header h3 {
   margin: 3px 0 0;
   font-size: 1.08rem;
   letter-spacing: -0.025em;
 }
 
-.breadth-header > div > p:last-child {
+.breadth-header > div > p:last-child,
+.earnings-header > div > p:last-child {
   max-width: 720px;
   margin: 8px 0 0;
   color: var(--color-text-soft);
@@ -1326,11 +1538,13 @@ async function retryStocks(): Promise<void> {
   line-height: 1.55;
 }
 
-.breadth-section > :deep(.data-state) {
+.breadth-section > :deep(.data-state),
+.earnings-section > :deep(.data-state) {
   margin: 20px;
 }
 
-.breadth-meta {
+.breadth-meta,
+.earnings-meta {
   display: grid;
   gap: 18px 24px;
   padding: 18px 24px;
@@ -1339,19 +1553,22 @@ async function retryStocks(): Promise<void> {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.breadth-meta > div {
+.breadth-meta > div,
+.earnings-meta > div {
   display: grid;
   gap: 5px;
   min-width: 0;
 }
 
 .breadth-meta span,
+.earnings-meta span,
 .breadth-coverage span {
   color: var(--color-text-faint);
   font-size: 0.66rem;
 }
 
-.breadth-meta strong {
+.breadth-meta strong,
+.earnings-meta strong {
   overflow-wrap: anywhere;
   font-size: 0.75rem;
 }
@@ -1424,7 +1641,8 @@ async function retryStocks(): Promise<void> {
   font-size: 0.69rem;
 }
 
-.breadth-notice {
+.breadth-notice,
+.earnings-notice {
   margin: 0;
   padding: 13px 24px;
   color: var(--color-warning);
@@ -1432,6 +1650,30 @@ async function retryStocks(): Promise<void> {
   line-height: 1.5;
   background: var(--color-warning-bg);
   border-top: 1px solid color-mix(in srgb, var(--color-warning) 18%, transparent);
+}
+
+.earnings-grid {
+  display: grid;
+  gap: 14px;
+  padding: 22px 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.earnings-footnote {
+  display: grid;
+  gap: 6px;
+  padding: 0 24px 20px;
+}
+
+.earnings-footnote p {
+  margin: 0;
+  color: var(--color-text-faint);
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.earnings-footnote p + p {
+  color: var(--color-warning);
 }
 
 .table-intro {
@@ -1498,6 +1740,26 @@ async function retryStocks(): Promise<void> {
 
 .heat-unavailable {
   background: var(--color-surface-soft);
+}
+
+.earnings-table-cell,
+.snapshot-date-cell {
+  min-width: 116px;
+}
+
+.earnings-table-cell strong,
+.snapshot-date-cell span {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.earnings-table-cell small,
+.snapshot-date-cell small {
+  display: block;
+  margin-top: 5px;
+  color: var(--color-text-faint);
+  font-size: 0.62rem;
 }
 
 .row-action {
@@ -1687,6 +1949,10 @@ async function retryStocks(): Promise<void> {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .earnings-grid {
+    grid-template-columns: 1fr;
+  }
+
   .macro-layout {
     grid-template-columns: 1fr;
   }
@@ -1733,7 +1999,8 @@ async function retryStocks(): Promise<void> {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .breadth-meta {
+  .breadth-meta,
+  .earnings-meta {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1775,6 +2042,7 @@ async function retryStocks(): Promise<void> {
   }
 
   .breadth-header,
+  .earnings-header,
   .macro-header {
     align-items: stretch;
     flex-direction: column;
@@ -1782,11 +2050,13 @@ async function retryStocks(): Promise<void> {
   }
 
   .breadth-section,
+  .earnings-section,
   .macro-section {
     margin: 0 19px 19px;
   }
 
   .breadth-meta,
+  .earnings-meta,
   .breadth-grid,
   .macro-meta {
     grid-template-columns: 1fr;
@@ -1794,6 +2064,18 @@ async function retryStocks(): Promise<void> {
 
   .breadth-meta {
     padding: 18px 19px;
+  }
+
+  .earnings-meta {
+    padding: 18px 19px;
+  }
+
+  .earnings-grid {
+    padding: 19px;
+  }
+
+  .earnings-footnote {
+    padding: 0 19px 18px;
   }
 
   .macro-meta {

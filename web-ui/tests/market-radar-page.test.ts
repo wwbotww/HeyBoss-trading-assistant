@@ -5,13 +5,14 @@ import MarketRadarPage from '../src/pages/MarketRadarPage.vue'
 import {
   installApiMock,
   marketBreadthFixture,
+  marketEarningsFixture,
   marketMacroFixture,
   marketRadarSummaryFixture,
 } from './fixtures'
 import { mountPage } from './helpers'
 
 describe('市场雷达页面', () => {
-  it('总览展示真实价格、宏观象限和 SPY 当前持仓代理宽度', async () => {
+  it('总览展示真实价格、宏观、宽度和盈利修正快照', async () => {
     installApiMock()
     const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
     await flushPromises()
@@ -36,7 +37,58 @@ describe('市场雷达页面', () => {
     expect(wrapper.text()).toContain('当前修订')
     expect(wrapper.text()).toContain('HYG/LQD ETF 代理')
     expect(wrapper.get('[role="img"]').attributes('aria-label')).toContain('共 3 个轨迹点')
+    expect(wrapper.text()).toContain('盈利预期脉冲')
+    expect(wrapper.text()).toContain('EODHD Calendar Trends')
+    expect(wrapper.text()).toContain('当前市场')
+    expect(wrapper.text()).toContain('策略 Watchlist')
+    expect(wrapper.text()).toContain('501 / 503')
+    expect(wrapper.text()).toContain('10 / 10')
+    expect(wrapper.text()).toContain('1 个成员未分类')
+    expect(wrapper.text()).toContain('不把采集历史解释为 PIT 分析师预期序列')
     expect(wrapper.text()).not.toContain('下单')
+  })
+
+  it('盈利快照陈旧时保留原始聚合并显示当前性告警', async () => {
+    installApiMock({
+      '/api/market-radar/earnings': {
+        ...marketEarningsFixture,
+        validity: 'stale',
+        freshness: { snapshot_age_days: 4, stale_after_days: 3 },
+      },
+    })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已陈旧')
+    expect(wrapper.text()).toContain('4 天 / 阈值 3 天')
+    expect(wrapper.text()).toContain('超过 3 个日历日未更新')
+    expect(wrapper.text()).toContain('501 / 503')
+  })
+
+  it('盈利快照缺失不影响价格、宏观和宽度', async () => {
+    installApiMock({
+      '/api/market-radar/earnings': {
+        ...marketEarningsFixture,
+        source_state: 'missing',
+        validity: 'unavailable',
+        as_of_date: null,
+        calculated_at_utc: null,
+        source: null,
+        freshness: null,
+        membership: null,
+        watchlist: null,
+        market: null,
+        sectors: [],
+      },
+    })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=overview')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('SPY · 20 日收益')
+    expect(wrapper.text()).toContain('宽松型 Risk-on')
+    expect(wrapper.text()).toContain('48.11%')
+    expect(wrapper.text()).toContain('盈利修正快照不可用')
+    expect(wrapper.text()).toContain('页面不会连接 EODHD')
   })
 
   it.each([
@@ -188,11 +240,15 @@ describe('市场雷达页面', () => {
     )
     await flushPromises()
 
-    expect(wrapper.text()).toContain('相对 SPY 强弱')
+    expect(wrapper.text()).toContain('价格强弱 × 盈利修正')
     expect(wrapper.text()).toContain('信息技术')
     expect(wrapper.text()).toContain('XLK.US')
     expect(wrapper.text()).toContain('板块代理 ETF')
-    expect(wrapper.text()).toContain('宽度与 EPS 修正尚不可用')
+    expect(wrapper.text()).toContain('EPS 修正宽度')
+    expect(wrapper.text()).toContain('30.56%')
+    expect(wrapper.text()).toContain('72 / 72')
+    expect(wrapper.text()).toContain('当前成员行业分类聚合')
+    expect(wrapper.text()).toContain('板块历史宽度尚不可用')
     expect(
       fetchMock.mock.calls.some((call) => {
         const request = call[0]
@@ -212,10 +268,10 @@ describe('市场雷达页面', () => {
     )
     await flushPromises()
 
-    expect(wrapper.text()).toContain('当前只具备价格趋势与风险维度')
+    expect(wrapper.text()).toContain('当前个股接口只具备价格趋势与风险维度')
     expect(wrapper.text()).toContain('AAPL')
     expect(wrapper.text()).toContain('126–21 动量')
-    expect(wrapper.text()).toContain('修正、质量与估值尚不可用')
+    expect(wrapper.text()).toContain('个股修正、质量与估值尚不可用')
     expect(wrapper.text()).not.toContain('综合买入分')
     const stocksRequest = fetchMock.mock.calls
       .map((call) => call[0])

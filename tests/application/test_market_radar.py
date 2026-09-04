@@ -11,6 +11,11 @@ import pytest
 
 from trading_assistant.application.market_radar import MarketRadarQueryService
 from trading_assistant.application.models import QuerySourceError, ResourceNotFoundError
+from trading_assistant.market_radar.earnings import (
+    EarningsRevisionSnapshot,
+    Fy1EarningsTrend,
+    calculate_earnings_revision_snapshot,
+)
 from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
@@ -20,6 +25,8 @@ from trading_assistant.market_radar.macro import (
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
+    CurrentMarketSectorAssignment,
+    CurrentMarketSectorClassification,
 )
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
@@ -212,6 +219,42 @@ def _fred_observation() -> FredObservation:
     )
 
 
+def _earnings_snapshot() -> EarningsRevisionSnapshot:
+    membership = CurrentMarketMembership(
+        source="state_street_spy_holdings",
+        membership_date=date(2026, 9, 2),
+        members=(
+            CurrentMarketMember("AAPL", "AAPL.US", "AAPL.US"),
+            CurrentMarketMember("MSFT", "MSFT.US", "MSFT.US"),
+        ),
+    )
+    classification = CurrentMarketSectorClassification(
+        source="eodhd_components",
+        requested_member_count=2,
+        source_record_count=2,
+        assignments=(CurrentMarketSectorAssignment("AAPL.US", "information_technology"),),
+    )
+    return calculate_earnings_revision_snapshot(
+        as_of_date=NOW.date(),
+        calculated_at_utc=NOW,
+        watchlist=("AAPL.US", "MSFT.US"),
+        membership=membership,
+        classification=classification,
+        sector_ids=("information_technology", "energy"),
+        trends=(
+            Fy1EarningsTrend(
+                instrument_id="AAPL.US",
+                fiscal_period_end=date(2027, 9, 30),
+                eps_current=8,
+                eps_30_days_ago=7.5,
+                analyst_count=30,
+                revisions_up_30_days=5,
+                revisions_down_30_days=1,
+            ),
+        ),
+    )
+
+
 def _repository(tmp_path: Path) -> MarketRadarRepository:
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/market-radar.db")
     repository.create_schema()
@@ -284,6 +327,10 @@ def test_missing_and_empty_sources_are_explicit(tmp_path: Path) -> None:
     missing_macro = MarketRadarQueryService(repository=None, clock=lambda: NOW).macro()
     assert missing_macro.source_state == "missing"
     assert missing_macro.current is None
+    missing_earnings = MarketRadarQueryService(repository=None, clock=lambda: NOW).earnings()
+    assert missing_earnings.source_state == "missing"
+    assert missing_earnings.validity == "unavailable"
+    assert missing_earnings.market is None
 
     repository = MarketRadarRepository(f"sqlite:///{tmp_path}/empty.db")
     repository.create_schema()
@@ -295,6 +342,10 @@ def test_missing_and_empty_sources_are_explicit(tmp_path: Path) -> None:
     assert MarketRadarQueryService(
         repository=repository, clock=lambda: NOW
     ).macro().source_state == ("empty")
+    assert (
+        MarketRadarQueryService(repository=repository, clock=lambda: NOW).earnings().source_state
+        == "empty"
+    )
     repository.close()
 
 
@@ -457,6 +508,9 @@ def test_corrupt_breadth_does_not_hide_price_summary() -> None:
         ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
             return None
 
+        def latest_earnings_revision_snapshot(self) -> None:
+            return None
+
     service = MarketRadarQueryService(
         repository=cast(MarketRadarRepository, BrokenBreadthRepository()),
         clock=lambda: NOW,
@@ -497,6 +551,9 @@ def test_macro_staleness_and_failure_are_isolated_from_price_summary(tmp_path: P
         ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
             raise RuntimeError("/private/token/should-not-leak")
 
+        def latest_earnings_revision_snapshot(self) -> None:
+            return None
+
     broken = MarketRadarQueryService(
         repository=cast(MarketRadarRepository, BrokenMacroRepository()),
         clock=lambda: NOW,
@@ -508,3 +565,104 @@ def test_macro_staleness_and_failure_are_isolated_from_price_summary(tmp_path: P
     with pytest.raises(QuerySourceError) as captured:
         broken.macro()
     assert "token" not in captured.value.public_detail
+
+
+def test_earnings_projection_preserves_coverage_nulls_and_freshness() -> None:
+    snapshot = _earnings_snapshot()
+
+    class EarningsRepository:
+        def latest_earnings_revision_snapshot(self) -> EarningsRevisionSnapshot:
+            return snapshot
+
+    service = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, EarningsRepository()),
+        clock=lambda: NOW,
+    )
+    result = service.earnings()
+
+    assert result.source_state == "available"
+    assert result.validity == "partial"
+    assert result.source == "eodhd_calendar"
+    assert result.freshness is not None
+    assert result.freshness.snapshot_age_days == 0
+    assert result.freshness.stale_after_days == 3
+    assert result.membership is not None
+    assert result.membership.classification_validity == "partial"
+    assert result.membership.classification_coverage_ratio == pytest.approx(0.5)
+    assert result.market is not None
+    assert result.market.observed == 1
+    assert result.market.eligible == 2
+    assert result.market.breadth == pytest.approx(1)
+    assert result.market.median_magnitude == pytest.approx(8 / 7.5 - 1)
+    assert result.watchlist == result.market
+    assert [item.sector_id for item in result.sectors] == [
+        "information_technology",
+        "energy",
+    ]
+    assert result.sectors[0].revisions.validity == "complete"
+    assert result.sectors[1].revisions.validity == "unavailable"
+    assert result.sectors[1].revisions.breadth is None
+
+
+@pytest.mark.parametrize(
+    ("age_days", "expected"),
+    [(3, "partial"), (4, "stale")],
+)
+def test_earnings_staleness_boundary(age_days: int, expected: str) -> None:
+    snapshot = _earnings_snapshot()
+
+    class EarningsRepository:
+        def latest_earnings_revision_snapshot(self) -> EarningsRevisionSnapshot:
+            return snapshot
+
+    service = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, EarningsRepository()),
+        clock=lambda: NOW + timedelta(days=age_days),
+    )
+    assert service.earnings().validity == expected
+
+
+def test_corrupt_earnings_isolated_from_other_summary_modules() -> None:
+    class BrokenEarningsRepository:
+        def latest_price_snapshot(self) -> PriceRadarSnapshot:
+            return _snapshot()
+
+        def latest_current_breadth_snapshot(self) -> None:
+            return None
+
+        def latest_macro_bundle(
+            self,
+        ) -> tuple[RiskAppetiteSnapshot, MacroRegimeSnapshot] | None:
+            return None
+
+        def latest_earnings_revision_snapshot(self) -> EarningsRevisionSnapshot:
+            raise RuntimeError("/private/token/should-not-leak")
+
+    service = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, BrokenEarningsRepository()),
+        clock=lambda: NOW,
+    )
+    summary = service.summary()
+    assert summary.market is not None
+    modules = {item.module_id: item for item in summary.modules}
+    assert modules["spy_trend"].state == "partial"
+    assert modules["earnings_revisions"].state == "unavailable"
+    assert "其他市场雷达模块不受影响" in modules["earnings_revisions"].detail
+    with pytest.raises(QuerySourceError) as captured:
+        service.earnings()
+    assert "token" not in captured.value.public_detail
+
+
+def test_future_earnings_snapshot_fails_closed() -> None:
+    snapshot = _earnings_snapshot()
+
+    class EarningsRepository:
+        def latest_earnings_revision_snapshot(self) -> EarningsRevisionSnapshot:
+            return snapshot
+
+    service = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, EarningsRepository()),
+        clock=lambda: NOW - timedelta(days=1),
+    )
+    with pytest.raises(QuerySourceError, match="无法安全读取"):
+        service.earnings()

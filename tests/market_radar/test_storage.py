@@ -11,6 +11,12 @@ from sqlalchemy import create_engine, event, inspect, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from trading_assistant.market_radar.earnings import (
+    EarningsCalendarEvent,
+    EarningsRevisionSnapshot,
+    Fy1EarningsTrend,
+    calculate_earnings_revision_snapshot,
+)
 from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
@@ -20,6 +26,8 @@ from trading_assistant.market_radar.macro import (
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
+    CurrentMarketSectorAssignment,
+    CurrentMarketSectorClassification,
 )
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
@@ -30,6 +38,10 @@ from trading_assistant.market_radar.metrics import (
     PriceRadarSnapshot,
 )
 from trading_assistant.market_radar.models import (
+    EarningsCalendarEventRecord,
+    EarningsMarketMemberRecord,
+    EarningsRevisionSnapshotRecord,
+    EarningsTrendObservationRecord,
     MacroObservationRecord,
     MarketRadarSyncRunRecord,
 )
@@ -192,6 +204,83 @@ def _regime_snapshot(
     )
 
 
+def _earnings_trends(
+    *,
+    aapl_current: float = 7.5,
+) -> tuple[Fy1EarningsTrend, ...]:
+    return (
+        Fy1EarningsTrend(
+            instrument_id="AAPL.US",
+            fiscal_period_end=date(2027, 9, 30),
+            eps_current=aapl_current,
+            eps_30_days_ago=7.25,
+            analyst_count=30,
+            revisions_up_30_days=5,
+            revisions_down_30_days=None,
+        ),
+        Fy1EarningsTrend(
+            instrument_id="MSFT.US",
+            fiscal_period_end=date(2027, 6, 30),
+            eps_current=None,
+            eps_30_days_ago=12.5,
+            analyst_count=0,
+            revisions_up_30_days=None,
+            revisions_down_30_days=2,
+        ),
+    )
+
+
+def _earnings_events() -> tuple[EarningsCalendarEvent, ...]:
+    return (
+        EarningsCalendarEvent(
+            instrument_id="AAPL.US",
+            fiscal_period_end=date(2026, 6, 30),
+            report_date=date(2026, 7, 30),
+            session="after_market",
+            currency="USD",
+            actual_eps=1.25,
+            estimated_eps=1.10,
+        ),
+        EarningsCalendarEvent(
+            instrument_id="MSFT.US",
+            fiscal_period_end=date(2026, 9, 30),
+            report_date=date(2026, 10, 28),
+            session="unknown",
+            currency="USD",
+            actual_eps=None,
+            estimated_eps=None,
+        ),
+    )
+
+
+def _earnings_classification() -> CurrentMarketSectorClassification:
+    return CurrentMarketSectorClassification(
+        source="test_sector_source",
+        requested_member_count=2,
+        source_record_count=2,
+        assignments=(
+            CurrentMarketSectorAssignment("AAPL.US", "information_technology"),
+            CurrentMarketSectorAssignment("MSFT.US", "information_technology"),
+        ),
+    )
+
+
+def _earnings_snapshot(
+    *,
+    calculated_at: datetime = STARTED,
+    trends: tuple[Fy1EarningsTrend, ...] | None = None,
+) -> EarningsRevisionSnapshot:
+    return calculate_earnings_revision_snapshot(
+        as_of_date=calculated_at.date(),
+        calculated_at_utc=calculated_at,
+        watchlist=("AAPL.US", "MSFT.US"),
+        membership=_membership(),
+        classification=_earnings_classification(),
+        sector_ids=("information_technology", "financials"),
+        trends=_earnings_trends() if trends is None else trends,
+    )
+
+
 def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> None:
     database_url = f"sqlite:///{tmp_path}/market-radar.db"
     repository = MarketRadarRepository(database_url)
@@ -227,6 +316,10 @@ def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> N
     assert inspect(engine).get_table_names() == [
         "current_breadth_snapshots",
         "current_market_members",
+        "earnings_calendar_events",
+        "earnings_market_members",
+        "earnings_revision_snapshots",
+        "earnings_trend_observations",
         "macro_observations",
         "macro_regime_snapshots",
         "price_snapshots",
@@ -234,6 +327,196 @@ def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> N
         "sync_runs",
     ]
     engine.dispose()
+
+
+def test_earnings_bundle_persists_nulls_and_completes_run(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path}/earnings.db"
+    repository = MarketRadarRepository(database_url)
+    repository.create_schema()
+    _start(repository, "earnings")
+    trends = _earnings_trends()
+    events = _earnings_events()
+    snapshot = _earnings_snapshot(trends=trends)
+
+    repository.publish_earnings_bundle_and_complete(
+        "earnings",
+        membership=_membership(),
+        classification=_earnings_classification(),
+        trends=trends,
+        events=events,
+        snapshot=snapshot,
+        ingested_at_utc=STARTED,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=2,
+    )
+
+    assert repository.latest_earnings_revision_snapshot() == snapshot
+    run = repository.get_sync_run("earnings")
+    assert run is not None
+    assert run.status == "COMPLETE"
+    assert run.instruments_processed == 2
+    assert run.bars_fetched == 0
+    assert run.bars_written == 0
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        stored_trends = session.scalars(
+            select(EarningsTrendObservationRecord).order_by(
+                EarningsTrendObservationRecord.instrument_id
+            )
+        ).all()
+        stored_events = session.scalars(
+            select(EarningsCalendarEventRecord).order_by(EarningsCalendarEventRecord.instrument_id)
+        ).all()
+        stored_members = session.scalars(
+            select(EarningsMarketMemberRecord).order_by(EarningsMarketMemberRecord.instrument_id)
+        ).all()
+    engine.dispose()
+    assert [item.instrument_id for item in stored_trends] == ["AAPL.US", "MSFT.US"]
+    assert stored_trends[1].eps_current is None
+    assert stored_trends[0].available_at_utc is None
+    assert stored_events[1].estimated_eps is None
+    assert stored_events[0].available_at_utc is None
+    assert [item.instrument_id for item in stored_members] == ["AAPL.US", "MSFT.US"]
+    assert stored_members[0].sector == "information_technology"
+    assert stored_members[0].classification_source == "test_sector_source"
+    repository.close()
+
+
+def test_earnings_same_day_replaces_and_later_day_appends(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path}/earnings-history.db"
+    repository = MarketRadarRepository(database_url)
+    repository.create_schema()
+    old_trends = _earnings_trends()
+    _start(repository, "day-one-old")
+    repository.publish_earnings_bundle_and_complete(
+        "day-one-old",
+        membership=_membership(),
+        classification=_earnings_classification(),
+        trends=old_trends,
+        events=_earnings_events(),
+        snapshot=_earnings_snapshot(trends=old_trends),
+        ingested_at_utc=STARTED,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=2,
+    )
+
+    replacement_time = STARTED + timedelta(hours=1)
+    replacement_trends = _earnings_trends(aapl_current=8.0)
+    _start(repository, "day-one-new")
+    repository.publish_earnings_bundle_and_complete(
+        "day-one-new",
+        membership=_membership(),
+        classification=_earnings_classification(),
+        trends=replacement_trends,
+        events=(_earnings_events()[0],),
+        snapshot=_earnings_snapshot(
+            calculated_at=replacement_time,
+            trends=replacement_trends,
+        ),
+        ingested_at_utc=replacement_time,
+        completed_at_utc=replacement_time + timedelta(minutes=1),
+        instruments_processed=2,
+    )
+
+    next_day = STARTED + timedelta(days=1)
+    _start(repository, "day-two")
+    repository.publish_earnings_bundle_and_complete(
+        "day-two",
+        membership=_membership(),
+        classification=_earnings_classification(),
+        trends=replacement_trends,
+        events=_earnings_events(),
+        snapshot=_earnings_snapshot(calculated_at=next_day, trends=replacement_trends),
+        ingested_at_utc=next_day,
+        completed_at_utc=next_day + timedelta(minutes=1),
+        instruments_processed=2,
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        trend_records = session.scalars(select(EarningsTrendObservationRecord)).all()
+        event_records = session.scalars(select(EarningsCalendarEventRecord)).all()
+        snapshots = session.scalars(select(EarningsRevisionSnapshotRecord)).all()
+        member_records = session.scalars(select(EarningsMarketMemberRecord)).all()
+    engine.dispose()
+    assert len(trend_records) == 4
+    assert len(event_records) == 3
+    assert len(snapshots) == 2
+    assert len(member_records) == 4
+    day_one_aapl = next(
+        item
+        for item in trend_records
+        if item.as_of_date == STARTED.date() and item.instrument_id == "AAPL.US"
+    )
+    assert day_one_aapl.eps_current == 8.0
+    assert day_one_aapl.run_id == "day-one-new"
+    assert repository.latest_earnings_revision_snapshot().as_of_date == next_day.date()  # type: ignore[union-attr]
+    repository.close()
+
+
+def test_earnings_publication_and_completion_roll_back_together(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path}/earnings-atomic.db"
+    repository = MarketRadarRepository(database_url)
+    repository.create_schema()
+    old_trends = _earnings_trends()
+    old_snapshot = _earnings_snapshot(trends=old_trends)
+    _start(repository, "old-earnings")
+    repository.publish_earnings_bundle_and_complete(
+        "old-earnings",
+        membership=_membership(),
+        classification=_earnings_classification(),
+        trends=old_trends,
+        events=_earnings_events(),
+        snapshot=old_snapshot,
+        ingested_at_utc=STARTED,
+        completed_at_utc=STARTED + timedelta(minutes=1),
+        instruments_processed=2,
+    )
+    _start(repository, "new-earnings")
+
+    def fail_completion(
+        _mapper: object,
+        _connection: object,
+        target: MarketRadarSyncRunRecord,
+    ) -> None:
+        if target.run_id == "new-earnings" and target.status == "COMPLETE":
+            raise RuntimeError("simulated earnings completion failure")
+
+    replacement_time = STARTED + timedelta(hours=1)
+    replacement_trends = _earnings_trends(aapl_current=8.0)
+    event.listen(MarketRadarSyncRunRecord, "before_update", fail_completion)
+    try:
+        with pytest.raises(RuntimeError, match="simulated"):
+            repository.publish_earnings_bundle_and_complete(
+                "new-earnings",
+                membership=_membership(),
+                classification=_earnings_classification(),
+                trends=replacement_trends,
+                events=(_earnings_events()[0],),
+                snapshot=_earnings_snapshot(
+                    calculated_at=replacement_time,
+                    trends=replacement_trends,
+                ),
+                ingested_at_utc=replacement_time,
+                completed_at_utc=replacement_time + timedelta(minutes=1),
+                instruments_processed=2,
+            )
+    finally:
+        event.remove(MarketRadarSyncRunRecord, "before_update", fail_completion)
+
+    assert repository.latest_earnings_revision_snapshot() == old_snapshot
+    new_run = repository.get_sync_run("new-earnings")
+    assert new_run is not None
+    assert new_run.status == "RUNNING"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        run_ids = set(session.scalars(select(EarningsTrendObservationRecord.run_id)))
+        member_run_ids = set(session.scalars(select(EarningsMarketMemberRecord.run_id)))
+    engine.dispose()
+    assert run_ids == {"old-earnings"}
+    assert member_run_ids == {"old-earnings"}
+    repository.close()
 
 
 def test_failed_run_does_not_replace_latest_complete(tmp_path: Path) -> None:

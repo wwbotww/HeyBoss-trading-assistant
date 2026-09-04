@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import csv
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from http.client import HTTPResponse
-from io import StringIO
 from pathlib import Path
 from typing import Literal, cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote
 
 from trading_assistant.data.eodhd_http import (
     EodhdAuthenticationError,
@@ -24,10 +18,18 @@ from trading_assistant.data.eodhd_http import (
     QueryValue,
 )
 from trading_assistant.market_radar.config import MarketRadarConfig
+from trading_assistant.market_radar.fred import (
+    FredApiObservationSource,
+    FredAuthenticationError,
+    FredObservationSource,
+    FredRejectedHttpError,
+    FredTemporaryHttpError,
+    FredTransport,
+    download_fred,
+)
 
 CapabilityStatus = Literal["available", "forbidden", "not_in_plan", "invalid", "unknown"]
 ExpectedShape = Literal["list", "mapping", "nested_list"]
-PublicTransport = Callable[[str, int], bytes]
 
 
 @dataclass(frozen=True)
@@ -91,28 +93,11 @@ class _EodhdProbe:
     endpoint: str
     query: Mapping[str, QueryValue]
     expected_shape: ExpectedShape
+    records_key: str | None = None
 
 
 def _utc_now() -> datetime:
     return datetime.now(tz=UTC)
-
-
-def _download_public(url: str, timeout_seconds: int) -> bytes:
-    """读取无凭据的固定公共数据 URL, 并隐藏底层 URL。"""
-    request = Request(  # noqa: S310
-        url,
-        headers={"User-Agent": "HeyBoss-trading-assistant/0.1"},
-        method="GET",
-    )
-    try:
-        response = cast(HTTPResponse, urlopen(request, timeout=timeout_seconds))  # noqa: S310
-        with response:
-            return response.read()
-    except HTTPError as exc:
-        raise ValueError(f"Public data request rejected: status={exc.code}") from None
-    except URLError as exc:
-        reason = type(exc.reason).__name__
-        raise ConnectionError(f"Public data request failed: {reason}") from None
 
 
 def _is_record_map(value: Mapping[object, object]) -> bool:
@@ -239,6 +224,15 @@ def _shape_matches(payload: object, expected: ExpectedShape) -> bool:
     )
 
 
+def _records_payload(payload: object, key: str | None) -> object:
+    """返回探测器声明的真实记录容器, 保留完整响应供字段审计。"""
+    if key is None:
+        return payload
+    if not isinstance(payload, dict):
+        return None
+    return cast(dict[object, object], payload).get(key)
+
+
 def _payload_result(
     *,
     probe: _EodhdProbe,
@@ -246,9 +240,10 @@ def _payload_result(
 ) -> CapabilityResult:
     provider_error = _provider_error_status(payload)
     fields = _field_paths(payload)
-    count = _record_count(payload)
-    earliest, latest = _dates(payload)
-    null_values, scalar_values = _scalar_counts(payload)
+    records = _records_payload(payload, probe.records_key)
+    count = _record_count(records)
+    earliest, latest = _dates(records)
+    null_values, scalar_values = _scalar_counts(records)
     if provider_error is not None:
         return CapabilityResult(
             capability=probe.capability,
@@ -263,7 +258,7 @@ def _payload_result(
             scalar_values=scalar_values,
             detail="Provider returned a structured error response.",
         )
-    valid = _shape_matches(payload, probe.expected_shape) and count > 0
+    valid = _shape_matches(records, probe.expected_shape) and count > 0
     return CapabilityResult(
         capability=probe.capability,
         provider="eodhd",
@@ -309,44 +304,6 @@ def _failed_eodhd_result(probe: _EodhdProbe, exc: Exception) -> CapabilityResult
     )
 
 
-def _fred_result(series_id: str, payload: bytes) -> CapabilityResult:
-    try:
-        decoded = payload.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ValueError("FRED response is not UTF-8 CSV") from exc
-    reader = csv.DictReader(StringIO(decoded))
-    fields = tuple(reader.fieldnames or ())
-    if series_id not in fields:
-        raise ValueError(f"FRED response is missing {series_id}")
-    date_field = "observation_date" if "observation_date" in fields else "DATE"
-    if date_field not in fields:
-        raise ValueError("FRED response is missing the observation date")
-    rows = list(reader)
-    dates: list[date] = []
-    null_values = 0
-    for row in rows:
-        try:
-            dates.append(date.fromisoformat(row[date_field]))
-        except (KeyError, ValueError) as exc:
-            raise ValueError("FRED response contains an invalid observation date") from exc
-        value = row.get(series_id)
-        null_values += value is None or value.strip() in {"", "."}
-    valid = bool(rows)
-    return CapabilityResult(
-        capability=f"fred_{series_id.lower()}",
-        provider="fred",
-        status="available" if valid else "invalid",
-        http_status=200,
-        record_count=len(rows),
-        fields=fields,
-        earliest_date=min(dates) if dates else None,
-        latest_date=max(dates) if dates else None,
-        null_values=null_values,
-        scalar_values=len(rows),
-        detail="Public CSV structure is available." if valid else "Public CSV is empty.",
-    )
-
-
 def _eodhd_probes(config: MarketRadarConfig, today: date) -> tuple[_EodhdProbe, ...]:
     recent_start = today - timedelta(days=30)
     earnings_start = today - timedelta(days=365)
@@ -383,6 +340,7 @@ def _eodhd_probes(config: MarketRadarConfig, today: date) -> tuple[_EodhdProbe, 
             endpoint="calendar/trends",
             query={"fmt": "json", "symbols": ",".join(config.calendar_symbols)},
             expected_shape="nested_list",
+            records_key="trends",
         ),
         _EodhdProbe(
             capability="earnings_calendar",
@@ -394,6 +352,7 @@ def _eodhd_probes(config: MarketRadarConfig, today: date) -> tuple[_EodhdProbe, 
                 "to": earnings_end.isoformat(),
             },
             expected_shape="list",
+            records_key="earnings",
         ),
     ]
     probes.extend(
@@ -455,53 +414,85 @@ async def _check_eodhd(
 
 
 async def _check_fred(
+    source: FredObservationSource,
     *,
+    series_id: str,
     today: date,
-    timeout_seconds: int,
-    transport: PublicTransport,
-) -> list[CapabilityResult]:
+) -> CapabilityResult:
+    """通过生产 FRED 来源边界探测单个当前修订序列。"""
     start = today - timedelta(days=365 * 3)
-    results: list[CapabilityResult] = []
-    for series_id in ("DFII10", "BAMLH0A0HYM2"):
-        query = urlencode(
-            {
-                "id": series_id,
-                "cosd": start.isoformat(),
-                "coed": today.isoformat(),
-            }
+    try:
+        batch = await source.request_observations(series_id, start, today)
+    except (
+        ConnectionError,
+        FredAuthenticationError,
+        FredRejectedHttpError,
+        FredTemporaryHttpError,
+        TimeoutError,
+        ValueError,
+    ) as exc:
+        if isinstance(exc, FredAuthenticationError):
+            status: CapabilityStatus = "forbidden"
+        elif isinstance(exc, (ConnectionError, FredTemporaryHttpError, TimeoutError)):
+            status = "unknown"
+        else:
+            status = "invalid"
+        http_status = getattr(exc, "status_code", None)
+        return CapabilityResult(
+            capability=f"fred_{series_id.lower()}",
+            provider="fred",
+            status=status,
+            http_status=http_status if isinstance(http_status, int) else None,
+            record_count=0,
+            fields=(),
+            earliest_date=None,
+            latest_date=None,
+            null_values=0,
+            scalar_values=0,
+            detail=f"Probe failed with {type(exc).__name__}.",
         )
-        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?{query}"
-        try:
-            payload = await asyncio.to_thread(transport, url, timeout_seconds)
-            results.append(_fred_result(series_id, payload))
-        except (ConnectionError, TimeoutError, ValueError) as exc:
-            results.append(
-                CapabilityResult(
-                    capability=f"fred_{series_id.lower()}",
-                    provider="fred",
-                    status=(
-                        "unknown" if isinstance(exc, (ConnectionError, TimeoutError)) else "invalid"
-                    ),
-                    http_status=None,
-                    record_count=0,
-                    fields=(),
-                    earliest_date=None,
-                    latest_date=None,
-                    null_values=0,
-                    scalar_values=0,
-                    detail=f"Probe failed with {type(exc).__name__}.",
-                )
-            )
-    return results
+
+    days = tuple(observation.observation_date for observation in batch.observations)
+    return CapabilityResult(
+        capability=f"fred_{series_id.lower()}",
+        provider="fred",
+        status="available",
+        http_status=200,
+        record_count=len(batch.observations),
+        fields=("date", "realtime_end", "realtime_start", "value"),
+        earliest_date=min(days),
+        latest_date=max(days),
+        null_values=batch.missing_values,
+        scalar_values=len(batch.observations) + batch.missing_values,
+        detail="FRED v1 current-revision structure is available.",
+    )
+
+
+def _hy_oas_not_in_plan() -> CapabilityResult:
+    """记录已裁决的数据边界, 避免把未计划请求误报为权限失败。"""
+    return CapabilityResult(
+        capability="fred_bamlh0a0hym2",
+        provider="fred",
+        status="not_in_plan",
+        http_status=None,
+        record_count=0,
+        fields=(),
+        earliest_date=None,
+        latest_date=None,
+        null_values=0,
+        scalar_values=0,
+        detail="HY OAS is not used; credit remains the HYG/LQD ETF proxy.",
+    )
 
 
 async def run_capability_checks(
     *,
     config: MarketRadarConfig,
     eodhd_api_token: str,
+    fred_api_key: str,
     timeout_seconds: int = 30,
     eodhd_transport: Callable[[str, int], bytes] | None = None,
-    public_transport: PublicTransport = _download_public,
+    fred_transport: FredTransport = download_fred,
     clock: Callable[[], datetime] = _utc_now,
 ) -> CapabilityReport:
     """串行执行有限探测, 并只返回脱敏结构摘要。"""
@@ -523,15 +514,23 @@ async def run_capability_checks(
             max_concurrent_requests=1,
             transport=eodhd_transport,
         )
+    fred_source = FredApiObservationSource(
+        api_key=fred_api_key,
+        request_timeout_seconds=timeout_seconds,
+        max_attempts=1,
+        retry_backoff_seconds=(),
+        transport=fred_transport,
+    )
     today = checked_at.astimezone(UTC).date()
     results = await _check_eodhd(client, _eodhd_probes(config, today))
-    results.extend(
+    results.append(
         await _check_fred(
+            fred_source,
+            series_id=config.real_rate_series,
             today=today,
-            timeout_seconds=timeout_seconds,
-            transport=public_transport,
         )
     )
+    results.append(_hy_oas_not_in_plan())
     return CapabilityReport(
         checked_at_utc=checked_at.astimezone(UTC),
         results=tuple(results),

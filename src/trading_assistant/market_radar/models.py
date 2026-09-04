@@ -122,3 +122,77 @@ class MacroRegimeSnapshotRecord(MarketRadarBase):
     )
     calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class EarningsMarketMemberRecord(MarketRadarBase):
+    """一次盈利同步采用的权威市场成员与可空行业分类。"""
+
+    __tablename__ = "earnings_market_members"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    membership_date: Mapped[date] = mapped_column(Date, index=True)
+    membership_source: Mapped[str] = mapped_column(String(64))
+    source_symbol: Mapped[str] = mapped_column(String(16))
+    data_symbol: Mapped[str] = mapped_column(String(32))
+    sector: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    classification_source: Mapped[str] = mapped_column(String(64))
+    ingested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EarningsTrendObservationRecord(MarketRadarBase):
+    """一次每日采集中请求集合内每只标的的最新 FY1 预期。"""
+
+    __tablename__ = "earnings_trend_observations"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    fiscal_period_end: Mapped[date] = mapped_column(Date)
+    eps_current: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_30_days_ago: Mapped[float | None] = mapped_column(Float, nullable=True)
+    analyst_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revisions_up_30_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revisions_down_30_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    ingested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EarningsCalendarEventRecord(MarketRadarBase):
+    """一次每日采集中 watchlist 的历史与未来财报事件。"""
+
+    __tablename__ = "earnings_calendar_events"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    fiscal_period_end: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    session: Mapped[str] = mapped_column(String(16))
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    actual_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    available_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    ingested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EarningsRevisionSnapshotRecord(MarketRadarBase):
+    """由一次成功同步原子发布的统一盈利修正快照。"""
+
+    __tablename__ = "earnings_revision_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("sync_runs.run_id"),
+        unique=True,
+        index=True,
+    )
+    calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)

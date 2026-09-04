@@ -10,6 +10,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from trading_assistant.application.models import (
     BreadthMetricView,
+    EarningsFreshnessView,
+    EarningsMembershipView,
+    EarningsRevisionAggregateView,
     MacroFreshnessView,
     MacroRealRateView,
     MacroRegimePointView,
@@ -17,6 +20,8 @@ from trading_assistant.application.models import (
     MacroRegimeView,
     MacroRiskAppetiteView,
     MarketBreadthView,
+    MarketEarningsValidity,
+    MarketEarningsView,
     MarketRadarSummaryView,
     QuerySourceError,
     RadarCoverageView,
@@ -26,6 +31,7 @@ from trading_assistant.application.models import (
     RadarModuleState,
     RadarModuleView,
     ResourceNotFoundError,
+    SectorEarningsRevisionView,
     SectorRadarListView,
     SectorRadarView,
     SortDirection,
@@ -34,6 +40,7 @@ from trading_assistant.application.models import (
     StockRadarSort,
     StockRadarView,
 )
+from trading_assistant.market_radar.earnings import EarningsRevisionAggregate
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
     CurrentBreadthSnapshot,
@@ -49,6 +56,7 @@ from trading_assistant.market_radar.storage import MarketRadarRepository
 StockRadarMetricSort = Literal["momentum", "relative_momentum", "volatility", "drawdown"]
 _BREADTH_STALE_AFTER_DAYS = 7
 _MACRO_STALE_AFTER_DAYS = ALIGNMENT_MAX_AGE_DAYS
+_EARNINGS_STALE_AFTER_DAYS = 3
 
 
 def _utc_now() -> datetime:
@@ -90,6 +98,22 @@ def _macro_point(value: MacroRegimePoint) -> MacroRegimePointView:
         volatility_z=value.volatility_z,
         regime=value.regime,
         regime_label=value.regime_label,
+    )
+
+
+def _earnings_aggregate(value: EarningsRevisionAggregate) -> EarningsRevisionAggregateView:
+    return EarningsRevisionAggregateView(
+        validity=value.validity,
+        eligible=value.eligible,
+        observed=value.observed,
+        coverage_ratio=value.coverage_ratio,
+        upward=value.upward,
+        downward=value.downward,
+        unchanged=value.unchanged,
+        breadth=value.breadth,
+        magnitude_observed=value.magnitude_observed,
+        non_positive_or_near_zero=value.non_positive_or_near_zero,
+        median_magnitude=value.median_magnitude,
     )
 
 
@@ -157,6 +181,10 @@ class MarketRadarQueryService:
             macro = self._macro_at(observed_at)
         except QuerySourceError:
             macro = None
+        try:
+            earnings = self._earnings_at(observed_at)
+        except QuerySourceError:
+            earnings = None
         market = None
         coverage = None
         if snapshot is not None:
@@ -177,7 +205,7 @@ class MarketRadarQueryService:
             calculated_at_utc=None if snapshot is None else snapshot.calculated_at_utc,
             coverage=coverage,
             market=market,
-            modules=self._modules(snapshot, source_state, breadth, macro),
+            modules=self._modules(snapshot, source_state, breadth, macro, earnings),
         )
 
     def breadth(self) -> MarketBreadthView:
@@ -187,6 +215,10 @@ class MarketRadarQueryService:
     def macro(self) -> MacroRegimeView:
         """返回同次完整运行原子发布的宏观双轴快照。"""
         return self._macro_at(self._clock().astimezone(UTC))
+
+    def earnings(self) -> MarketEarningsView:
+        """返回最近完整运行发布的统一盈利修正快照。"""
+        return self._earnings_at(self._clock().astimezone(UTC))
 
     def sectors(self) -> SectorRadarListView:
         """返回最新快照中的 11 个板块价格指标。"""
@@ -397,6 +429,62 @@ class MarketRadarQueryService:
             duration_observations=regime.duration_observations,
         )
 
+    def _earnings_at(self, observed_at: datetime) -> MarketEarningsView:
+        if self._repository is None:
+            return self._empty_earnings("missing", observed_at)
+        try:
+            snapshot = self._repository.latest_earnings_revision_snapshot()
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise QuerySourceError(
+                "market_radar_database",
+                "市场雷达盈利修正快照无法安全读取。",
+            ) from exc
+        if snapshot is None:
+            return self._empty_earnings("empty", observed_at)
+        snapshot_age_days = (observed_at.date() - snapshot.as_of_date).days
+        if snapshot_age_days < 0:
+            raise QuerySourceError(
+                "market_radar_database",
+                "市场雷达盈利修正快照无法安全读取。",
+            )
+        validity: MarketEarningsValidity = snapshot.market.validity
+        if snapshot_age_days > _EARNINGS_STALE_AFTER_DAYS:
+            validity = "stale"
+        membership = snapshot.membership
+        return MarketEarningsView(
+            source_state="available",
+            observed_at_utc=observed_at,
+            validity=validity,
+            as_of_date=snapshot.as_of_date,
+            calculated_at_utc=snapshot.calculated_at_utc,
+            source=snapshot.source,
+            freshness=EarningsFreshnessView(
+                snapshot_age_days=snapshot_age_days,
+                stale_after_days=_EARNINGS_STALE_AFTER_DAYS,
+            ),
+            membership=EarningsMembershipView(
+                membership_source=membership.membership_source,
+                membership_date=membership.membership_date,
+                member_count=membership.member_count,
+                classification_source=membership.classification_source,
+                classification_record_count=membership.classification_record_count,
+                classified_member_count=membership.classified_member_count,
+                unclassified_member_count=membership.unclassified_member_count,
+                unused_classification_count=membership.unused_classification_count,
+                classification_validity=membership.classification_validity,
+                classification_coverage_ratio=membership.classification_coverage_ratio,
+            ),
+            watchlist=_earnings_aggregate(snapshot.watchlist),
+            market=_earnings_aggregate(snapshot.market),
+            sectors=tuple(
+                SectorEarningsRevisionView(
+                    sector_id=item.sector,
+                    revisions=_earnings_aggregate(item.revisions),
+                )
+                for item in snapshot.sectors
+            ),
+        )
+
     @staticmethod
     def _empty_breadth(source_state: SourceState, observed_at: datetime) -> MarketBreadthView:
         return MarketBreadthView(
@@ -437,11 +525,28 @@ class MarketRadarQueryService:
         )
 
     @staticmethod
+    def _empty_earnings(source_state: SourceState, observed_at: datetime) -> MarketEarningsView:
+        return MarketEarningsView(
+            source_state=source_state,
+            observed_at_utc=observed_at,
+            validity="unavailable",
+            as_of_date=None,
+            calculated_at_utc=None,
+            source=None,
+            freshness=None,
+            membership=None,
+            watchlist=None,
+            market=None,
+            sectors=(),
+        )
+
+    @staticmethod
     def _modules(
         snapshot: PriceRadarSnapshot | None,
         source_state: SourceState,
         breadth: MarketBreadthView | None,
         macro: MacroRegimeView | None,
+        earnings: MarketEarningsView | None,
     ) -> tuple[RadarModuleView, ...]:
         if snapshot is None:
             price_state: RadarModuleState = "unavailable"
@@ -570,18 +675,45 @@ class MarketRadarQueryService:
                 risk_state,
                 risk_details[risk_state],
             )
+        if earnings is None:
+            earnings_module = RadarModuleView(
+                "earnings_revisions",
+                "EPS 修正",
+                "unavailable",
+                "盈利修正快照无法安全读取; 其他市场雷达模块不受影响。",
+            )
+        elif earnings.source_state != "available":
+            detail = (
+                "市场雷达数据库尚未生成。"
+                if earnings.source_state == "missing"
+                else "市场雷达数据库中还没有盈利修正快照。"
+            )
+            earnings_module = RadarModuleView(
+                "earnings_revisions",
+                "EPS 修正",
+                "unavailable",
+                detail,
+            )
+        else:
+            earnings_details = {
+                "complete": "当前市场 FY1 三十日盈利修正覆盖完整。",
+                "partial": "当前市场 FY1 三十日盈利修正仅有部分成员可计算。",
+                "stale": "盈利修正快照已超过 3 个日历日未更新。",
+                "unavailable": "已发布盈利快照, 但当前市场没有可计算的 FY1 修正。",
+            }
+            earnings_module = RadarModuleView(
+                "earnings_revisions",
+                "EPS 修正",
+                earnings.validity,
+                earnings_details[earnings.validity],
+            )
         return (
             spy_module,
             breadth_module,
             equal_weight_module,
             real_rate_module,
             risk_module,
-            RadarModuleView(
-                "earnings_revisions",
-                "EPS 修正",
-                "unavailable",
-                "R5 盈利预期端点当前无可用权限; 尚未采集。",
-            ),
+            earnings_module,
         )
 
     @staticmethod

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -21,6 +23,8 @@ from trading_assistant.market_radar.fred import (
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
+    CurrentMarketSectorAssignment,
+    CurrentMarketSectorClassification,
 )
 from trading_assistant.market_radar.metrics import PriceBar
 from trading_assistant.market_radar.storage import MarketRadarRepository
@@ -85,6 +89,50 @@ def _spy_bars() -> tuple[PriceBar, ...]:
         )
         for index in range(21)
     )
+
+
+def _calendar_response(url: str, timeout: int) -> bytes:
+    assert timeout == 120
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    symbols = query["symbols"][0].split(",")
+    if parsed.path.endswith("/trends"):
+        groups: list[list[dict[str, object]]] = []
+        for symbol in symbols:
+            current: object = None if symbol == "MSFT.US" else "2.0"
+            analysts: object = "0" if symbol == "MSFT.US" else "5"
+            groups.append(
+                [
+                    {
+                        "code": symbol,
+                        "date": "2027-12-31",
+                        "period": "+1y",
+                        "epsTrendCurrent": current,
+                        "epsTrend30daysAgo": "1.5",
+                        "earningsEstimateNumberOfAnalysts": analysts,
+                        "epsRevisionsUpLast30days": "1",
+                        "epsRevisionsDownLast30days": None,
+                    }
+                ]
+            )
+        return json.dumps({"trends": groups}).encode()
+    return json.dumps(
+        {
+            "earnings": [
+                {
+                    "code": "AAPL.US",
+                    "report_date": "2026-10-20",
+                    "date": "2026-09-30",
+                    "before_after_market": "AfterMarket",
+                    "currency": "USD",
+                    "actual": None,
+                    "estimate": "1.20",
+                    "difference": 0,
+                    "percent": 0,
+                }
+            ]
+        }
+    ).encode()
 
 
 @pytest.mark.parametrize(
@@ -774,4 +822,223 @@ def test_invalid_macro_request_does_not_create_database(
     arguments.update(overrides)
     with pytest.raises(ValueError, match=message):
         asyncio.run(service.sync_market_macro(**arguments))  # type: ignore[arg-type]
+    assert not (tmp_path / "market-radar.db").exists()
+
+
+def _earnings_paths(tmp_path: Path) -> dict[str, object]:
+    return {
+        "membership_source": _FakeMembershipSource(_earnings_membership()),
+        "classification_source": _FakeClassificationSource(_earnings_classification()),
+        "database_url": f"sqlite:///{tmp_path}/market-radar.db",
+        "market_config_path": PROJECT_ROOT / "config" / "market-radar.yaml",
+        "data_config_path": PROJECT_ROOT / "config" / "data.yaml",
+        "eodhd_api_token": "secret-token",
+    }
+
+
+def _earnings_membership() -> CurrentMarketMembership:
+    watchlist = (
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "GOOGL",
+        "AMZN",
+        "META",
+        "JPM",
+        "XOM",
+        "JNJ",
+        "TSLA",
+    )
+    symbols = tuple(sorted((*watchlist, *(f"S{index:03d}" for index in range(42)))))
+    return CurrentMarketMembership(
+        source="fake_current_members",
+        membership_date=date(2026, 9, 2),
+        members=tuple(
+            CurrentMarketMember(symbol, f"{symbol}.US", f"{symbol}.US") for symbol in symbols
+        ),
+    )
+
+
+def _earnings_classification() -> CurrentMarketSectorClassification:
+    membership = _earnings_membership()
+    return CurrentMarketSectorClassification(
+        source="fake_sector_classifications",
+        requested_member_count=len(membership.members),
+        source_record_count=len(membership.members),
+        assignments=tuple(
+            CurrentMarketSectorAssignment(
+                member.instrument_id,
+                "information_technology",
+            )
+            for member in membership.members
+            if member.instrument_id != "MSFT.US"
+        ),
+    )
+
+
+class _FakeClassificationSource:
+    def __init__(self, classification: CurrentMarketSectorClassification) -> None:
+        self.classification = classification
+        self.calls = 0
+
+    async def fetch_current_sector_classification(
+        self,
+        membership: CurrentMarketMembership,
+    ) -> CurrentMarketSectorClassification:
+        self.calls += 1
+        assert len(membership.members) == self.classification.requested_member_count
+        return self.classification
+
+
+def test_market_earnings_sync_uses_fixed_watchlist_window_and_publishes(
+    tmp_path: Path,
+) -> None:
+    requests: list[str] = []
+
+    def transport(url: str, timeout: int) -> bytes:
+        requests.append(url)
+        return _calendar_response(url, timeout)
+
+    moments = iter((STARTED, STARTED + timedelta(minutes=1)))
+    result = asyncio.run(
+        service.sync_market_earnings(
+            **_earnings_paths(tmp_path),  # type: ignore[arg-type]
+            eodhd_transport=transport,
+            clock=lambda: next(moments),
+            run_id_factory=lambda: "earnings-success",
+        )
+    )
+
+    assert result.run_id == "earnings-success"
+    assert result.status == "COMPLETE"
+    assert not result.has_errors
+    assert result.instrument_count == 52
+    assert result.market_member_count == 52
+    assert result.membership_source == "fake_current_members"
+    assert result.membership_date == date(2026, 9, 2)
+    assert result.classification_source == "fake_sector_classifications"
+    assert result.classification_record_count == 52
+    assert result.classified_member_count == 51
+    assert result.unclassified_member_count == 1
+    assert result.unused_classification_count == 1
+    assert result.classification_validity == "partial"
+    assert result.classification_coverage_ratio == pytest.approx(51 / 52)
+    assert result.trend_batch_count == 2
+    assert result.trend_records_fetched == 52
+    assert result.trends_selected == 52
+    assert result.events_fetched == 1
+    assert result.snapshot_date == STARTED.date()
+    assert result.watchlist_revision_validity == "partial"
+    assert result.watchlist_revision_coverage_ratio == pytest.approx(0.9)
+    assert result.market_revision_validity == "partial"
+    assert result.market_revision_coverage_ratio == pytest.approx(51 / 52)
+    assert len(requests) == 3
+
+    first_trend_query = parse_qs(urlparse(requests[0]).query)
+    second_trend_query = parse_qs(urlparse(requests[1]).query)
+    event_query = parse_qs(urlparse(requests[2]).query)
+    assert len(first_trend_query["symbols"][0].split(",")) == 50
+    assert len(second_trend_query["symbols"][0].split(",")) == 2
+    assert len(event_query["symbols"][0].split(",")) == 10
+    assert event_query["from"] == ["2025-09-03"]
+    assert event_query["to"] == ["2026-11-02"]
+    assert first_trend_query["api_token"] == ["secret-token"]
+
+    repository = MarketRadarRepository(
+        str(_earnings_paths(tmp_path)["database_url"]),
+        read_only=True,
+    )
+    run = repository.get_sync_run("earnings-success")
+    assert run is not None
+    assert run.source == "eodhd_earnings"
+    assert run.status == "COMPLETE"
+    assert run.instrument_count == 52
+    assert run.requested_start_date == date(2025, 9, 3)
+    assert run.requested_end_date == date(2026, 11, 2)
+    snapshot = repository.latest_earnings_revision_snapshot()
+    assert snapshot is not None
+    assert snapshot.watchlist.observed == 9
+    assert snapshot.market.observed == 51
+    assert len(snapshot.sectors) == 11
+    assert snapshot.membership.unclassified_member_count == 1
+    repository.close()
+
+
+def test_market_earnings_contract_failure_marks_run_failed_without_snapshot(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def transport(url: str, timeout: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        if urlparse(url).path.endswith("/trends"):
+            return _calendar_response(url, timeout)
+        return b"not-json"
+
+    moments = iter((STARTED, STARTED + timedelta(minutes=1)))
+    with pytest.raises(ValueError, match="invalid JSON"):
+        asyncio.run(
+            service.sync_market_earnings(
+                **_earnings_paths(tmp_path),  # type: ignore[arg-type]
+                eodhd_transport=transport,
+                clock=lambda: next(moments),
+                run_id_factory=lambda: "earnings-failed",
+            )
+        )
+
+    assert calls == 3
+    repository = MarketRadarRepository(
+        str(_earnings_paths(tmp_path)["database_url"]),
+        read_only=True,
+    )
+    run = repository.get_sync_run("earnings-failed")
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.error_summary == "ValueError"
+    assert repository.latest_earnings_revision_snapshot() is None
+    repository.close()
+
+
+def test_market_earnings_second_trend_batch_failure_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def transport(url: str, timeout: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return b"not-json"
+        return _calendar_response(url, timeout)
+
+    moments = iter((STARTED, STARTED + timedelta(minutes=1)))
+    with pytest.raises(ValueError, match="invalid JSON"):
+        asyncio.run(
+            service.sync_market_earnings(
+                **_earnings_paths(tmp_path),  # type: ignore[arg-type]
+                eodhd_transport=transport,
+                clock=lambda: next(moments),
+                run_id_factory=lambda: "earnings-batch-failed",
+            )
+        )
+
+    assert calls == 2
+    repository = MarketRadarRepository(
+        str(_earnings_paths(tmp_path)["database_url"]),
+        read_only=True,
+    )
+    run = repository.get_sync_run("earnings-batch-failed")
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.instruments_processed == 0
+    assert repository.latest_earnings_revision_snapshot() is None
+    repository.close()
+
+
+def test_market_earnings_invalid_token_does_not_create_database(tmp_path: Path) -> None:
+    arguments = _earnings_paths(tmp_path)
+    arguments["eodhd_api_token"] = None
+    with pytest.raises(ValueError, match="EODHD_API_TOKEN"):
+        asyncio.run(service.sync_market_earnings(**arguments))  # type: ignore[arg-type]
     assert not (tmp_path / "market-radar.db").exists()

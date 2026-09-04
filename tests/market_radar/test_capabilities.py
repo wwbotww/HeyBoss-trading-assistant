@@ -20,6 +20,7 @@ from trading_assistant.market_radar.config import MarketRadarConfig, load_market
 
 NOW = datetime(2026, 9, 2, 12, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRED_KEY = "a" * 32
 
 
 def _config() -> MarketRadarConfig:
@@ -59,9 +60,19 @@ def _available_eodhd(url: str, _timeout: int) -> bytes:
             for index in range(10)
         }
     elif "/calendar/trends?" in url:
-        payload = [[{"date": "2026-06-30", "epsEstimateCurrent": "1.0"}]]
+        payload = {
+            "description": "Synthetic trends envelope",
+            "symbols": ["AAPL.US", "MSFT.US"],
+            "trends": [[{"date": "2026-06-30", "epsEstimateCurrent": "1.0"}]],
+            "type": "trends",
+        }
     elif "/calendar/earnings?" in url:
-        payload = [{"report_date": "2026-07-30", "code": "AAPL.US"}]
+        payload = {
+            "description": "Synthetic earnings envelope",
+            "earnings": [{"report_date": "2026-07-30", "code": "AAPL.US"}],
+            "symbols": ["AAPL.US", "MSFT.US"],
+            "type": "earnings",
+        }
     elif "/fundamentals/AAPL.US?" in url or "/fundamentals/JPM.US?" in url:
         payload = {
             "General": {"Code": "AAPL", "UpdatedAt": "2026-08-31"},
@@ -75,8 +86,26 @@ def _available_eodhd(url: str, _timeout: int) -> bytes:
 
 
 def _available_fred(url: str, _timeout: int) -> bytes:
-    series = "BAMLH0A0HYM2" if "BAMLH0A0HYM2" in url else "DFII10"
-    return (f"observation_date,{series}\n2026-08-31,1.25\n2026-09-01,.\n").encode()
+    assert "/series/observations?" in url
+    assert "series_id=DFII10" in url
+    return json.dumps(
+        {
+            "observations": [
+                {
+                    "date": "2026-08-31",
+                    "realtime_start": "2026-09-02",
+                    "realtime_end": "2026-09-02",
+                    "value": "1.25",
+                },
+                {
+                    "date": "2026-09-01",
+                    "realtime_start": "2026-09-02",
+                    "realtime_end": "2026-09-02",
+                    "value": ".",
+                },
+            ]
+        }
+    ).encode()
 
 
 def test_successful_checks_only_persist_structure_and_counts(tmp_path: Path) -> None:
@@ -84,14 +113,15 @@ def test_successful_checks_only_persist_structure_and_counts(tmp_path: Path) -> 
         run_capability_checks(
             config=_config(),
             eodhd_api_token="secret-token",  # noqa: S106
+            fred_api_key=FRED_KEY,
             eodhd_transport=_available_eodhd,
-            public_transport=_available_fred,
+            fred_transport=_available_fred,
             clock=lambda: NOW,
         )
     )
     assert len(report.results) == 12
     assert not report.has_unresolved_failures
-    assert {result.status for result in report.results} == {"available"}
+    assert {result.status for result in report.results} == {"available", "not_in_plan"}
 
     components = next(
         result for result in report.results if result.capability == "index_components_current"
@@ -100,11 +130,22 @@ def test_successful_checks_only_persist_structure_and_counts(tmp_path: Path) -> 
     assert "[]" in components.fields
     assert all("SYM" not in field for field in components.fields)
 
+    trends = next(result for result in report.results if result.capability == "calendar_trends")
+    assert trends.record_count == 1
+    assert "trends[][]" in trends.fields
+    earnings = next(result for result in report.results if result.capability == "earnings_calendar")
+    assert earnings.record_count == 1
+    assert "earnings[]" in earnings.fields
+
     fred = next(result for result in report.results if result.capability == "fred_dfii10")
-    assert fred.record_count == 2
+    assert fred.record_count == 1
     assert fred.null_values == 1
+    assert fred.scalar_values == 2
     assert fred.earliest_date is not None
     assert fred.earliest_date.isoformat() == "2026-08-31"
+    hy_oas = next(result for result in report.results if result.capability == "fred_bamlh0a0hym2")
+    assert hy_oas.status == "not_in_plan"
+    assert hy_oas.http_status is None
 
     path = write_capability_report(report, tmp_path / "reports")
     encoded = path.read_text(encoding="utf-8")
@@ -129,17 +170,16 @@ def test_provider_and_transport_failures_are_classified_without_raw_details() ->
             return b"[]"
         return _available_eodhd(url, _timeout)
 
-    def fred_transport(url: str, timeout: int) -> bytes:
-        if "BAMLH0A0HYM2" in url:
-            raise ConnectionError("private FRED URL")
-        return _available_fred(url, timeout)
+    def fred_transport(_url: str, _timeout: int) -> bytes:
+        raise ConnectionError("private FRED URL")
 
     report = asyncio.run(
         run_capability_checks(
             config=_config(),
             eodhd_api_token="secret-token",  # noqa: S106
+            fred_api_key=FRED_KEY,
             eodhd_transport=eodhd_transport,
-            public_transport=fred_transport,
+            fred_transport=fred_transport,
             clock=lambda: NOW,
         )
     )
@@ -149,7 +189,8 @@ def test_provider_and_transport_failures_are_classified_without_raw_details() ->
     assert statuses["earnings_calendar"] == "invalid"
     assert statuses["economic_events"] == "invalid"
     assert statuses["volatility_vix3m_vix3m_indx"] == "unknown"
-    assert statuses["fred_bamlh0a0hym2"] == "unknown"
+    assert statuses["fred_dfii10"] == "unknown"
+    assert statuses["fred_bamlh0a0hym2"] == "not_in_plan"
     assert report.has_unresolved_failures
     encoded = json.dumps(report.to_dict())
     assert "secret-token" not in encoded
@@ -160,11 +201,11 @@ def test_provider_and_transport_failures_are_classified_without_raw_details() ->
 @pytest.mark.parametrize(
     "payload",
     [
-        b"date,DFII10\n2026-09-01,1.0\n",
-        b"observation_date,OTHER\n2026-09-01,1.0\n",
-        b"observation_date,DFII10\nnot-a-date,1.0\n",
+        b'{"observations":"not-a-list"}',
+        b'{"observations":[{"date":"2026-09-01"}]}',
+        b'{"observations":[{"date":"not-a-date","value":"1.0"}]}',
         b"\xff",
-        b"observation_date,DFII10\n",
+        b'{"observations":[]}',
     ],
 )
 def test_invalid_fred_shapes_are_reported(payload: bytes) -> None:
@@ -172,12 +213,15 @@ def test_invalid_fred_shapes_are_reported(payload: bytes) -> None:
         run_capability_checks(
             config=_config(),
             eodhd_api_token="token",  # noqa: S106
+            fred_api_key=FRED_KEY,
             eodhd_transport=_available_eodhd,
-            public_transport=lambda _url, _timeout: payload,
+            fred_transport=lambda _url, _timeout: payload,
             clock=lambda: NOW,
         )
     )
-    assert all(result.status == "invalid" for result in report.results if result.provider == "fred")
+    statuses = {result.capability: result.status for result in report.results}
+    assert statuses["fred_dfii10"] == "invalid"
+    assert statuses["fred_bamlh0a0hym2"] == "not_in_plan"
 
 
 def test_checker_validates_clock_timeout_and_token() -> None:
@@ -186,6 +230,7 @@ def test_checker_validates_clock_timeout_and_token() -> None:
             run_capability_checks(
                 config=_config(),
                 eodhd_api_token="token",  # noqa: S106
+                fred_api_key=FRED_KEY,
                 clock=lambda: datetime(2026, 1, 1),
             )
         )
@@ -194,6 +239,7 @@ def test_checker_validates_clock_timeout_and_token() -> None:
             run_capability_checks(
                 config=_config(),
                 eodhd_api_token="token",  # noqa: S106
+                fred_api_key=FRED_KEY,
                 timeout_seconds=0,
                 clock=lambda: NOW,
             )
@@ -203,6 +249,17 @@ def test_checker_validates_clock_timeout_and_token() -> None:
             run_capability_checks(
                 config=_config(),
                 eodhd_api_token="",
+                fred_api_key=FRED_KEY,
+                eodhd_transport=_available_eodhd,
+                clock=lambda: NOW,
+            )
+        )
+    with pytest.raises(ValueError, match="FRED_API_KEY"):
+        asyncio.run(
+            run_capability_checks(
+                config=_config(),
+                eodhd_api_token="token",  # noqa: S106
+                fred_api_key="",
                 eodhd_transport=_available_eodhd,
                 clock=lambda: NOW,
             )

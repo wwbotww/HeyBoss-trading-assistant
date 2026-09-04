@@ -12,6 +12,7 @@ from trading_assistant.web_api.schemas import (
     ERROR_RESPONSES,
     MacroRegimeResponse,
     MarketBreadthResponse,
+    MarketEarningsResponse,
     MarketRadarSummaryResponse,
     SectorRadarListResponse,
     SectorRadarResponse,
@@ -50,6 +51,18 @@ def get_macro(
 ) -> MacroRegimeResponse:
     """返回最近完整运行发布的宏观双轴与后端象限分类。"""
     return MacroRegimeResponse.model_validate(services.market_radar.macro())
+
+
+@router.get(
+    "/earnings",
+    response_model=MarketEarningsResponse,
+    operation_id="getMarketRadarEarnings",
+)
+def get_earnings(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+) -> MarketEarningsResponse:
+    """返回最近完整运行发布的统一盈利修正快照。"""
+    return MarketEarningsResponse.model_validate(services.market_radar.earnings())
 
 
 @router.get(

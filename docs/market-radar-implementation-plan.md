@@ -1,6 +1,6 @@
 # 市场雷达实施方案（基于当前仓库）
 
-> 状态：R0 至 R4B 已完成；价格、当前宽度、风险偏好和实际利率宏观象限均已通过真实数据、自动化与响应式浏览器验收。
+> 状态：R0 至 R5D 已完成；价格、当前宽度、宏观象限和统一盈利链路均已通过真实数据、只读 API、Vue 与自动化验收，基本面和经济事件尚未实施。
 > 核对基线：2026-09-04，分支 `feat/market-radar`。
 > 原始产品设想：[HeyBoss 市场雷达数据面板高层实施方案](HeyBoss_market_radar_implementation_plan.md)。
 > 事实优先级：`AGENTS.md` 与 [项目事实源](project-context.md) 高于原始设想；本文再以当前代码和实际供应商能力收敛实施路径。
@@ -18,13 +18,13 @@
 
 当前仓库**不能直接支撑**原始设想中的完整面板：
 
-- EODHD 适配器目前只实现 EOD、拆股和分红，没有指数成分、Calendar Trends、Fundamentals 或 Economic Events；
+- EODHD 业务适配器已覆盖 EOD、拆股、分红、Calendar Trends/Earnings 和指数当前成分行业分类；Fundamentals 与 Economic Events 目前只有能力探测，没有业务同步；
 - `config/instruments.yaml` 仍只管理 10 只可交易普通股；25 只固定监测池和 503 只动态当前成员已与交易资格隔离；
 - 25 只价格监测池和当前 503 个成员均已进入共享 Catalog，但当前成员代理不能用于历史/PIT 宽度回放；
-- 独立市场数据库已有同步运行、价格快照、当前成员、当前宽度、风险偏好、FRED 当前修订观测和宏观象限快照；没有基本面、预期或事件；
-- Web API 与 Vue 已交付价格、当前宽度及完整宏观象限只读展示；盈利、基本面和事件仍未实现；
+- 独立市场数据库已有同步运行、价格、当前成员、当前宽度、风险偏好、FRED 当前修订观测、宏观象限、盈利成员/分类、全市场 FY1 预期、watchlist 财报事件和统一盈利修正快照；没有基本面或经济事件；
+- Web API 与 Vue 已交付价格、当前宽度、完整宏观象限及市场/watchlist/板块盈利修正的只读展示；基本面和经济事件仍未实现；
 - 已有 FRED DFII10 适配器，但没有 Cboe 适配器、常驻调度器或可靠的未来美股交易日历能力；
-- 当前 EODHD Token 已证明 EOD、VIX 与 VIX3M 可用，Calendar、Fundamentals、Economic Events、当前成分和历史成分仍受套餐权限阻塞。
+- 当前 EODHD Token 已证明 EOD、VIX/VIX3M、Calendar、Fundamentals、Economic Events 及当前/历史指数成分均可用；Calendar 与当前成分行业分类已进入盈利业务链路，Fundamentals、Economic Events 和历史成分仍未进入业务链路。
 
 因此不能直接从“画完整页面”开始。推荐采用**数据能力门禁 → 价格纵向切片 → 宽度 → 宏观 → 盈利/基本面/事件 → 完整 UI**的顺序。每一步都能独立验收，缺少数据时返回明确状态，不用占位数据伪装完成。
 
@@ -58,17 +58,17 @@ Vue 3 八个一级页面
 |---|---|---|
 | EOD 价格 | 已实现 EODHD EOD + 双 BarType | 复用同一适配和 Catalog，不建另一套价格数据库 |
 | 监测宇宙 | 25 只固定监测池 + 503 只动态成员已实现 | 与交易清单隔离，Catalog 存在不代表可交易 |
-| 当前市场成员 | State Street SPY 每日持仓适配器已实现；EODHD 成分接口仍为 403 | 继续明确标注当前代理，不实现历史/PIT 成分 |
+| 当前市场成员 | State Street SPY 每日持仓适配器已实现；升级套餐下 EODHD 当前/历史成分接口也已可用 | R3 继续采用已验收的当前 SPY 持仓代理；是否切换来源另立里程碑，不在 R5 中顺带改变口径 |
 | 市场宽度 | 已离线计算并原子发布四项当前快照 | API 只读快照，不现场扫描 500 只股票 |
 | FRED 实际利率/信用 | DFII10 当前修订适配、存储、计算、页面和真实 bootstrap 已完成 | 首版信用继续使用 HYG/LQD，不接入受限 HY OAS |
 | VIX/VIX3M | 已作为 NT `IndexInstrument` 接入 EODHD EOD 与共享 Catalog | R4A 已验证；任一序列缺失时风险偏好模块失败关闭 |
-| EPS Trends/财报日历 | 未实现 | 先探测 EODHD Calendar 权限和字段，再每日留存快照 |
-| Fundamentals | 未实现 | 先探测字段、更新语义和额度；不把当前基本面伪装成历史 PIT 数据 |
-| Economic Events | 未实现 | 先探测端点；MVP 使用明确的日历日期窗口 |
+| EPS Trends/财报日历 | 当前成员 Trends、10 只 watchlist 事件、统一市场/板块聚合、每日存储、CLI、只读 API、Vue 和真实幂等验收已完成 | 从首次采集日起积累，不回填伪 PIT 历史；事件请求不随市场成员扩张，Web 不暴露原始 Trends |
+| Fundamentals | AAPL/JPM 完整响应已确认可用，业务链路未实现 | R5 先建立行业适用性和空值规则，不把当前基本面伪装成历史 PIT 数据 |
+| Economic Events | 美国事件端点已确认可用，业务链路未实现 | R5 MVP 使用明确的 14 个日历日窗口；供应商未返回时间/重要性时不得臆造 |
 | 未来 10 个交易日 | 没有可靠未来交易日历 | MVP 改为 14 个日历日并准确标注；若必须精确 10 个交易日，单独申请日历依赖 |
-| 监测数据库 | 已实现运行、价格、当前成员、宽度、风险偏好、宏观观测与象限七张表 | 继续使用独立 `market-radar.db`，后续按真实调用方增加表 |
+| 监测数据库 | 已实现运行、价格、当前成员、宽度、风险偏好、宏观观测/象限与盈利四类记录共十一张表 | 继续使用独立 `market-radar.db`，后续按真实调用方增加表 |
 | 查询/API | 价格、当前宽度和宏观象限均已有只读分层 | 保持请求路径不访问供应商、Catalog 或计算器 |
-| Vue/ECharts | 市场雷达三视图、当前宽度卡片和宏观象限图已具备 | 后续模块继续使用独立状态和相同设计语言 |
+| Vue/ECharts | 市场雷达三视图、当前宽度卡片、宏观象限图、盈利脉冲及板块盈利矩阵已具备 | 后续模块继续使用独立状态和相同设计语言 |
 | 调度 | 没有常驻调度 | 第一阶段仅提供一次性 CLI；由人工或宿主机外部调度触发 |
 | 交易联动 | 唯一执行链路已有硬约束 | 市场雷达永不发布 `TradeSignalEvent`，不提供下单或审批操作 |
 
@@ -77,7 +77,7 @@ Vue 3 八个一级页面
 1. **“已有 EODHD 适配即可同步全部监测数据”不成立。**现有类只有 `/eod`、`/splits`、`/div` 三类请求，非价格端点需要新增严格解析和测试。
 2. **“直接扩充 `config/instruments.yaml`”不可接受。**该文件同时参与策略、回测和执行身份解析；监测宇宙必须独立。
 3. **“每日用现有 replace 管道刷新 500 只股票”成本过高。**当前 EODHD 路线按完整范围替换，以 500 只股票每日全量重拉不合理。监测同步需要首次全量、日常重叠窗口、周期性全量校验三种明确动作，但仍复用同一 EODHD 解析、BarType 和 Catalog。
-4. **当前阶段不再建设历史/PIT 宽度。**EODHD 当前与历史成分接口均未授权；R3 只使用带 `as_of_date` 的官方 SPY 当日持仓计算一个当前横截面，不能回填过去、不能输出历史宽度走势图，也不能把代理来源标成精确指数成分。
+4. **当前阶段不再建设历史/PIT 宽度。**虽然升级套餐现可访问 EODHD 当前与历史成分，但 R3 已明确采用带 `as_of_date` 的官方 SPY 当日持仓计算当前横截面；不能借新权限回填混合口径历史、输出历史宽度走势图，或把代理来源标成精确指数成分。
 5. **“Calendar Trends 等于完整日度预期历史”不成立。**它包含财政期间记录和固定滞后预期，但不是逐交易日 PIT 快照；连续时间序列只能从首次采集后积累。
 6. **“FRED HY OAS 可稳定提供长期历史”需要重新评估。**FRED 当前提示该 ICE 系列自 2026-04 起只保留三年观测，且有再分发限制；不能把它作为无条件长期真相源。
 7. **“未来十个交易日”暂时没有可靠计算基础。**不能用周一至周五代替交易所日历并忽略节假日。
@@ -288,18 +288,18 @@ MARKET_RADAR_REPORT_ROOT=./reports/market-radar
 | Fundamentals | `AAPL.US` 和 `JPM.US` | 普通企业与金融业字段差异可识别；更新时间可记录 |
 | Economic Events | 美国 30 日日期窗 | 事件类别、日期/时间、重要性、actual/estimate 字段可识别 |
 | VIX/VIX3M | 候选 EODHD 指数代码 | 两条序列均存在、日期对齐、使用权明确 |
-| FRED DFII10 | 最近 90 日 | 日频、缺失值和修订时间语义可处理 |
-| HY OAS | 最近 90 日 | 仅作为可选增强；记录历史范围与使用限制 |
+| FRED DFII10 | 最近三年 | 复用生产 FRED v1 JSON 适配器，日频、缺失值和当前修订时间语义可处理 |
+| HY OAS | 不发请求 | 已裁决退出首版；固定记录为 `not_in_plan`，信用继续使用 HYG/LQD ETF 代理 |
 
 输出一份被 Git 忽略的 `reports/market-radar/capability-check-*.json`，并生成一份可提交的字段差异摘要。真实供应商数据不进入 fixture；测试使用合成 payload。
 
-### 6.2 已由官方资料确认、但仍需 Token 实测的事实
+### 6.2 已由官方资料与真实能力探测确认的事实
 
 - EODHD EOD API支持按 symbol 返回日/周/月 OHLC、adjusted close 和 volume；现有项目已用日线实现。
-- EODHD Fundamentals 的指数响应包含当前成分；官方文档描述 S&P 指数族的历史成员区间，并说明 S&P 500 的额外历史快照能力，但当前 Token 对两者均返回 403。
+- EODHD Fundamentals 的指数响应包含当前成分与历史成员区间；升级套餐实测两个过滤入口均返回可解析数据。
 - State Street 的 SPY 产品页提供带日期的每日全持仓下载；SPY 以跟踪 S&P 500 为目标，但基金持仓与指数成分不是同一法律和数据产品，因此页面必须标注为 SPY 持仓代理。
-- EODHD Calendar 包含 earnings 和 trends；trends 返回财政期间记录及固定滞后的一致预期，不等于每日 PIT 归档。
-- EODHD Economic Events 是独立端点，不能假设当前 EOD 套餐自动包含。
+- EODHD Calendar 包含 earnings 和 trends；真实响应均为对象信封，记录分别位于 `earnings` 与二维 `trends` 字段。trends 返回财政期间记录及固定滞后的一致预期，不等于每日 PIT 归档。
+- EODHD Economic Events 是独立端点；升级套餐实测可用，但当前响应只有事件日期而没有可靠的日内时间或重要性字段。
 - FRED `DFII10` 是日频 10 年期实际利率序列。
 - FRED `BAMLH0A0HYM2` 是日频 HY OAS，但官方页面当前说明自 2026-04 起仅保留三年观测，并带 ICE 数据使用约束。
 - Cboe 提供 VIX 官方历史数据页面；VIX3M 的稳定程序化入口和许可仍需单独确认。
@@ -311,9 +311,9 @@ MARKET_RADAR_REPORT_ROOT=./reports/market-radar
 1. 固定价格、板块价格、个股趋势/风险：EODHD + 现有 NT Catalog；
 2. 当前市场宽度成员：State Street SPY 每日持仓；成员价格仍使用 EODHD + 现有 NT Catalog；
 3. 实际利率：FRED `DFII10`；
-4. 信用：默认 `HYG/LQD` 20 日相对收益，HY OAS 仅在历史和许可确认后作为增强；
+4. 信用：固定使用 `HYG/LQD` 20 日相对收益；HY OAS 已退出首版，未来若重新考虑须另立数据许可与模型口径裁决；
 5. 波动率：只有 VIX 和 VIX3M 同时有可靠来源时才计算期限结构；
-6. 盈利、基本面和事件：仅在对应 EODHD 权限探测通过后启用。
+6. 盈利、基本面和事件：权限门禁已通过；当前市场/板块盈利已完成只读查询/API/Vue 纵向链路，watchlist 财报事件已落库但尚未展示；基本面和经济事件尚未建模。
 
 任何关键源未通过时，相关模块返回 `unconfigured`、`missing`、`stale`、`insufficient_coverage` 或 `unavailable`，不得偷偷改公式。
 
@@ -337,7 +337,7 @@ R0 已使用本地有效 Token 串行执行 10 次 EODHD 和 2 次 FRED 只读�
 
 以上保留 R0 当时的原始结论。R4B 在 2026-09-04 配置 FRED API Key 后已通过 v1 JSON 适配器完成真实 DFII10 bootstrap；HY OAS 仍未启用。
 
-由于同一 Token 对 EOD 与波动率端点返回 200，对附加端点返回 403，可以证明 Token 本身有效；403 更可能是套餐授权边界，但最终仍以 EODHD 账户套餐页面或官方支持回复为准。
+当时同一 Token 对 EOD 与波动率端点返回 200、对附加端点返回 403，因此原结论确为套餐授权边界而非 Token 失效；该结论已被下述升级后复验取代。
 
 R0 后的实际执行顺序调整为：
 
@@ -345,7 +345,26 @@ R0 后的实际执行顺序调整为：
 2. R2 可使用 EOD、VIX 和 VIX3M 已证明能力推进价格型页面；
 3. R3 降级为当前市场宽度：只计算最新 SPY 持仓快照的横截面，不提供 PIT 或历史宽度；
 4. R4 先保留 HYG/LQD 与 VIX/VIX3M 输入，DFII10 在获得 FRED API Key 后复验；
-5. R5 在 Calendar、Fundamentals 和 Economic Events 权限获得前不编码对应业务模型。
+5. R5A 在套餐升级后重新核验能力契约；通过后才允许为 Calendar、Fundamentals 和 Economic Events 冻结业务模型。
+
+### 6.5 R5A 升级套餐复验（2026-09-04）
+
+R5A 使用本地有效的 EODHD 与 FRED 凭据重新运行同一只读能力 CLI。探测器已按真实 Calendar 对象信封取出记录容器，并删除与生产代码分叉的 FRED 公共 CSV 路径，改为直接复用 R4B 的 FRED v1 JSON 来源适配器。HY OAS 不再发起网络请求，而是记录已裁决的 `not_in_plan`。
+
+| 能力 | 实际结果 | 记录/结构摘要 | R5 结论 |
+|---|---|---|---|
+| `SPY.US` EOD | `available`，HTTP 200 | 22 行，最新 2026-09-03 | 既有价格链路保持可用 |
+| `GSPC.INDX` 当前成分 | `available`，HTTP 200 | 503 个成员 | 新来源可用，但不在 R5 内替换已验收的 R3 来源 |
+| `GSPC.INDX` 历史成分 | `available`，HTTP 200 | 819 条成员区间 | 权限已具备；历史/PIT 宽度仍不在当前路线 |
+| Calendar Trends | `available`，HTTP 200 | `trends` 二维列表共 194 条，覆盖两只探测标的 | EPS 预期与修正可以进入严格业务建模 |
+| Earnings Calendar | `available`，HTTP 200 | `earnings` 列表 9 条，含 report date、盘前/盘后、actual/estimate | 财报事件可以进入严格业务建模 |
+| AAPL/JPM Fundamentals | `available`，HTTP 200 | 两种行业样本均返回 13 个顶层区块 | 质量与估值可以进入字段适用性设计 |
+| Economic Events | `available`，HTTP 200 | 美国窗口 667 条；含日期、actual/estimate/previous/type，不含可靠日内时间和重要性 | 事件轴只能按日历日期和已有字段表达 |
+| `VIX.INDX` / `VIX3M.INDX` | `available`，HTTP 200 | 分别 22/24 行，最新 2026-09-03 | R4 输入继续可用 |
+| FRED `DFII10` | `available`，HTTP 200 | 749 个有效观测、33 个显式缺失，最新 2026-09-02 | 生产与能力探测使用同一适配路径 |
+| FRED HY OAS | `not_in_plan`，未请求 | 无远端调用 | 首版信用固定使用 HYG/LQD ETF 代理 |
+
+本次 11 项在计划内的远端能力全部为 `available`，CLI 正常返回 0；唯一非 available 项是主动退出计划的 HY OAS。报告仍只保存状态、字段、数量、日期范围和脱敏错误类别，位于 Git 忽略目录，原始响应和凭据均未进入仓库。R5 的外部权限门禁已经解除，但业务解析、PIT 语义、存储、计算、API 和页面均尚未实现，不能把“端点可访问”表述成“R5 功能已完成”。
 
 ## 7. 价格与监测宇宙设计
 
@@ -544,6 +563,8 @@ R4B 已冻结并实现实际利率横轴：FRED v1 JSON 的 `DFII10` 当前修�
 
 ### 10.4 盈利预期
 
+- State Street SPY 每日持仓决定当前成员，EODHD Components 只补充板块分类；两侧差异不改变成员集合；
+- Trends 覆盖当前成员与 watchlist 并集，固定每批 50 只顺序请求；财报事件仍只覆盖 watchlist；
 - FY1 当前与 30 日前预期计算修正宽度；
 - 正且远离零的 EPS 才进入百分比修正幅度；
 - 负/近零 EPS 只进入方向宽度，并单独报告数量；
@@ -655,6 +676,8 @@ uv run --frozen --env-file .env python scripts/sync_market_radar.py \
   --end 2026-09-03
 ```
 
+能力检查 CLI 同时要求 `EODHD_API_TOKEN` 与 `FRED_API_KEY`；它对 EODHD 能力发起有限串行请求，并通过生产 FRED v1 适配器探测 DFII10，不请求已退出计划的 HY OAS。
+
 `--mode` 必填，避免默认执行具有不同覆盖含义的写入。省略日期时按 `config/data.yaml` 的 `history_years` 计算目标窗口；`--instrument` 可重复使用以选择本次同步标的。快照计算始终读取 Catalog 中完整的 25 只配置监测池，因此首次隔离联调至少需要包含 SPY，正式发布前应完成全池 bootstrap。
 
 三个模式都有真实且不同的写入实现：
@@ -701,7 +724,7 @@ uv run --frozen --env-file .env python scripts/sync_market_breadth.py \
 
 ### R0：数据能力与契约核验
 
-状态：已完成（2026-09-03），实际结论见 6.4。
+状态：已完成（2026-09-03），原始结论见 6.4；套餐升级后的能力契约校正见 6.5 与 R5A。
 
 目标：证明当前 Token、字段、历史范围、额度和许可，不改交易行为。
 
@@ -944,23 +967,100 @@ uv run --frozen --env-file .env python scripts/sync_market_breadth.py \
 
 ### R5：盈利、基本面与事件
 
-前提：对应 EODHD 端点权限和字段已通过 R0。
+前提：对应 EODHD 端点权限和响应结构已通过 R5A 真实核验。
 
-交付：
+#### R5A：能力契约校正（已完成）
 
-- Calendar Trends、Earnings、Fundamentals、Economic Events 同步；
-- EPS 修正、surprise、板块盈利修正；
-- 个股质量与估值；
-- 未来 14 个日历日事件轴；
-- 如果用户另行批准可靠交易日历依赖，再改为精确未来 10 个美股交易日。
+状态：已完成（2026-09-04）。
+
+实际改动：
+
+- Calendar Trends 与 Earnings 按真实对象信封中的 `trends`、`earnings` 记录容器做结构、数量、日期与空值统计，同时保留信封字段用于结构审计；
+- 能力检查要求 `FRED_API_KEY`，并直接复用生产 `FredApiObservationSource` 的 v1 JSON 解析、认证和错误分类，不再维护公共 CSV 特例；
+- HY OAS 固定为不发远端请求的 `not_in_plan`，与 R4 的 HYG/LQD 信用代理裁决一致；
+- 合成测试只使用结构等价 payload，能力报告仍不保存供应商原始值、完整 URL 或凭据；
+- 未修改数据库、API、Vue、市场指标或交易链路，未增加依赖。
 
 验收：
 
-- 负 EPS、近零 EPS、无分析师、字段字符串/null 都有测试；
-- 金融与 REIT 不使用错误口径；
-- 首次采集前不伪造日度预期/估值历史；
-- 事件时间未知时明确显示 TBD；
-- 不提交真实供应商 fixture。
+- 9 项能力探测单元测试、ruff 和 mypy strict 通过；
+- 真实 CLI 中 11 项计划内远端能力全部 `available`，Calendar Trends/Earnings 分别正确统计 194/9 条，DFII10 统计 749 个有效观测与 33 个显式缺失；
+- HY OAS 为 `not_in_plan` 且不发请求；CLI 返回 0；
+- 真实报告只写入 Git 忽略的临时目录，未提交凭据或供应商 payload。
+
+#### R5B：watchlist 盈利预期与财报事件后端（已完成）
+
+状态：已完成（2026-09-04）。
+
+实际交付：
+
+- 新增 EODHD Calendar 业务适配器，经共享认证 HTTP 边界请求 `calendar/trends` 与 `calendar/earnings`；只对连接中断、超时、429 和 5xx 做有限重试，认证、请求拒绝、坏 JSON 与字段漂移失败关闭；
+- 采集宇宙固定为 `market-radar.yaml` 中 10 只 watchlist，不复用两只探测样本，也不声明为 S&P 500 市场或板块口径；
+- Trends 按供应商真实二维对象信封解析；每个标的在全部财政期历史中只选择 `period=+1y` 且 `date` 最大的一条，保留当前/30 日前 EPS、分析师数及 30 日上调/下调计数；
+- 修正方向要求当前与 30 日前 EPS 均有限且分析师数大于零，容差固定为 `1e-9`；宽度为 `(up-down)/observed`；幅度只对两期 EPS 都大于 `0.01` 的标的计算相对变化中位数；
+- Earnings 固定采集运行 UTC 日期向前 365 日、向后 60 日的 report-date 闭区间，保存财政期、报告日、盘前/盘后/未知、actual、estimate 和 currency；estimate 缺失时不计算 surprise，也不信任供应商可能返回的零 difference；
+- 新增 `earnings_trend_observations`、`earnings_calendar_events`、`earnings_revision_snapshots`。真实发布时间不可验证，两个观测表的 `available_at_utc` 明确为 null；
+- `scripts/sync_market_earnings.py` 不提供日期或模式参数，避免伪造回填。相同 UTC 日期重跑会在一个事务中替换当日两类观测、更新快照并把运行从 RUNNING 转为 COMPLETE；新日期才追加；
+- 没有原始 payload、schema version、manifest 或哈希；没有 Catalog、交易数据库、Web API、Vue、调度、风控或执行改动，也没有新增依赖。
+
+已完成验收：
+
+- 合成测试覆盖嵌套信封、最新 FY1 选择、字符串/null、负值与近零、无分析师、方向容差、幅度排除、事件区间、未知 session、缺失 estimate、重复记录、认证不重试、临时错误重试和坏响应失败关闭；
+- 存储测试覆盖空值保留、同日替换、跨日追加、损坏快照拒绝以及“观测 + 快照 + COMPLETE”事务整体回滚；
+- 完整 Python 回归 465 项通过、总覆盖率 90.00%；ruff、mypy strict、OpenAPI 类型再生成、Vue format/lint/typecheck/test 等全量 pre-commit 门禁通过；
+- 本机有效 Token 在 `/private/tmp` 隔离数据库连续运行两次真实 CLI：每次请求 10/10 标的，读取 962 条 Trends 原始记录并选择 10 条最新 FY1，读取 45 条财报事件，发布 2026-09-04 的 `complete` 修正快照，覆盖 10/10；
+- 同日第二次完成后数据库仍只有 10 条 FY1 观测、45 条事件和 1 条当日快照，快照指向第二次 COMPLETE 运行；5 条 actual 缺失保持 null，全部 `available_at_utc` 保持 null；
+- 隔离数据库和真实供应商响应未进入 Git。
+
+#### R5C：当前市场与板块盈利修正（已完成）
+
+状态：已完成（2026-09-04）。
+
+实际交付：
+
+- State Street SPY 每日持仓继续作为带日期的当前成员权威来源；新增独立 `CurrentMarketSectorClassificationSource`，首个实现读取 EODHD `GSPC.INDX` Components。分类适配器只能为权威成员补充 11 个标准板块，不能通过交集或并集改变成员集合；
+- EODHD 的 11 个供应商板块名称在适配器内显式映射到项目标准板块；普通代码追加 `.US`，`BRK-B`、`BF-B` 等类别股代码保持项目使用的连字符形式。来源侧额外分类被忽略但计数，权威成员未匹配时以 null 行业保存并计入 `unclassified`；
+- Calendar Trends 请求集合改为“当前成员与 10 只 watchlist 的并集”，固定每批 50 只、严格顺序执行。任一批认证、网络、JSON 或响应结构失败都会让整次同步 FAILED，不返回或发布部分结果；
+- Calendar Earnings 保持原有 10 只 watchlist 和运行日向前 365 日、向后 60 日闭区间，不随市场成员扩张；
+- 同一组最新 FY1 记录和同一套分析师/EPS 有效性规则同时计算 watchlist、当前市场和 11 个板块的方向宽度与幅度中位数；合法数据缺失不设任意门槛，而以精确分母、`complete`、`partial` 或 `unavailable` 表达；
+- 新增 `earnings_market_members`；原有 Trends、事件和快照表继续构成同一条同步链路。同一 UTC 日期重跑会在一个事务中替换当日成员/分类、Trends、事件与快照后完成运行，新日期才追加；
+- R5B 尚未发布的 watchlist-only 快照模型已直接替换为统一无版本 payload，没有兼容层、迁移注册表、manifest 或哈希；没有 API、Vue、Fundamentals、Economic Events、调度、交易链路或第三方依赖改动。
+
+已完成验收：
+
+- 单元与集成测试覆盖 50 只分批边界、第二批失败不发布、两侧成员差异、11 个板块映射、类别股代码、完整/部分/不可用覆盖、统一 payload 严格恢复、成员/观测/事件/快照同日替换及事务回滚；
+- 完整 Python 回归 481 项通过，总覆盖率 90.44%；ruff 与 mypy strict 通过；
+- 本机有效 Token 使用 `/private/tmp` 隔离数据库连续执行两次真实 CLI，每次取得 503 个 State Street 权威成员和 503 条 EODHD 分类记录；502 个成员成功分类，`VMRK.US` 保持未分类，1 条分类来源记录不属于权威成员；
+- 每次按 11 批读取 45,330 条 Trends 原始记录并为 503 只标的各选择一条最新 FY1；watchlist 的 45 条财报事件未扩张。watchlist 修正覆盖 10/10，市场修正覆盖 501/503；
+- 第二次同日运行后隔离库仍只有 503 条成员、503 条 Trends、45 条事件和 1 条快照，11 个板块齐全且当日业务记录全部指向第二次 COMPLETE 运行；两个 COMPLETE 运行审计记录均保留；
+- 隔离数据库、凭据和供应商原始响应均未进入 Git。
+
+#### R5D：盈利修正只读 API 与 Vue（已完成）
+
+状态：已完成（2026-09-04）。
+
+实际交付：
+
+- 应用查询层新增统一盈利投影和无参数 `GET /api/market-radar/earnings`；只读取最近 COMPLETE 运行发布的快照，不访问 EODHD、Catalog、同步服务或计算器，也不暴露原始 Trends；
+- 响应同时携带市场、10 只 watchlist、11 个板块聚合，以及成员与行业分类覆盖。方向宽度、幅度样本、非正/近零排除数和 null 均直接保留，不在传输层重新计算或补零；
+- 快照相对查询日超过 3 个日历日时，顶层状态为 `stale`；各聚合仍保留采集时的 `complete`、`partial` 或 `unavailable`，未来日期与损坏 payload 失败关闭；
+- 六项总览中的 EPS 修正改为读取全市场真实状态。盈利读取损坏只降级盈利模块，不隐藏价格、当前宽度或宏观象限；
+- Vue 总览新增市场与 watchlist 盈利预期脉冲、方向计数、覆盖率、成员/分类来源和新鲜度；板块表及详情抽屉展示对应盈利聚合，并分别标注价格与盈利日期；
+- 个股接口没有扩张，页面明确说明当前只发布市场/板块聚合；没有历史曲线、事件轴、同步按钮、交易动作、写请求或新增第三方依赖。
+
+已完成验收：
+
+- Python 覆盖缺库、空库、完整、部分、不可用、3 日边界、4 日陈旧、未来快照、损坏脱敏和模块隔离；API 路由、OpenAPI 生成类型和集中客户端保持 GET-only；
+- 本机真实 R5C 隔离数据库经新查询层读出 503 个成员、501 个有效市场修正、10/10 watchlist 和 11 个板块；502/503 行业分类、1 个未分类成员、1 条未使用分类及 7 个幅度排除样本均保持原值；
+- 完整隔离场景在 1440、768、375 三档完成浏览器验收：整页均无横向溢出，桌面板块表无需滚动，窄屏只在表格容器内滚动，375px 详情抽屉恰好占满视口；
+- 完整 Python 回归 487 项通过，总覆盖率 90.58%；前端 14 个测试文件共 45 项通过，ruff、mypy strict、Prettier、ESLint、TypeScript strict、OpenAPI 再生成和生产构建通过。
+
+#### R5 后续业务切片（待逐项确认）
+
+- 后续独立切片：Fundamentals 的行业适用性、个股质量与估值；Economic Events 与未来 14 个日历日事件轴；
+- 若要把 14 个日历日改为精确 10 个美股交易日，仍需另行批准可靠交易日历依赖。
+
+后续验收仍要求金融与 REIT 不使用错误口径、首次采集前不伪造日度预期/估值历史、事件时间未知时显示 TBD，且不提交真实供应商 fixture。
 
 ### R6：完整页面与交互验收
 
@@ -1072,7 +1172,7 @@ R0–R2 没有新增第三方依赖。R3A 经用户明确批准新增直接生�
 - API：已有 FastAPI/Pydantic；
 - UI：已有 Vue/ECharts。
 
-唯一可预见但暂不批准的依赖是可靠美股交易日历库。当前项目没有该能力，手写假期表风险更高。R5 前应提交单独的依赖提案；未批准时事件窗口保持“未来 14 个日历日”，不冒充“10 个交易日”。
+唯一可预见但暂不批准的依赖是可靠美股交易日历库。当前项目没有该能力，手写假期表风险更高。R5 事件切片前若要改变当前口径，应提交单独的依赖提案；未批准时事件窗口保持“未来 14 个日历日”，不冒充“10 个交易日”。
 
 ## 18. 全局完成标准
 
@@ -1080,7 +1180,7 @@ R0–R2 没有新增第三方依赖。R3A 经用户明确批准新增直接生�
 
 1. 真实同步任务能产生至少一个完整快照；
 2. Web 只从只读 API 展示，不在前端计算金融指标；
-3. 三个视图正常，未授权数据模块有真实降级状态；
+3. 三个视图正常，尚未实现或不可用的数据模块有真实降级状态；
 4. 当前市场宽度使用带日期的 SPY 持仓代理和每项指标的真实 eligible/observed 分母，并明确不提供 PIT 历史；
 5. 所有模块披露日期、来源、覆盖率和有效性；
 6. 没有综合买入分、下单按钮或第二条执行路径；
@@ -1104,6 +1204,6 @@ R0–R2 没有新增第三方依赖。R3A 经用户明确批准新增直接生�
 
 ## 20. 推荐下一步
 
-R4B 已形成“EODHD/NT Catalog 风险纵轴 + FRED DFII10 当前修订横轴 → 有界 as-of 对齐 → 独立数据库原子 bundle → 只读 API → Vue 象限图”的完整工程链路，并通过真实数据、自动化与三档响应式浏览器验收。
+R5D 已把 R5C 统一盈利快照接入只读应用服务、FastAPI、OpenAPI 和 Vue。总览展示市场与 watchlist 盈利脉冲，板块矩阵和详情抽屉展示 11 板块聚合；原始 Trends、个股修正和采集控制均未暴露给 Web。Calendar Earnings 的 10 只 watchlist 事件已落库，但尚未形成事件轴。
 
-下一阶段是否进入 R5 取决于 EODHD Calendar、Fundamentals 和 Economic Events 权限；R0 的现有 Token 对这些端点均为 403，在权限未变化前不应编写无法用真实数据验收的业务模型或以替代值伪装完成。
+下一步应在“Fundamentals 质量与估值”和“Economic Events 事件轴”两个独立切片中选择一个并冻结精确契约；任何切片都不得顺带加入交易动作或让 Web 请求现场访问供应商。开始编码前仍须按项目约束提交文件清单、关键接口和验收方式并获得确认。

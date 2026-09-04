@@ -11,16 +11,26 @@ from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from trading_assistant.market_radar.earnings import (
+    EarningsCalendarEvent,
+    EarningsRevisionSnapshot,
+    Fy1EarningsTrend,
+)
 from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import RiskAppetiteSnapshot
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
+    CurrentMarketSectorClassification,
 )
 from trading_assistant.market_radar.metrics import CurrentBreadthSnapshot, PriceRadarSnapshot
 from trading_assistant.market_radar.models import (
     CurrentBreadthSnapshotRecord,
     CurrentMarketMemberRecord,
+    EarningsCalendarEventRecord,
+    EarningsMarketMemberRecord,
+    EarningsRevisionSnapshotRecord,
+    EarningsTrendObservationRecord,
     MacroObservationRecord,
     MacroRegimeSnapshotRecord,
     MarketRadarBase,
@@ -562,6 +572,185 @@ class MarketRadarRepository:
                     for record in records
                 ),
             )
+
+    def publish_earnings_bundle_and_complete(
+        self,
+        run_id: str,
+        *,
+        membership: CurrentMarketMembership,
+        classification: CurrentMarketSectorClassification,
+        trends: tuple[Fy1EarningsTrend, ...],
+        events: tuple[EarningsCalendarEvent, ...],
+        snapshot: EarningsRevisionSnapshot,
+        ingested_at_utc: datetime,
+        completed_at_utc: datetime,
+        instruments_processed: int,
+    ) -> None:
+        """同事务替换当日成员、观测、快照并完成同步运行。"""
+        ingested_at = _utc(ingested_at_utc)
+        completed_at = _utc(completed_at_utc)
+        if snapshot.as_of_date != ingested_at.date():
+            raise ValueError("earnings snapshot date must match its UTC ingestion date")
+        member_ids = tuple(item.instrument_id for item in membership.members)
+        assignment_ids = tuple(item.instrument_id for item in classification.assignments)
+        if classification.requested_member_count != len(member_ids) or not set(
+            assignment_ids
+        ).issubset(member_ids):
+            raise ValueError("earnings classification does not match membership")
+        coverage = snapshot.membership
+        if (
+            coverage.membership_source != membership.source
+            or coverage.membership_date != membership.membership_date
+            or coverage.member_count != len(member_ids)
+            or coverage.classification_source != classification.source
+            or coverage.classification_record_count != classification.source_record_count
+            or coverage.classified_member_count != classification.classified_member_count
+            or coverage.unclassified_member_count != classification.unclassified_member_count
+            or coverage.unused_classification_count != classification.unused_source_record_count
+        ):
+            raise ValueError("earnings snapshot coverage does not match its sources")
+        trend_ids = tuple(item.instrument_id for item in trends)
+        if len(trend_ids) != len(set(trend_ids)):
+            raise ValueError("earnings trends must contain unique instruments")
+        event_keys = tuple(
+            (item.instrument_id, item.report_date, item.fiscal_period_end) for item in events
+        )
+        if len(event_keys) != len(set(event_keys)):
+            raise ValueError("earnings events must contain unique business keys")
+
+        with self._sessions.begin() as session:
+            run = session.get(MarketRadarSyncRunRecord, run_id)
+            if run is None or run.status != "RUNNING":
+                raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
+            if (
+                run.instrument_count < len(member_ids)
+                or len(trend_ids) > run.instrument_count
+                or instruments_processed != run.instrument_count
+            ):
+                raise ValueError("earnings run counts do not match the requested universe")
+
+            sector_by_instrument = {
+                item.instrument_id: item.sector for item in classification.assignments
+            }
+            session.execute(
+                delete(EarningsMarketMemberRecord).where(
+                    EarningsMarketMemberRecord.as_of_date == snapshot.as_of_date
+                )
+            )
+            session.add_all(
+                EarningsMarketMemberRecord(
+                    as_of_date=snapshot.as_of_date,
+                    instrument_id=item.instrument_id,
+                    run_id=run_id,
+                    membership_date=membership.membership_date,
+                    membership_source=membership.source,
+                    source_symbol=item.source_symbol,
+                    data_symbol=item.data_symbol,
+                    sector=sector_by_instrument.get(item.instrument_id),
+                    classification_source=classification.source,
+                    ingested_at_utc=ingested_at,
+                )
+                for item in membership.members
+            )
+
+            session.execute(
+                delete(EarningsTrendObservationRecord).where(
+                    EarningsTrendObservationRecord.as_of_date == snapshot.as_of_date
+                )
+            )
+            session.add_all(
+                EarningsTrendObservationRecord(
+                    as_of_date=snapshot.as_of_date,
+                    instrument_id=item.instrument_id,
+                    run_id=run_id,
+                    fiscal_period_end=item.fiscal_period_end,
+                    eps_current=item.eps_current,
+                    eps_30_days_ago=item.eps_30_days_ago,
+                    analyst_count=item.analyst_count,
+                    revisions_up_30_days=item.revisions_up_30_days,
+                    revisions_down_30_days=item.revisions_down_30_days,
+                    available_at_utc=None,
+                    ingested_at_utc=ingested_at,
+                )
+                for item in trends
+            )
+
+            session.execute(
+                delete(EarningsCalendarEventRecord).where(
+                    EarningsCalendarEventRecord.as_of_date == snapshot.as_of_date
+                )
+            )
+            session.add_all(
+                EarningsCalendarEventRecord(
+                    as_of_date=snapshot.as_of_date,
+                    instrument_id=item.instrument_id,
+                    report_date=item.report_date,
+                    fiscal_period_end=item.fiscal_period_end,
+                    run_id=run_id,
+                    session=item.session,
+                    currency=item.currency,
+                    actual_eps=item.actual_eps,
+                    estimated_eps=item.estimated_eps,
+                    available_at_utc=None,
+                    ingested_at_utc=ingested_at,
+                )
+                for item in events
+            )
+
+            existing = session.get(EarningsRevisionSnapshotRecord, snapshot.as_of_date)
+            payload = snapshot.to_payload()
+            calculated_at = _utc(snapshot.calculated_at_utc)
+            if existing is None:
+                session.add(
+                    EarningsRevisionSnapshotRecord(
+                        as_of_date=snapshot.as_of_date,
+                        run_id=run_id,
+                        calculated_at_utc=calculated_at,
+                        payload_json=payload,
+                    )
+                )
+            else:
+                existing.run_id = run_id
+                existing.calculated_at_utc = calculated_at
+                existing.payload_json = payload
+
+            run.status = "COMPLETE"
+            run.completed_at_utc = completed_at
+            run.instruments_processed = instruments_processed
+            run.bars_fetched = 0
+            run.bars_written = 0
+            run.error_summary = None
+
+    def latest_earnings_revision_snapshot(self) -> EarningsRevisionSnapshot | None:
+        """返回最近 COMPLETE 运行发布的统一盈利修正快照。"""
+        with self._sessions() as session:
+            record = session.scalar(
+                select(EarningsRevisionSnapshotRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == EarningsRevisionSnapshotRecord.run_id,
+                )
+                .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                .order_by(
+                    EarningsRevisionSnapshotRecord.as_of_date.desc(),
+                    EarningsRevisionSnapshotRecord.calculated_at_utc.desc(),
+                )
+                .limit(1)
+            )
+            if record is None:
+                return None
+            try:
+                snapshot = EarningsRevisionSnapshot.from_payload(record.payload_json)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("persisted earnings revision snapshot is invalid") from exc
+            calculated_at = _loaded_utc(record.calculated_at_utc)
+            if (
+                snapshot.as_of_date != record.as_of_date
+                or calculated_at is None
+                or snapshot.calculated_at_utc != calculated_at
+            ):
+                raise RuntimeError("persisted earnings revision snapshot metadata is inconsistent")
+            return snapshot
 
     def fail_sync_run(
         self,

@@ -7,6 +7,17 @@ from trading_assistant.market_radar.capabilities import (
     write_capability_report,
 )
 from trading_assistant.market_radar.config import MarketRadarConfig, load_market_radar_config
+from trading_assistant.market_radar.earnings import (
+    EarningsCalendarEvent,
+    EarningsMarketCoverage,
+    EarningsRevisionAggregate,
+    EarningsRevisionSnapshot,
+    Fy1EarningsTrend,
+    SectorEarningsRevision,
+    calculate_earnings_revision_snapshot,
+)
+from trading_assistant.market_radar.eodhd_calendar import EodhdCalendarSource
+from trading_assistant.market_radar.eodhd_components import EodhdIndexComponentsSource
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
     RiskAppetitePoint,
@@ -17,6 +28,9 @@ from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
     CurrentMarketMembershipSource,
+    CurrentMarketSectorAssignment,
+    CurrentMarketSectorClassification,
+    CurrentMarketSectorClassificationSource,
 )
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
@@ -40,10 +54,12 @@ from trading_assistant.market_radar.prices import (
 from trading_assistant.market_radar.service import (
     MarketBreadthSyncMode,
     MarketBreadthSyncSummary,
+    MarketEarningsSyncSummary,
     MarketMacroSyncSummary,
     MarketRadarPriceSyncSummary,
     MarketRadarSyncMode,
     sync_current_market_breadth,
+    sync_market_earnings,
     sync_market_macro,
     sync_market_radar_prices,
 )
@@ -57,8 +73,19 @@ __all__ = [
     "CurrentMarketMember",
     "CurrentMarketMembership",
     "CurrentMarketMembershipSource",
+    "CurrentMarketSectorAssignment",
+    "CurrentMarketSectorClassification",
+    "CurrentMarketSectorClassificationSource",
+    "EarningsCalendarEvent",
+    "EarningsMarketCoverage",
+    "EarningsRevisionAggregate",
+    "EarningsRevisionSnapshot",
+    "EodhdCalendarSource",
+    "EodhdIndexComponentsSource",
+    "Fy1EarningsTrend",
     "MarketBreadthSyncMode",
     "MarketBreadthSyncSummary",
+    "MarketEarningsSyncSummary",
     "MarketMacroSyncSummary",
     "MarketPriceMetrics",
     "MarketRadarConfig",
@@ -73,18 +100,21 @@ __all__ = [
     "RiskAppetiteComponents",
     "RiskAppetitePoint",
     "RiskAppetiteSnapshot",
+    "SectorEarningsRevision",
     "SectorPriceMetrics",
     "StockPriceMetrics",
     "build_macro_price_instrument_specs",
     "build_membership_instrument_specs",
     "build_price_instrument_specs",
     "calculate_current_breadth_snapshot",
+    "calculate_earnings_revision_snapshot",
     "calculate_price_snapshot",
     "calculate_risk_appetite_snapshot",
     "load_internal_price_bars",
     "load_market_radar_config",
     "run_capability_checks",
     "sync_current_market_breadth",
+    "sync_market_earnings",
     "sync_market_macro",
     "sync_market_radar_prices",
     "write_capability_report",

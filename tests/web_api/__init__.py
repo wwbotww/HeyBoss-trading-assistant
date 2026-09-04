@@ -13,6 +13,10 @@ from tests.data.helpers import make_bar, utc_ns
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.execution.events import TradeSignalEvent
+from trading_assistant.market_radar.earnings import (
+    Fy1EarningsTrend,
+    calculate_earnings_revision_snapshot,
+)
 from trading_assistant.market_radar.fred import FredObservation
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
@@ -22,6 +26,8 @@ from trading_assistant.market_radar.macro import (
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
     CurrentMarketMembership,
+    CurrentMarketSectorAssignment,
+    CurrentMarketSectorClassification,
 )
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
@@ -400,5 +406,71 @@ def seed_market_radar_data(
         instruments_processed=4,
         bars_fetched=8_000,
         bars_written=8_000,
+    )
+    earnings_timestamp = datetime(today.year, today.month, today.day, 1, tzinfo=UTC)
+    earnings_membership = CurrentMarketMembership(
+        source="state_street_spy_holdings",
+        membership_date=today - timedelta(days=1),
+        members=(
+            CurrentMarketMember("AAPL", "AAPL.US", "AAPL.US"),
+            CurrentMarketMember("MSFT", "MSFT.US", "MSFT.US"),
+        ),
+    )
+    earnings_classification = CurrentMarketSectorClassification(
+        source="eodhd_components",
+        requested_member_count=2,
+        source_record_count=2,
+        assignments=(
+            CurrentMarketSectorAssignment("AAPL.US", "information_technology"),
+            CurrentMarketSectorAssignment("MSFT.US", "energy"),
+        ),
+    )
+    earnings_trends = (
+        Fy1EarningsTrend(
+            instrument_id="AAPL.US",
+            fiscal_period_end=date(today.year + 1, 9, 30),
+            eps_current=8,
+            eps_30_days_ago=7.5,
+            analyst_count=30,
+            revisions_up_30_days=5,
+            revisions_down_30_days=1,
+        ),
+        Fy1EarningsTrend(
+            instrument_id="MSFT.US",
+            fiscal_period_end=date(today.year + 1, 6, 30),
+            eps_current=14,
+            eps_30_days_ago=14.2,
+            analyst_count=35,
+            revisions_up_30_days=2,
+            revisions_down_30_days=4,
+        ),
+    )
+    earnings = calculate_earnings_revision_snapshot(
+        as_of_date=today,
+        calculated_at_utc=earnings_timestamp,
+        watchlist=("AAPL.US", "MSFT.US"),
+        membership=earnings_membership,
+        classification=earnings_classification,
+        sector_ids=("information_technology", "energy"),
+        trends=earnings_trends,
+    )
+    repository.start_sync_run(
+        run_id="web-earnings-run",
+        source="eodhd_calendar",
+        started_at_utc=earnings_timestamp,
+        requested_start_date=today - timedelta(days=1),
+        requested_end_date=today,
+        instrument_count=2,
+    )
+    repository.publish_earnings_bundle_and_complete(
+        "web-earnings-run",
+        membership=earnings_membership,
+        classification=earnings_classification,
+        trends=earnings_trends,
+        events=(),
+        snapshot=earnings,
+        ingested_at_utc=earnings_timestamp,
+        completed_at_utc=earnings_timestamp + timedelta(minutes=1),
+        instruments_processed=2,
     )
     repository.close()

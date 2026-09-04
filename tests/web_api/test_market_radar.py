@@ -30,7 +30,7 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
         "complete",
         "complete",
         "complete",
-        "unavailable",
+        "complete",
     ]
 
     breadth = client.get("/api/market-radar/breadth")
@@ -60,6 +60,22 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
     assert macro_payload["current"]["regime_label"] == "宽松型 Risk-on"
     assert macro_payload["real_rate"]["series_id"] == "DFII10"
     assert macro_payload["risk_appetite"]["score"] == 0.6
+
+    earnings = client.get("/api/market-radar/earnings")
+    assert earnings.status_code == 200
+    earnings_payload = earnings.json()
+    assert earnings_payload["source_state"] == "available"
+    assert earnings_payload["validity"] == "complete"
+    assert earnings_payload["source"] == "eodhd_calendar"
+    assert earnings_payload["freshness"] == {
+        "snapshot_age_days": 0,
+        "stale_after_days": 3,
+    }
+    assert earnings_payload["membership"]["classification_validity"] == "complete"
+    assert earnings_payload["market"]["eligible"] == 2
+    assert earnings_payload["market"]["observed"] == 2
+    assert earnings_payload["market"]["breadth"] == 0
+    assert earnings_payload["sectors"][0]["sector_id"] == "information_technology"
 
     sectors = client.get("/api/market-radar/sectors")
     assert sectors.status_code == 200
@@ -102,6 +118,10 @@ def test_missing_database_and_invalid_entities_have_explicit_boundaries(tmp_path
     assert macro.status_code == 200
     assert macro.json()["source_state"] == "missing"
     assert macro.json()["current"] is None
+    earnings = client.get("/api/market-radar/earnings")
+    assert earnings.status_code == 200
+    assert earnings.json()["source_state"] == "missing"
+    assert earnings.json()["market"] is None
     assert client.get("/api/market-radar/sectors/unknown").status_code == 404
     assert client.get("/api/market-radar/stocks/AAPL.US").status_code == 404
 
@@ -200,3 +220,27 @@ def test_corrupt_macro_isolated_from_price_and_breadth(tmp_path: Path) -> None:
     modules = {item["module_id"]: item for item in summary.json()["modules"]}
     assert modules["market_breadth"]["state"] == "complete"
     assert modules["real_rates"]["state"] == "unavailable"
+
+
+def test_corrupt_earnings_isolated_from_other_market_modules(tmp_path: Path) -> None:
+    seed_market_radar_data(tmp_path)
+    with sqlite3.connect(tmp_path / "market-radar.db") as connection:
+        connection.execute(
+            "UPDATE earnings_revision_snapshots SET payload_json = ?",
+            ('{"unexpected": true}',),
+        )
+    client = TestClient(
+        create_app(web_settings(tmp_path, account="")), raise_server_exceptions=False
+    )
+
+    earnings = client.get("/api/market-radar/earnings")
+    assert earnings.status_code == 503
+    assert earnings.headers["content-type"].startswith("application/problem+json")
+    assert "token" not in earnings.text
+    summary = client.get("/api/market-radar/summary")
+    assert summary.status_code == 200
+    assert summary.json()["market"]["spy_return_20"]["value"] == 0.04
+    modules = {item["module_id"]: item for item in summary.json()["modules"]}
+    assert modules["market_breadth"]["state"] == "complete"
+    assert modules["real_rates"]["state"] == "complete"
+    assert modules["earnings_revisions"]["state"] == "unavailable"

@@ -30,6 +30,8 @@ MacroRegimeValidity = Literal[
     "stale",
     "unavailable",
 ]
+EarningsRevisionValidity = Literal["complete", "partial", "unavailable"]
+MarketEarningsValidity = Literal["complete", "partial", "stale", "unavailable"]
 MacroRegimeCode = Literal[
     "transition",
     "easing_risk_on",
@@ -531,6 +533,72 @@ class MacroRegimeView:
     current: MacroRegimePointView | None
     trajectory: tuple[MacroRegimePointView, ...]
     duration_observations: int
+
+
+@dataclass(frozen=True)
+class EarningsFreshnessView:
+    """盈利修正快照相对查询时点的新鲜度。"""
+
+    snapshot_age_days: int
+    stale_after_days: int
+
+
+@dataclass(frozen=True)
+class EarningsRevisionAggregateView:
+    """一个标的集合的盈利修正覆盖和聚合投影。"""
+
+    validity: EarningsRevisionValidity
+    eligible: int
+    observed: int
+    coverage_ratio: float
+    upward: int
+    downward: int
+    unchanged: int
+    breadth: float | None
+    magnitude_observed: int
+    non_positive_or_near_zero: int
+    median_magnitude: float | None
+
+
+@dataclass(frozen=True)
+class EarningsMembershipView:
+    """市场成员与行业分类联接质量投影。"""
+
+    membership_source: str
+    membership_date: date
+    member_count: int
+    classification_source: str
+    classification_record_count: int
+    classified_member_count: int
+    unclassified_member_count: int
+    unused_classification_count: int
+    classification_validity: EarningsRevisionValidity
+    classification_coverage_ratio: float
+
+
+@dataclass(frozen=True)
+class SectorEarningsRevisionView:
+    """单个标准板块的盈利修正聚合。"""
+
+    sector_id: str
+    revisions: EarningsRevisionAggregateView
+
+
+@dataclass(frozen=True)
+class MarketEarningsView:
+    """最近完整运行发布的统一盈利修正快照。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    validity: MarketEarningsValidity
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    source: str | None
+    freshness: EarningsFreshnessView | None
+    membership: EarningsMembershipView | None
+    watchlist: EarningsRevisionAggregateView | None
+    market: EarningsRevisionAggregateView | None
+    sectors: tuple[SectorEarningsRevisionView, ...]
 
 
 @dataclass(frozen=True)

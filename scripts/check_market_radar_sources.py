@@ -40,12 +40,16 @@ def main() -> int:
     token = os.getenv("EODHD_API_TOKEN", "").strip()
     if not token:
         parser.error("EODHD_API_TOKEN is required")
+    fred_api_key = os.getenv("FRED_API_KEY", "").strip()
+    if not fred_api_key:
+        parser.error("FRED_API_KEY is required")
     try:
         config = load_market_radar_config(args.config)
         report = asyncio.run(
             run_capability_checks(
                 config=config,
                 eodhd_api_token=token,
+                fred_api_key=fred_api_key,
                 timeout_seconds=args.timeout_seconds,
             )
         )
