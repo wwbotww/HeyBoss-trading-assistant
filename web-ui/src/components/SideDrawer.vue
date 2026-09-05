@@ -8,10 +8,12 @@ const props = withDefaults(
     title: string
     description?: string
     width?: string
+    fallbackFocus?: HTMLElement | null
   }>(),
   {
     description: '',
     width: '560px',
+    fallbackFocus: null,
   },
 )
 
@@ -24,6 +26,18 @@ const closeButton = ref<HTMLButtonElement | null>(null)
 const titleId = useId()
 const descriptionId = useId()
 let previousFocus: HTMLElement | null = null
+let active = false
+let disposed = false
+
+function canFocus(element: HTMLElement | null | undefined): element is HTMLElement {
+  return (
+    !!element?.isConnected &&
+    element !== document.body &&
+    element.matches('a[href], button, input, select, textarea, [tabindex]') &&
+    !element.matches(':disabled, [aria-disabled="true"]') &&
+    !element.closest('[hidden], [inert], [aria-hidden="true"]')
+  )
+}
 
 function focusableElements(): HTMLElement[] {
   if (!panel.value) {
@@ -31,9 +45,9 @@ function focusableElements(): HTMLElement[] {
   }
   return Array.from(
     panel.value.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      'a[href], button, input, select, textarea, [tabindex]',
     ),
-  )
+  ).filter((element) => canFocus(element) && element.tabIndex >= 0)
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -51,12 +65,15 @@ function handleKeydown(event: KeyboardEvent): void {
   const elements = focusableElements()
   if (elements.length === 0) {
     event.preventDefault()
-    panel.value?.focus()
+    panel.value?.focus({ preventScroll: true })
     return
   }
   const first = elements[0]
   const last = elements.at(-1)
-  if (event.shiftKey && document.activeElement === first) {
+  if (!panel.value?.contains(document.activeElement)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first)?.focus({ preventScroll: true })
+  } else if (event.shiftKey && document.activeElement === first) {
     event.preventDefault()
     last?.focus()
   } else if (!event.shiftKey && document.activeElement === last) {
@@ -65,29 +82,46 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
+function release(): void {
+  if (!active) return
+  active = false
+  document.removeEventListener('keydown', handleKeydown)
+  document.body.classList.remove('drawer-open')
+}
+
 watch(
   () => props.open,
   async (open) => {
     if (open) {
+      active = true
       previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
       document.addEventListener('keydown', handleKeydown)
       document.body.classList.add('drawer-open')
       await nextTick()
-      closeButton.value?.focus()
+      if (props.open && !disposed) closeButton.value?.focus({ preventScroll: true })
       return
     }
-    document.removeEventListener('keydown', handleKeydown)
-    document.body.classList.remove('drawer-open')
-    previousFocus?.focus()
+    if (!active) return
+    const target = previousFocus
+    release()
     previousFocus = null
+    await nextTick()
+    if (props.open || disposed) return
+    if (canFocus(target)) target.focus({ preventScroll: true })
+    else if (canFocus(props.fallbackFocus)) props.fallbackFocus.focus({ preventScroll: true })
   },
   { immediate: true },
 )
 
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', handleKeydown)
-  document.body.classList.remove('drawer-open')
-  previousFocus?.focus()
+  disposed = true
+  if (!active) return
+  const target = previousFocus
+  release()
+  previousFocus = null
+  void nextTick(() => {
+    if (canFocus(target)) target.focus({ preventScroll: true })
+  })
 })
 </script>
 
@@ -162,6 +196,11 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 1.26rem;
   letter-spacing: -0.035em;
+}
+
+.drawer-panel > header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .drawer-panel header p:last-child {

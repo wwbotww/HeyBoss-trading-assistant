@@ -161,3 +161,70 @@ def test_client_rejects_token_override_and_invalid_json() -> None:
         client.build_url("eod/SPY.US", {"api_token": "other"})
     with pytest.raises(ValueError, match="invalid JSON"):
         asyncio.run(client.request_json("eod/SPY.US"))
+
+
+@pytest.mark.parametrize("failure", [ConnectionError, TimeoutError, EodhdTemporaryHttpError])
+def test_shared_json_retry_is_bounded_and_redacted(
+    failure: type[Exception],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+    delays: list[float] = []
+
+    def transport(_url: str, _timeout: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        raise failure(503)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    client = EodhdHttpClient(
+        api_token="sensitive-token",  # noqa: S106
+        request_timeout_seconds=1,
+        max_attempts=3,
+        retry_backoff_seconds=(2, 5),
+        transport=transport,
+        sleep=sleep,
+    )
+    with pytest.raises(failure):
+        asyncio.run(client.request_json("fundamentals/AAPL.US"))
+    assert calls == 3
+    assert delays == [2, 5]
+    assert "sensitive-token" not in caplog.text
+
+
+@pytest.mark.parametrize("failure", [EodhdAuthenticationError, EodhdRejectedHttpError, ValueError])
+def test_shared_json_does_not_retry_auth_rejection_or_bad_json(failure: type[Exception]) -> None:
+    calls = 0
+
+    def transport(_url: str, _timeout: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        if failure is ValueError:
+            return b"not-json"
+        raise failure(403)
+
+    client = EodhdHttpClient(
+        api_token="test-token",  # noqa: S106
+        request_timeout_seconds=1,
+        max_attempts=3,
+        retry_backoff_seconds=(0, 0),
+        transport=transport,
+    )
+    with pytest.raises(failure):
+        asyncio.run(client.request_json("fundamentals/AAPL.US"))
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("attempts", "backoff"), [(0, ()), (3, (0,)), (2, (-1,)), (2, (float("nan"),))]
+)
+def test_shared_retry_rejects_invalid_budget(attempts: int, backoff: tuple[float, ...]) -> None:
+    with pytest.raises(ValueError, match=r"attempts|backoff"):
+        EodhdHttpClient(
+            api_token="test-token",  # noqa: S106
+            request_timeout_seconds=1,
+            max_attempts=attempts,
+            retry_backoff_seconds=backoff,
+        )

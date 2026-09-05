@@ -30,11 +30,20 @@ describe('应用壳', () => {
 
   it('移动端菜单包含完整分组导航', async () => {
     installApiMock()
-    const { wrapper } = await mountPage(AppShell)
+    const { wrapper, router } = await mountPage(AppShell)
     await flushPromises()
 
-    await wrapper.get('button[aria-label="打开主导航"]').trigger('click')
+    const opener = wrapper.get<HTMLButtonElement>('button[aria-label="打开主导航"]')
+    opener.element.focus()
+    await opener.trigger('click')
     expect(wrapper.text()).toContain('研究与系统')
     expect(wrapper.text()).toContain('页面不形成第二条执行路径')
+    expect(document.body.classList.contains('drawer-open')).toBe(true)
+    await router.push('/market-radar')
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.body.classList.contains('drawer-open')).toBe(false)
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
   })
 })

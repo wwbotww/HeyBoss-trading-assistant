@@ -14,7 +14,7 @@ class MarketRadarBase(DeclarativeBase):
 
 
 class MarketRadarSyncRunRecord(MarketRadarBase):
-    """一次价格监测数据同步运行。"""
+    """一次独立市场数据同步运行。"""
 
     __tablename__ = "sync_runs"
 
@@ -195,4 +195,41 @@ class EarningsRevisionSnapshotRecord(MarketRadarBase):
         index=True,
     )
     calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class FundamentalObservationRecord(MarketRadarBase):
+    """当前采集日每只股票的最小规范输入, 不冒充历史可用数据。"""
+
+    __tablename__ = "fundamental_observations"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), index=True)
+    ingested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class FundamentalSnapshotRecord(MarketRadarBase):
+    """规范输入与指标在同事务发布的当前基本面快照。"""
+
+    __tablename__ = "fundamental_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), unique=True, index=True)
+    calculated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class EconomicEventSnapshotRecord(MarketRadarBase):
+    """当前美国经济事件规范批次, 含合法空批次。"""
+
+    __tablename__ = "economic_event_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("sync_runs.run_id"), unique=True, index=True)
+    captured_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)

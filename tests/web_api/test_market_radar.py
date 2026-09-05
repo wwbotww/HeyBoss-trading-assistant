@@ -2,15 +2,280 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.web_api import seed_market_radar_data, web_settings
+from tests.web_api import seed_fundamental_data, seed_market_radar_data, seed_web_data, web_settings
 from trading_assistant.market_radar.metrics import BreadthMetric
 from trading_assistant.web_api.app import create_app
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt"])
+def test_market_database_failure_does_not_break_other_read_only_pages(
+    tmp_path: Path, state: str
+) -> None:
+    """市场库缺失或损坏不影响交易/研究查询, 也不会通过查询创建或修复文件。"""
+    workflow = seed_web_data(tmp_path)
+    market = tmp_path / "market-radar.db"
+    if state == "corrupt":
+        market.write_bytes(b"invalid market database")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with TestClient(create_app(web_settings(tmp_path))) as client:
+        radar = client.get("/api/market-radar/summary")
+        assert radar.status_code == (200 if state == "missing" else 503)
+        if state == "missing":
+            assert radar.json()["source_state"] == "missing"
+        for path in (
+            "/api/health",
+            "/api/overview",
+            "/api/portfolio",
+            "/api/strategy/active",
+            "/api/factors/latest",
+            "/api/workflows",
+            f"/api/workflows/{workflow}",
+            "/api/orders",
+            "/api/orders/O-WEB-1",
+            "/api/fills",
+            "/api/backtests/web-run",
+            "/api/data/catalog",
+            "/api/system/status",
+        ):
+            assert client.get(path).status_code == 200, path
+        assert client.get("/api/portfolio").json()["net_liquidation"] == 10_000
+        assert client.get("/api/orders").json()["items"][0]["client_order_id"] == "O-WEB-1"
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_events_get_preserves_fields_scope_and_read_only_contract(tmp_path: Path) -> None:
+    seed_market_radar_data(tmp_path)
+    database = tmp_path / "market-radar.db"
+    before = database.read_bytes()
+    with TestClient(create_app(web_settings(tmp_path, account=""))) as client:
+        response = client.get("/api/market-radar/events")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["days"]) == 14
+        assert payload["window_start"] == payload["days"][0]["day"]
+        assert payload["window_end"] == payload["days"][-1]["day"]
+        for key in ("economic_source", "earnings_source"):
+            assert payload[key]["source_state"] == "available"
+            assert payload[key]["window_event_count"] == 1
+            assert payload[key]["coverage"]["covered_days"] == 14
+            assert payload[key]["freshness"]["stale_after_seconds"] == 86400
+        assert payload["earnings_source"]["watchlist_count"] == 2
+        economic = payload["days"][0]["economic_events"][0]
+        earnings = payload["days"][0]["earnings_events"][0]
+        assert economic["actual"] == 0
+        assert economic["estimate"] is economic["source_time"] is None
+        assert "event_time_utc" not in economic
+        assert "importance" not in economic
+        assert earnings["session"] == "unknown"
+        assert earnings["currency"] is None
+        assert earnings["actual_eps"] == 0
+        assert earnings["estimated_eps"] == -0.1
+        assert "available_at_utc" not in earnings
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            assert client.request(method, "/api/market-radar/events").status_code == 405
+        route = client.get("/openapi.json").json()["paths"]["/api/market-radar/events"]["get"]
+        assert route["operationId"] == "getMarketRadarEvents"
+        assert not route.get("parameters")
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "old_schema"])
+def test_event_missing_sources_do_not_create_database_or_tables(tmp_path: Path, state: str) -> None:
+    database = tmp_path / "market-radar.db"
+    if state != "missing":
+        with sqlite3.connect(database) as connection:
+            if state == "old_schema":
+                connection.execute("CREATE TABLE legacy (sample TEXT)")
+    before = database.read_bytes() if database.exists() else None
+    with TestClient(create_app(web_settings(tmp_path, account=""))) as client:
+        response = client.get("/api/market-radar/events")
+        assert response.status_code == 200
+        payload = response.json()
+        for key in ("economic_source", "earnings_source"):
+            assert payload[key]["source_state"] == ("missing" if state == "missing" else "empty")
+            assert payload[key]["coverage"] is payload[key]["window_event_count"] is None
+        assert len(payload["days"]) == 14
+        assert all(
+            not day["economic_events"] and not day["earnings_events"] for day in payload["days"]
+        )
+    assert (database.read_bytes() if database.exists() else None) == before
+
+
+@pytest.mark.parametrize("case", ["economic", "earnings", "both", "unreadable", "unrelated"])
+def test_event_http_errors_are_source_isolated_and_sanitized(tmp_path: Path, case: str) -> None:
+    seed_market_radar_data(tmp_path)
+    database = tmp_path / "market-radar.db"
+    with sqlite3.connect(database) as connection:
+        if case in {"economic", "both"}:
+            connection.execute(
+                "UPDATE economic_event_snapshots SET payload_json = ?", ('{"token":"secret"}',)
+            )
+        if case in {"earnings", "both"}:
+            connection.execute("UPDATE earnings_calendar_events SET session = ?", ("private-time",))
+        if case == "unrelated":
+            connection.execute("DROP TABLE earnings_trend_observations")
+            connection.execute("DROP TABLE fundamental_observations")
+            connection.execute(
+                "UPDATE price_snapshots SET payload_json = ?", ('{"token":"secret"}',)
+            )
+    if case == "unreadable":
+        database.write_bytes(b"not a database: secret")
+    before = database.read_bytes()
+    with TestClient(create_app(web_settings(tmp_path, account=""))) as client:
+        response = client.get("/api/market-radar/events")
+        assert "secret" not in response.text
+        assert "private-time" not in response.text
+        assert str(database) not in response.text
+        if case in {"both", "unreadable"}:
+            assert response.status_code == 503
+            assert response.headers["content-type"].startswith("application/problem+json")
+        else:
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["economic_source"]["source_state"] == (
+                "invalid" if case == "economic" else "available"
+            )
+            assert payload["earnings_source"]["source_state"] == (
+                "invalid" if case == "earnings" else "available"
+            )
+    assert database.read_bytes() == before
+
+
+def test_fundamentals_get_returns_published_batch_without_price_intersection(
+    tmp_path: Path,
+) -> None:
+    snapshot = seed_fundamental_data(tmp_path)
+    database = tmp_path / "market-radar.db"
+    before = database.read_bytes()
+    client = TestClient(create_app(web_settings(tmp_path, account="")))
+    response = client.get("/api/market-radar/fundamentals")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_state"] == "available"
+    assert payload["validity"] == snapshot.validity
+    assert payload["as_of_date"] == "2026-09-05"
+    assert payload["source"] == "eodhd_fundamentals"
+    assert [item["instrument_id"] for item in payload["items"]] == [
+        "AAPL.US",
+        "JPM.US",
+        "REIT.US",
+        "UNKNOWN.US",
+    ]
+    assert [item["metrics"] for item in payload["items"]] == [
+        item["metrics"] for item in snapshot.to_payload()["items"]
+    ]
+    assert client.get("/api/market-radar/stocks/JPM.US").status_code == 404
+    assert len(client.get("/api/market-radar/summary").json()["modules"]) == 6
+    assert client.post("/api/market-radar/fundamentals").status_code == 405
+    route = client.get("/openapi.json").json()["paths"]["/api/market-radar/fundamentals"]["get"]
+    assert route["operationId"] == "getMarketRadarFundamentals"
+    assert not route.get("parameters")
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "old_schema"])
+def test_fundamentals_missing_or_old_database_never_creates_tables(
+    tmp_path: Path, state: str
+) -> None:
+    database = tmp_path / "market-radar.db"
+    if state == "old_schema":
+        seed_market_radar_data(tmp_path)
+        with sqlite3.connect(database) as connection:
+            connection.execute("DROP TABLE fundamental_snapshots")
+            connection.execute("DROP TABLE fundamental_observations")
+    elif state == "empty":
+        with sqlite3.connect(database):
+            pass
+    before = database.read_bytes() if database.exists() else None
+    client = TestClient(create_app(web_settings(tmp_path, account="")))
+    response = client.get("/api/market-radar/fundamentals")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_state"] == ("missing" if state == "missing" else "empty")
+    assert payload["validity"] == "unavailable"
+    assert payload["freshness"] is None
+    assert payload["as_of_date"] is None
+    assert payload["calculated_at_utc"] is None
+    assert payload["source"] is None
+    assert payload["items"] == []
+    assert (database.read_bytes() if database.exists() else None) == before
+
+
+def test_fundamentals_query_never_reads_inputs_or_recomputes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_fundamental_data(tmp_path)
+    with sqlite3.connect(tmp_path / "market-radar.db") as connection:
+        connection.execute("DROP TABLE fundamental_observations")
+
+    def forbidden(**kwargs: object) -> None:
+        raise AssertionError("query must not recalculate fundamentals")
+
+    monkeypatch.setattr(
+        "trading_assistant.market_radar.storage.calculate_fundamental_snapshot", forbidden
+    )
+    client = TestClient(create_app(web_settings(tmp_path, account="")))
+    assert client.get("/api/market-radar/fundamentals").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "payload",
+        "metadata",
+        "future_source",
+        "future_period",
+        "schema",
+        "invalid_json",
+        "invalid_time",
+    ],
+)
+def test_corrupt_fundamentals_fail_closed_without_breaking_other_modules(
+    tmp_path: Path, case: str
+) -> None:
+    seed_market_radar_data(tmp_path)
+    seed_fundamental_data(tmp_path)
+    with sqlite3.connect(tmp_path / "market-radar.db") as connection:
+        if case == "schema":
+            connection.execute("DROP TABLE fundamental_snapshots")
+            connection.execute("CREATE TABLE fundamental_snapshots (wrong_column TEXT)")
+        elif case == "metadata":
+            connection.execute("UPDATE fundamental_snapshots SET as_of_date = '2000-01-01'")
+        elif case == "invalid_json":
+            connection.execute("UPDATE fundamental_snapshots SET payload_json = '{broken'")
+        elif case == "invalid_time":
+            connection.execute("UPDATE fundamental_snapshots SET calculated_at_utc = 'not-a-time'")
+        else:
+            payload = json.loads(
+                connection.execute("SELECT payload_json FROM fundamental_snapshots").fetchone()[0]
+            )
+            if case == "payload":
+                payload = {"secret": "/private/api-token-must-not-leak"}
+            elif case == "future_source":
+                payload["items"][0]["source_updated_date"] = "2099-01-01"
+            else:
+                payload["items"][0]["metrics"][0]["period_end"] = "2099-01-01"
+            connection.execute(
+                "UPDATE fundamental_snapshots SET payload_json = ?", (json.dumps(payload),)
+            )
+    client = TestClient(create_app(web_settings(tmp_path, account="")))
+    response = client.get("/api/market-radar/fundamentals")
+    assert response.status_code == 503
+    assert response.json()["code"] == "source_unavailable"
+    assert "/private" not in response.text
+    assert "wrong_column" not in response.text
+    summary = client.get("/api/market-radar/summary")
+    assert summary.status_code == 200
+    assert len(summary.json()["modules"]) == 6
+    for path in ("stocks/AAPL.US", "breadth", "earnings", "macro"):
+        assert client.get(f"/api/market-radar/{path}").status_code == 200
 
 
 def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> None:

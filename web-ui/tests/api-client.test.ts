@@ -12,6 +12,8 @@ import {
   fetchLatestFactor,
   fetchMarketRadarBreadth,
   fetchMarketRadarEarnings,
+  fetchMarketRadarEvents,
+  fetchMarketRadarFundamentals,
   fetchMarketRadarMacro,
   fetchMarketRadarSector,
   fetchMarketRadarSectors,
@@ -62,6 +64,8 @@ describe('只读 API client', () => {
       fetchMarketRadarSummary(),
       fetchMarketRadarBreadth(),
       fetchMarketRadarEarnings(),
+      fetchMarketRadarEvents(),
+      fetchMarketRadarFundamentals(),
       fetchMarketRadarMacro(),
       fetchMarketRadarSectors(),
       fetchMarketRadarSector('information_technology'),
@@ -69,14 +73,21 @@ describe('只读 API client', () => {
       fetchMarketRadarStock('AAPL.US'),
     ])
 
-    expect(responses).toHaveLength(30)
-    expect(fetchMock).toHaveBeenCalledTimes(30)
+    expect(responses).toHaveLength(32)
+    expect(fetchMock).toHaveBeenCalledTimes(32)
     for (const call of fetchMock.mock.calls) {
       const request = call[0]
       expect(request).toBeInstanceOf(Request)
       if (request instanceof Request) {
         expect(request.method).toBe('GET')
         expect(new URL(request.url).pathname).toMatch(/^\/api\//)
+        if (
+          ['/fundamentals', '/events'].some((suffix) =>
+            new URL(request.url).pathname.endsWith(suffix),
+          )
+        ) {
+          expect(new URL(request.url).search).toBe('')
+        }
       }
     }
   })

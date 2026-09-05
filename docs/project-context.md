@@ -16,11 +16,17 @@
 - 策略运行方式：每次 backtest/live 只允许一个活动策略；
 - 审批方式：Telegram manual 或配置为 auto；
 - 运行形态：本地 Python 或 Docker Compose；
-- Web：只读 Python Web API、Vue 3 八个一级页面、Compose 本机部署与响应式浏览器验收均已完成；市场雷达页面已接通价格、SPY 当前持仓代理宽度、宏观象限和统一盈利修正快照，具体设计见 `web-rebuild.md` 与 `market-radar-implementation-plan.md`；
+- Web：只读 Python Web API、Vue 3 八个一级页面、Compose 本机部署与响应式浏览器验收均已完成；市场雷达页面已接通价格、SPY 当前持仓代理宽度、宏观象限、统一盈利修正和个股基本面快照，具体设计见 `web-rebuild.md` 与 `market-radar-implementation-plan.md`；
 - 市场宏观象限：HYG/LQD、VIX/VIX3M 走 EODHD/NT Catalog，DFII10 走独立 FRED 当前修订适配器；两轴及来源观测在独立市场数据库内原子发布，再由只读 API 和 Vue 展示，真实数据 bootstrap 已完成验收。
 - 盈利链路：State Street SPY 每日持仓是当前市场成员权威来源，EODHD `GSPC.INDX` Components 只提供可替换行业分类；Calendar Trends 覆盖当前成员与 10 只 watchlist 的并集，Earnings 事件仍只覆盖 watchlist。每日原子保存成员/分类、最新 FY1、过去 365 日至未来 60 日事件，以及 watchlist、市场和 11 板块聚合；无参数只读 API 和 Vue 已展示市场、watchlist 与板块聚合，原始 Trends 和个股修正不对 Web 暴露。
 
-当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、盈利预期历史曲线与个股修正、基本面雷达、经济事件雷达、新闻采集或大语言模型分析。
+- 基本面链路：EODHD 当前 Fundamentals 已覆盖配置中的 10 只 watchlist；身份、行业适用性、财报期及币种校验后计算单项比率，同日原子保存最小规范输入与严格快照。已通过真实同步、同日重跑、复算与只读 API 验收；Vue 个股页以“趋势与风险 / 财务与估值”分维度展示，复用一个详情抽屉，两个来源的日期和状态独立。
+- 事件链路：EODHD 美国经济事件一次性采集当前 UTC 日期起的 31 日闭区间，并在独立市场库原子发布。只读 API/Vue 已把经济快照和同批已发布 watchlist 财报接入含查询当天的 14 日事件轴；两类来源的状态、新鲜度和日期覆盖独立，支持来源/日期筛选与详情，不重复采集财报事件。已随新版 Web 部署到正式本机服务。
+- Web 交互：市场雷达四个视图组合及三类详情已完成 1440/768/375 合成与正式数据浏览器验收，并回归其他七页；共用路由支持同路径保留滚动、跨路径回顶和已有历史位置恢复，标签支持手动键盘激活，抽屉支持焦点回退，宽表可局部键盘滚动。摘要和板块盈利不再受价格成功状态控制；重读失败隐藏受影响的缓存值，陈旧成功响应仍保留原值，越界页可保留筛选回到第一页。新版已正式部署，并验证真实 API 故障、单源重试及全局恢复。
+- R7 数据与运行边界：独立一次性 `market-radar-sync` 服务已实现，默认只显示帮助，六项显式变量、不依赖或启动交易核心。2026-09-06 本机已串行执行四条真实初始化各一次（UTC 采集日 09-05），正式市场库由五表补齐到十四表；宏观日期 09-04，盈利/基本面/经济事件日期 09-05，原价格/宽度仍为 09-02。盈利与行业分类保留部分覆盖，基本面十只覆盖完整，14 日事件查询允许观察股财报合法零条。最新代码的只读 API 已核对正式数据且不落盘。
+- R7 部署状态：用户已取消恢复完全相同旧页面的要求；只更新 `web-api`、`web-ui`，并完成新版停止、删除及恢复，两服务健康。API 仅内网 8000、八项查询变量及三处只读挂载；UI 仅回环 8080，无供应商凭据。三核心容器在部署、Web 删除和恢复前后的身份、启动/退出时间与状态均未变化：Gateway 健康，TradingNode/Bot 保持原退出状态。没有重跑四源同步、修改市场/交易库或 Catalog，没有制作旧页面恢复镜像、连接 IBKR 或发送通知。
+
+当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、盈利预期历史曲线与个股修正、基本面历史 PIT 回放、新闻采集或大语言模型分析。
 
 ## 技术事实
 
@@ -35,8 +41,10 @@
 | 通知与审批 | python-telegram-bot |
 | Web | FastAPI 只读查询边界 + 独立 Vue 3/TypeScript/ECharts 前端；交易核心不得反向依赖 Web |
 | 市场雷达 | 可替换当前成员/行业分类来源 + EODHD/NT Catalog + FRED DFII10 + EODHD Calendar + 独立 SQLite 原子快照；价格、当前宽度、宏观象限和统一盈利聚合均由 Web 只读 |
+| 当前基本面 | EODHD Fundamentals → 供应商无关最小财报输入 → 纯计算 → 独立市场 SQLite 原子发布 → 只读 API/Vue；一次性 CLI，不参与下单 |
+| 事件轴 | EODHD Economic Events 严格快照 + 同批 watchlist 财报事件 → 独立市场 SQLite 只读查询 → API/Vue 固定 14 日分组；不参与交易 |
 | 研究 | Jupyter + NT BacktestNode |
-| 编排 | Docker Compose |
+| 编排 | Docker Compose；交易核心、只读 Web 与一次性市场同步独立装配，操作时必须明确目标服务 |
 | 质量 | pytest、ruff、mypy strict、pre-commit |
 
 未经用户批准不得引入新的第三方依赖。当前不使用 Redis、PostgreSQL、Celery 或 Kafka。
@@ -76,6 +84,18 @@
 - 盈利修正方向比较 FY1 当前值与 30 日前值，容差为 `1e-9`；只有分析师数大于零且两值均有限才进入方向宽度。幅度只接受两值都大于 `0.01` 的样本，负值、近零、无分析师和缺失值必须保留语义而非补零；
 - `GET /api/market-radar/earnings` 只读取最近 COMPLETE 运行发布的统一快照；超过 3 个日历日标记为 `stale`，请求路径不得连接供应商、读取原始 Trends、扫描 Catalog 或现场计算聚合；Vue 只在总览和板块层展示该契约，价格日期与盈利日期分别披露；
 - 财报事件保留财政期、报告日期、盘前/盘后/未知、actual、estimate 与 currency；供应商没有可验证发布时间，因此 `available_at_utc` 为 null。estimate 缺失时不得依据供应商的零 difference 推导 surprise；
+- 美国经济事件固定请求采集 UTC 日 D 的 `[D, D+30]`，国家 US；完整解析来源日期与可空无时区时钟，不生成 `event_time_utc`、重要性、数值单位或历史可用时间。actual/estimate 等有限数值保留零、负数与 null，不推导 surprise；
+- 经济事件批次键为国家、日期、来源时钟、事件名称、comparison 和 period；同页完全重复可合并，同键冲突或跨页交叠失败。按文档限制最多请求 offset 0/1000 两页，未见短尾页不能发布；成功只代表请求结果通过校验，不承诺全市场覆盖或供应商分页原子性；
+- 经济事件只增加 `economic_event_snapshots`，与 COMPLETE 同事务发布；同日整批替换以反映撤回/改期，较旧完成批次不能覆盖新批次，成功空批次可清除旧事件，失败保留上批。只为该来源允许零股票/Bar 计数；只读仓储校验 payload 与运行元数据，旧库缺表不迁移，损坏不伪装成空；
+- `GET /api/market-radar/events` 无参数，以一次 UTC 查询时刻生成 `[Q, Q+13]` 共 14 个来源报告日期。财报快照头、运行头和同采集日事件在同一条 SELECT 读取并核对 run_id；不读取历史批次拼接或回退。观察池数量取已发布 `watchlist.eligible`，不能取运行并集数量，也不声称校验了未持久化的完整请求名单；
+- 两类事件各自超过 86400 秒标记陈旧，日期覆盖取实际请求与展示区间交集；陈旧不删除仍在窗口内的事件。合法空批次为 available，零覆盖/无可信批次不返回零事件计数；一源损坏独立 invalid，两源均损坏返回脱敏 503。未来采集时间失败关闭，未来报告日期合法；
+- Vue 事件轴只在总览启用集中 GET，来源/日期筛选不追加请求；详情按自然键匹配当前响应，撤回/改期后关闭并提示。来源时钟不按浏览器时区转换，经济数值不推断单位，缺失财报币种不补 USD。窗口与新鲜度锚定读取时刻，不新增跨午夜刷新、轮询或采集控制；
+- Web 各来源查询状态独立：重读期间可带提示保留缓存，本次 GET 失败不得把旧值和日期当成当前成功结果；服务端成功返回的 stale/partial 仍展示原值与来源说明。摘要只描述其自身返回的模块状态，不等同于其他接口成功；板块矩阵仍以价格列表为行，盈利详情按完整 sector_id 独立匹配，不推断身份或合成共同日期；
+- 基本面采集范围来自 watchlist，并解析 `instruments.yaml` 的显式 EODHD 身份；不使用少量 probe 标的替代观察池，不使用价格配置中的板块标签推断财务适用性。行业来自供应商 Sector/Industry，金融只保留 ROE/PB，REIT 通用指标标为不适用；
+- 普通公司 FCF Margin、Net Debt/EBITDA、FCF Yield 只采用最新四个连续财政季，跨表指标要求相同期末与 USD 报告币种；负 FCF 和负净债务保留，非正分母及合法缺失逐指标解释，不退回较旧季度补值。ForwardPE、EV/EBITDA 为供应商背景，不等同于 Calendar FY1；ROIC、同行评分暂缓；
+- 基本面 `as_of_date` 为 UTC 采集日，报告期与供应商更新日另存；`available_at_utc` 始终为 null，不依据 filing date 伪造历史可用性。CLI 不接受历史日期，跨 UTC 日失败关闭；规范输入、快照与 COMPLETE 状态同事务发布，失败保留上批；
+- `GET /api/market-radar/fundamentals` 无参数，只投影最近 COMPLETE 整批快照；不读规范财报输入、Catalog、当前配置股票池或供应商，不重算、不建表。缺库/未初始化分别返回 missing/empty；结构、JSON、时间或元数据损坏返回脱敏 503，未来日期及同日未来计算时间失败关闭；
+- 基本面查询以 UTC 日历日分别判断本地采集（超过 14 日）与供应商更新（超过 3 日）陈旧度；供应商日期缺失为 unknown。两者不改写字段有效性或旧值，也不证明实时估值报价。Vue 按完整标的 ID 匹配独立批次，不与价格取交集；百分比/倍数、报告期、适用性和逐字段空值原因直接可见，不合成排名或交易建议；
 - 标的的 `first_trading_date` 和可选 `last_trading_date` 是同步、质量检查与回测预检共同使用的显式生命周期边界；不得以“缺失数据”代表尚未上市或已经退市；
 - FacDigger 与 HeyBoss 之间只有 `factors.parquet + manifest.json` FactorBatch 契约；HeyBoss 不加载 checkpoint、不复制特征处理，也不直接读取研究 predictions；
 - FactorBatch 必须先完整校验和显式映射，再转换为已注册的 NT `FactorScoreData` 写入同一 ParquetDataCatalog；内部 DataType 只以 CustomData 类身份路由，不附加 Catalog 查询 metadata，以保证 NT 1.230 回放与历史请求使用同一 Topic；Actor 不得直接读交付文件；

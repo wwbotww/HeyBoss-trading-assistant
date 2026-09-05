@@ -5,14 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from datetime import UTC, date, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from trading_assistant.data.config import InstrumentSpec
+from tests.market_radar.test_economic_events import ECONOMIC_AT
+from tests.market_radar.test_eodhd_economic_events import economic_payload
+from tests.market_radar.test_eodhd_fundamentals import fundamental_payload
+from trading_assistant.data.config import InstrumentSpec, load_instruments
+from trading_assistant.data.eodhd_http import EodhdAuthenticationError
 from trading_assistant.data.pipeline import PipelineSummary
 from trading_assistant.data.quality import QualityIssue
 from trading_assistant.market_radar import service
@@ -1042,3 +1047,522 @@ def test_market_earnings_invalid_token_does_not_create_database(tmp_path: Path) 
     with pytest.raises(ValueError, match="EODHD_API_TOKEN"):
         asyncio.run(service.sync_market_earnings(**arguments))  # type: ignore[arg-type]
     assert not (tmp_path / "market-radar.db").exists()
+
+
+def _fundamental_paths(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "database_url": f"sqlite:///{tmp_path}/market-radar.db",
+        "market_config_path": PROJECT_ROOT / "config" / "market-radar.yaml",
+        "trading_instruments_config_path": PROJECT_ROOT / "config" / "instruments.yaml",
+        "data_config_path": PROJECT_ROOT / "config" / "data.yaml",
+        "eodhd_api_token": "test-token",
+    }
+
+
+def _fundamental_response(url: str, _timeout: int) -> bytes:
+    code = urlparse(url).path.rsplit("/", 1)[-1].removesuffix(".US")
+    return json.dumps(fundamental_payload(code)).encode()
+
+
+def test_fundamental_sync_collects_full_watchlist_not_probe_subset(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def transport(url: str, timeout: int) -> bytes:
+        calls.append(urlparse(url).path)
+        return _fundamental_response(url, timeout)
+
+    result = asyncio.run(
+        service.sync_market_fundamentals(
+            **_fundamental_paths(tmp_path),
+            eodhd_transport=transport,
+            clock=lambda: STARTED,
+            run_id_factory=lambda: "fundamental-complete",
+        )
+    )
+    assert result.status == "COMPLETE"
+    assert result.snapshot_validity == "complete"
+    assert result.instrument_count == result.instruments_processed == len(calls) == 10
+    assert result.available_metric_count == 65
+    assert result.not_applicable_metric_count == 5
+    assert result.unavailable_metric_count == 0
+    assert all(path.startswith("/api/fundamentals/") for path in calls)
+    repository = MarketRadarRepository(
+        str(_fundamental_paths(tmp_path)["database_url"]), read_only=True
+    )
+    run = repository.get_sync_run(result.run_id)
+    assert run is not None
+    assert run.status == "COMPLETE"
+    assert run.bars_fetched == run.bars_written == 0
+    assert run.requested_start_date is None
+    assert run.requested_end_date is None
+    snapshot = repository.latest_fundamental_snapshot()
+    assert snapshot is not None
+    assert len(snapshot.items) == 10
+    repository.close()
+    assert not (tmp_path / "catalog").exists()
+
+
+def test_fundamental_legal_missing_values_publish_partial_success(tmp_path: Path) -> None:
+    def transport(url: str, _timeout: int) -> bytes:
+        code = urlparse(url).path.rsplit("/", 1)[-1].removesuffix(".US")
+        payload = fundamental_payload(code)
+        payload["Financials"]["Income_Statement"]["quarterly"]["2026-06-30"]["ebitda"] = None
+        return json.dumps(payload).encode()
+
+    result = asyncio.run(
+        service.sync_market_fundamentals(
+            **_fundamental_paths(tmp_path),
+            eodhd_transport=transport,
+            clock=lambda: STARTED,
+            run_id_factory=lambda: "partial",
+        )
+    )
+    assert result.status == "COMPLETE"
+    assert result.snapshot_validity == "partial"
+    assert result.unavailable_metric_count == 9
+
+
+def test_fundamental_partial_fetch_failure_retains_previous_snapshot(tmp_path: Path) -> None:
+    args = _fundamental_paths(tmp_path)
+    asyncio.run(
+        service.sync_market_fundamentals(
+            **args,
+            eodhd_transport=_fundamental_response,
+            clock=lambda: STARTED,
+            run_id_factory=lambda: "old",
+        )
+    )
+    repository = MarketRadarRepository(str(args["database_url"]), read_only=True)
+    old_snapshot = repository.latest_fundamental_snapshot()
+    calls = 0
+
+    def transport(url: str, timeout: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise ValueError("raw provider error with test-token")
+        return _fundamental_response(url, timeout)
+
+    with pytest.raises(ValueError, match="raw provider error"):
+        asyncio.run(
+            service.sync_market_fundamentals(
+                **args,
+                eodhd_transport=transport,
+                clock=lambda: STARTED,
+                run_id_factory=lambda: "failed",
+            )
+        )
+    assert calls == 3
+    run = repository.get_sync_run("failed")
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.instruments_processed == 2
+    assert run.error_summary == "ValueError"
+    assert repository.latest_fundamental_snapshot() == old_snapshot
+    repository.close()
+
+
+@pytest.mark.parametrize("case", ["cross_day", "backwards", "naive_complete", "naive_start"])
+def test_fundamental_capture_clock_boundaries_fail_closed(tmp_path: Path, case: str) -> None:
+    completed_at = STARTED + timedelta(days=1)
+    if case == "backwards":
+        completed_at = STARTED - timedelta(minutes=1)
+    elif case == "naive_complete":
+        completed_at = STARTED.replace(tzinfo=None)
+    moments = iter(
+        (STARTED.replace(tzinfo=None) if case == "naive_start" else STARTED, completed_at, STARTED)
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        asyncio.run(
+            service.sync_market_fundamentals(
+                **_fundamental_paths(tmp_path),
+                eodhd_transport=_fundamental_response,
+                clock=lambda: next(moments),
+                run_id_factory=lambda: "bad-clock",
+            )
+        )
+    if case == "naive_start":
+        assert not (tmp_path / "market-radar.db").exists()
+    else:
+        repository = MarketRadarRepository(
+            str(_fundamental_paths(tmp_path)["database_url"]), read_only=True
+        )
+        run = repository.get_sync_run("bad-clock")
+        assert run is not None
+        assert run.status == "FAILED"
+        assert repository.latest_fundamental_snapshot() is None
+        repository.close()
+
+
+@pytest.mark.parametrize(
+    "case", ["token", "currency", "kind", "duplicate_symbol", "unknown_watchlist"]
+)
+def test_fundamental_invalid_configuration_precedes_database_and_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    args = _fundamental_paths(tmp_path)
+    specs = load_instruments(args["trading_instruments_config_path"])
+    if case == "token":
+        args["eodhd_api_token"] = None
+    elif case == "currency":
+        specs = tuple(replace(spec, currency="EUR") for spec in specs)
+    elif case == "kind":
+        specs = tuple(replace(spec, instrument_kind="index") for spec in specs)
+    elif case == "duplicate_symbol":
+        specs = tuple(replace(spec, data_symbol="AAPL.US") for spec in specs)
+    else:
+        specs = ()
+    monkeypatch.setattr(service, "load_instruments", lambda _path: specs)
+    with pytest.raises(ValueError, match=r"EODHD_API_TOKEN|USD equities|unique|unknown instrument"):
+        asyncio.run(service.sync_market_fundamentals(**args, eodhd_transport=_fundamental_response))
+    assert not (tmp_path / "market-radar.db").exists()
+
+
+def test_fundamental_uses_configured_data_symbol_and_provider_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _fundamental_paths(tmp_path)
+    specs = load_instruments(args["trading_instruments_config_path"])
+    monkeypatch.setattr(
+        service,
+        "load_instruments",
+        lambda _path: tuple(
+            replace(spec, data_symbol="XYZ.US") if spec.instrument_id == "AAPL.US" else spec
+            for spec in specs
+        ),
+    )
+
+    def transport(url: str, _timeout: int) -> bytes:
+        code = urlparse(url).path.rsplit("/", 1)[-1].removesuffix(".US")
+        payload = fundamental_payload(code)
+        if code == "XYZ":
+            payload["General"].update(Sector="Financial Services", Industry="Banks - Diversified")
+        return json.dumps(payload).encode()
+
+    result = asyncio.run(
+        service.sync_market_fundamentals(**args, eodhd_transport=transport, clock=lambda: STARTED)
+    )
+    assert result.not_applicable_metric_count == 10
+    repository = MarketRadarRepository(str(args["database_url"]), read_only=True)
+    snapshot = repository.latest_fundamental_snapshot()
+    assert snapshot is not None
+    assert (
+        next(item for item in snapshot.items if item.instrument_id == "AAPL.US").kind == "financial"
+    )
+    repository.close()
+
+
+def test_fundamental_repository_is_closed_even_if_schema_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+    original_close = MarketRadarRepository.close
+
+    def fail_schema(_self: MarketRadarRepository) -> None:
+        raise RuntimeError("schema unavailable")
+
+    def close(repository: MarketRadarRepository) -> None:
+        closed.append(True)
+        original_close(repository)
+
+    monkeypatch.setattr(MarketRadarRepository, "create_schema", fail_schema)
+    monkeypatch.setattr(MarketRadarRepository, "close", close)
+    with pytest.raises(RuntimeError, match="schema"):
+        asyncio.run(service.sync_market_fundamentals(**_fundamental_paths(tmp_path)))
+    assert closed == [True]
+
+
+def test_fundamental_failure_transition_error_does_not_leak_provider_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail_transport(_url: str, _timeout: int) -> bytes:
+        raise ValueError("secret-provider-payload")
+
+    def fail_transition(_self: MarketRadarRepository, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("secret-database-url")
+
+    monkeypatch.setattr(MarketRadarRepository, "fail_sync_run", fail_transition)
+    with pytest.raises(ValueError, match="secret-provider-payload"):
+        asyncio.run(
+            service.sync_market_fundamentals(
+                **_fundamental_paths(tmp_path), eodhd_transport=fail_transport
+            )
+        )
+    assert "Failed to persist market fundamentals sync failure: RuntimeError" in caplog.text
+    assert "secret-" not in caplog.text
+
+
+def _economic_paths(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "database_url": f"sqlite:///{tmp_path}/radar.db",
+        "data_config_path": PROJECT_ROOT / "config" / "data.yaml",
+        "eodhd_api_token": "test-token",
+    }
+
+
+def test_economic_sync_is_independent_and_uses_a_single_utc_capture_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("economic events must not load market prices or stock membership")
+
+    for name in (
+        "load_market_radar_config",
+        "load_instruments",
+        "load_internal_price_bars",
+        "sync_historical_specs",
+    ):
+        monkeypatch.setattr(service, name, forbidden)
+    calls: list[dict[str, list[str]]] = []
+
+    def transport(url: str, timeout: int) -> bytes:
+        query = parse_qs(urlparse(url).query)
+        calls.append(query)
+        assert timeout == 120
+        assert query["from"] == ["2026-09-05"]
+        assert query["to"] == ["2026-10-05"]
+        assert query["country"] == ["US"]
+        assert "symbols" not in query
+        return json.dumps(
+            [
+                economic_payload(),
+                economic_payload(),
+                economic_payload(
+                    type="Later Index",
+                    date="2026-10-05",
+                    actual=None,
+                ),
+            ]
+        ).encode()
+
+    local_start = ECONOMIC_AT.astimezone(timezone(timedelta(hours=-5)))
+    moments = iter((local_start, local_start + timedelta(seconds=1)))
+    summary = asyncio.run(
+        service.sync_market_economic_events(
+            **_economic_paths(tmp_path),
+            eodhd_transport=transport,
+            clock=lambda: next(moments),
+            run_id_factory=lambda: "economic-complete",
+        )
+    )
+    assert summary.status == "COMPLETE"
+    assert summary.source == "eodhd_economic_events"
+    assert summary.event_count == 2
+    assert summary.raw_record_count == 3
+    assert summary.duplicate_count == 1
+    assert summary.source_time_present_count == 1
+    assert summary.request_count == len(calls) == 1
+    assert summary.snapshot_date == ECONOMIC_AT.date()
+    assert summary.captured_at_utc == ECONOMIC_AT + timedelta(seconds=1)
+    repository = MarketRadarRepository(
+        str(_economic_paths(tmp_path)["database_url"]), read_only=True
+    )
+    run = repository.get_sync_run("economic-complete")
+    assert run is not None
+    assert run.status == "COMPLETE"
+    assert (
+        run.instrument_count
+        == run.instruments_processed
+        == run.bars_fetched
+        == run.bars_written
+        == 0
+    )
+    snapshot = repository.latest_economic_event_snapshot()
+    assert snapshot is not None
+    assert len(snapshot.batch.events) == summary.event_count
+    assert snapshot.window_start == summary.window_start
+    assert snapshot.window_end == summary.window_end
+    repository.close()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["radar.db"]
+
+
+def test_economic_empty_success_clears_previous_batch(tmp_path: Path) -> None:
+    args = _economic_paths(tmp_path)
+    for run_id, payload in (("full", [economic_payload()]), ("empty", [])):
+
+        def transport(
+            _url: str,
+            _timeout: int,
+            content: bytes = json.dumps(payload).encode(),
+        ) -> bytes:
+            return content
+
+        def identifier(value: str = run_id) -> str:
+            return value
+
+        summary = asyncio.run(
+            service.sync_market_economic_events(
+                **args,
+                eodhd_transport=transport,
+                clock=lambda: ECONOMIC_AT,
+                run_id_factory=identifier,
+            )
+        )
+        assert summary.event_count == len(payload)
+        assert summary.raw_record_count == len(payload)
+        assert summary.status == "COMPLETE"
+    repository = MarketRadarRepository(str(args["database_url"]), read_only=True)
+    snapshot = repository.latest_economic_event_snapshot()
+    assert snapshot is not None
+    assert snapshot.batch.events == ()
+    repository.close()
+
+
+@pytest.mark.parametrize("case", ["second_page", "malformed", "authentication", "publish"])
+def test_economic_failure_preserves_last_complete_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    args = _economic_paths(tmp_path)
+    asyncio.run(
+        service.sync_market_economic_events(
+            **args,
+            eodhd_transport=lambda _url, _timeout: json.dumps([economic_payload()]).encode(),
+            clock=lambda: ECONOMIC_AT,
+            run_id_factory=lambda: "old",
+        )
+    )
+    repository = MarketRadarRepository(str(args["database_url"]), read_only=True)
+    old = repository.latest_economic_event_snapshot()
+    calls: list[str] = []
+
+    def transport(url: str, _timeout: int) -> bytes:
+        offset = parse_qs(urlparse(url).query)["offset"][0]
+        calls.append(offset)
+        if case == "authentication" or (case == "second_page" and offset == "1000"):
+            raise EodhdAuthenticationError(403)
+        if case == "malformed":
+            return json.dumps([economic_payload(country="CA")]).encode()
+        if case == "second_page":
+            return json.dumps([economic_payload(type=f"Event {i}") for i in range(1000)]).encode()
+        return b"[]"
+
+    if case == "publish":
+
+        def fail_publish(_self: MarketRadarRepository, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated publication failure")
+
+        monkeypatch.setattr(
+            MarketRadarRepository, "publish_economic_events_and_complete", fail_publish
+        )
+
+    with pytest.raises((ValueError, RuntimeError, EodhdAuthenticationError)):
+        asyncio.run(
+            service.sync_market_economic_events(
+                **args,
+                eodhd_transport=transport,
+                clock=lambda: ECONOMIC_AT,
+                run_id_factory=lambda: "failed",
+            )
+        )
+    assert calls == (["0", "1000"] if case == "second_page" else ["0"])
+    run = repository.get_sync_run("failed")
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.error_summary in {"ValidationError", "RuntimeError", "EodhdAuthenticationError"}
+    assert run.instruments_processed == run.bars_fetched == run.bars_written == 0
+    assert repository.latest_economic_event_snapshot() == old
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["naive_start", "naive_complete", "cross_day", "backwards", "broken_complete"],
+)
+def test_economic_clock_failures_cannot_leave_a_published_batch(tmp_path: Path, case: str) -> None:
+    calls: list[int] = []
+
+    def clock() -> datetime:
+        calls.append(1)
+        if len(calls) == 1:
+            return ECONOMIC_AT.replace(tzinfo=None) if case == "naive_start" else ECONOMIC_AT
+        if case == "broken_complete":
+            raise RuntimeError("clock unavailable")
+        if case == "naive_complete":
+            return ECONOMIC_AT.replace(tzinfo=None)
+        if case == "cross_day":
+            return ECONOMIC_AT + timedelta(days=1)
+        return ECONOMIC_AT - timedelta(minutes=1)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        asyncio.run(
+            service.sync_market_economic_events(
+                **_economic_paths(tmp_path),
+                eodhd_transport=lambda _url, _timeout: b"[]",
+                clock=clock,
+                run_id_factory=lambda: "bad-clock",
+            )
+        )
+    if case == "naive_start":
+        assert not (tmp_path / "radar.db").exists()
+    else:
+        repository = MarketRadarRepository(
+            str(_economic_paths(tmp_path)["database_url"]), read_only=True
+        )
+        run = repository.get_sync_run("bad-clock")
+        assert run is not None
+        assert run.status == "FAILED"
+        assert repository.latest_economic_event_snapshot() is None
+        assert run.completed_at_utc is not None
+        assert run.completed_at_utc >= run.started_at_utc
+        repository.close()
+
+
+def test_economic_missing_token_precedes_database_creation(tmp_path: Path) -> None:
+    args = _economic_paths(tmp_path)
+    args["eodhd_api_token"] = None
+    with pytest.raises(ValueError, match="EODHD_API_TOKEN"):
+        asyncio.run(service.sync_market_economic_events(**args))
+    assert not (tmp_path / "radar.db").exists()
+
+
+def test_economic_repository_closes_after_schema_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+    original = MarketRadarRepository.close
+
+    def fail_schema(_self: MarketRadarRepository) -> None:
+        raise RuntimeError("schema unavailable")
+
+    def close(repository: MarketRadarRepository) -> None:
+        closed.append(True)
+        original(repository)
+
+    monkeypatch.setattr(MarketRadarRepository, "create_schema", fail_schema)
+    monkeypatch.setattr(MarketRadarRepository, "close", close)
+    with pytest.raises(RuntimeError, match="schema"):
+        asyncio.run(service.sync_market_economic_events(**_economic_paths(tmp_path)))
+    assert closed == [True]
+
+
+def test_economic_failure_audit_errors_are_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail_transport(_url: str, _timeout: int) -> bytes:
+        raise ValueError("secret-response")
+
+    def fail_transition(_self: MarketRadarRepository, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("secret-database")
+
+    monkeypatch.setattr(MarketRadarRepository, "fail_sync_run", fail_transition)
+    with pytest.raises(ValueError, match="secret-response"):
+        asyncio.run(
+            service.sync_market_economic_events(
+                **_economic_paths(tmp_path),
+                eodhd_transport=fail_transport,
+            )
+        )
+    assert "Failed to persist market economic events sync failure: RuntimeError" in caplog.text
+    assert "secret-" not in caplog.text

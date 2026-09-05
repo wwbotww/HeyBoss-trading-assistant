@@ -16,8 +16,20 @@ from trading_assistant.market_radar.earnings import (
     SectorEarningsRevision,
     calculate_earnings_revision_snapshot,
 )
+from trading_assistant.market_radar.economic_events import (
+    EconomicEvent,
+    EconomicEventBatch,
+    EconomicEventSnapshot,
+)
 from trading_assistant.market_radar.eodhd_calendar import EodhdCalendarSource
 from trading_assistant.market_radar.eodhd_components import EodhdIndexComponentsSource
+from trading_assistant.market_radar.eodhd_economic_events import EodhdEconomicEventsSource
+from trading_assistant.market_radar.eodhd_fundamentals import EodhdFundamentalsSource
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalObservation,
+    FundamentalSnapshot,
+    calculate_fundamental_snapshot,
+)
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
     RiskAppetitePoint,
@@ -55,11 +67,15 @@ from trading_assistant.market_radar.service import (
     MarketBreadthSyncMode,
     MarketBreadthSyncSummary,
     MarketEarningsSyncSummary,
+    MarketEconomicEventsSyncSummary,
+    MarketFundamentalsSyncSummary,
     MarketMacroSyncSummary,
     MarketRadarPriceSyncSummary,
     MarketRadarSyncMode,
     sync_current_market_breadth,
     sync_market_earnings,
+    sync_market_economic_events,
+    sync_market_fundamentals,
     sync_market_macro,
     sync_market_radar_prices,
 )
@@ -80,12 +96,21 @@ __all__ = [
     "EarningsMarketCoverage",
     "EarningsRevisionAggregate",
     "EarningsRevisionSnapshot",
+    "EconomicEvent",
+    "EconomicEventBatch",
+    "EconomicEventSnapshot",
     "EodhdCalendarSource",
+    "EodhdEconomicEventsSource",
+    "EodhdFundamentalsSource",
     "EodhdIndexComponentsSource",
+    "FundamentalObservation",
+    "FundamentalSnapshot",
     "Fy1EarningsTrend",
     "MarketBreadthSyncMode",
     "MarketBreadthSyncSummary",
     "MarketEarningsSyncSummary",
+    "MarketEconomicEventsSyncSummary",
+    "MarketFundamentalsSyncSummary",
     "MarketMacroSyncSummary",
     "MarketPriceMetrics",
     "MarketRadarConfig",
@@ -108,6 +133,7 @@ __all__ = [
     "build_price_instrument_specs",
     "calculate_current_breadth_snapshot",
     "calculate_earnings_revision_snapshot",
+    "calculate_fundamental_snapshot",
     "calculate_price_snapshot",
     "calculate_risk_appetite_snapshot",
     "load_internal_price_bars",
@@ -115,6 +141,8 @@ __all__ = [
     "run_capability_checks",
     "sync_current_market_breadth",
     "sync_market_earnings",
+    "sync_market_economic_events",
+    "sync_market_fundamentals",
     "sync_market_macro",
     "sync_market_radar_prices",
     "write_capability_report",

@@ -13,6 +13,8 @@ from trading_assistant.web_api.schemas import (
     MacroRegimeResponse,
     MarketBreadthResponse,
     MarketEarningsResponse,
+    MarketEventsResponse,
+    MarketFundamentalsResponse,
     MarketRadarSummaryResponse,
     SectorRadarListResponse,
     SectorRadarResponse,
@@ -63,6 +65,26 @@ def get_earnings(
 ) -> MarketEarningsResponse:
     """返回最近完整运行发布的统一盈利修正快照。"""
     return MarketEarningsResponse.model_validate(services.market_radar.earnings())
+
+
+@router.get("/events", response_model=MarketEventsResponse, operation_id="getMarketRadarEvents")
+def get_events(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+) -> MarketEventsResponse:
+    """返回固定十四日事件轴, 两类已发布来源独立降级。"""
+    return MarketEventsResponse.model_validate(services.market_radar.events())
+
+
+@router.get(
+    "/fundamentals",
+    response_model=MarketFundamentalsResponse,
+    operation_id="getMarketRadarFundamentals",
+)
+def get_fundamentals(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+) -> MarketFundamentalsResponse:
+    """返回已发布的当前基本面与独立新鲜度, 无采集或交易操作。"""
+    return MarketFundamentalsResponse.model_validate(services.market_radar.fundamentals())
 
 
 @router.get(

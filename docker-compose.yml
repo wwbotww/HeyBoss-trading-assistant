@@ -58,6 +58,25 @@ services:
     <<: *app-service
     command: ["python", "-m", "trading_assistant.notify.bot"]
 
+  market-radar-sync:
+    build:
+      context: .
+    # 只在操作者明确覆盖命令时采集, 不继承交易服务的完整环境与默认连接检查。
+    command: ["python", "scripts/sync_market_radar.py", "--help"]
+    environment:
+      EODHD_API_TOKEN: ${EODHD_API_TOKEN:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      CATALOG_PATH: ${CATALOG_PATH:-./catalog/eodhd}
+      MARKET_RADAR_DATABASE_URL: ${MARKET_RADAR_DATABASE_URL:-sqlite:///./data/market-radar.db}
+      MARKET_RADAR_REPORT_ROOT: ${MARKET_RADAR_REPORT_ROOT:-./reports/market-radar}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # 目录级写权限; CLI 只写市场库, 所有共享 Catalog 写入必须串行。
+    volumes:
+      - ./catalog:/app/catalog
+      - ./data:/app/data
+      - ./reports:/app/reports
+    profiles: [market-radar-sync]
+
   web-api:
     build:
       context: .

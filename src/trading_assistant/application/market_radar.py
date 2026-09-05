@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from trading_assistant.application.models import (
     BreadthMetricView,
+    EarningsEventView,
     EarningsFreshnessView,
     EarningsMembershipView,
     EarningsRevisionAggregateView,
+    EconomicEventView,
+    EventFreshnessView,
+    EventSourceView,
+    EventWindowCoverageView,
+    FundamentalFreshnessView,
+    FundamentalMetricView,
+    FundamentalSourceUpdateState,
     MacroFreshnessView,
     MacroRealRateView,
     MacroRegimePointView,
@@ -22,6 +30,9 @@ from trading_assistant.application.models import (
     MarketBreadthView,
     MarketEarningsValidity,
     MarketEarningsView,
+    MarketEventDayView,
+    MarketEventsView,
+    MarketFundamentalsView,
     MarketRadarSummaryView,
     QuerySourceError,
     RadarCoverageView,
@@ -36,11 +47,13 @@ from trading_assistant.application.models import (
     SectorRadarView,
     SortDirection,
     SourceState,
+    StockFundamentalsView,
     StockRadarPageView,
     StockRadarSort,
     StockRadarView,
 )
 from trading_assistant.market_radar.earnings import EarningsRevisionAggregate
+from trading_assistant.market_radar.economic_events import EconomicEventSnapshot
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
     CurrentBreadthSnapshot,
@@ -51,16 +64,58 @@ from trading_assistant.market_radar.regime import (
     ALIGNMENT_MAX_AGE_DAYS,
     MacroRegimePoint,
 )
-from trading_assistant.market_radar.storage import MarketRadarRepository
+from trading_assistant.market_radar.storage import MarketRadarRepository, PublishedEarningsEvents
 
 StockRadarMetricSort = Literal["momentum", "relative_momentum", "volatility", "drawdown"]
 _BREADTH_STALE_AFTER_DAYS = 7
 _MACRO_STALE_AFTER_DAYS = ALIGNMENT_MAX_AGE_DAYS
 _EARNINGS_STALE_AFTER_DAYS = 3
+_FUNDAMENTAL_SNAPSHOT_STALE_AFTER_DAYS = 14
+_FUNDAMENTAL_SOURCE_STALE_AFTER_DAYS = 3
+_EVENT_STALE_AFTER_SECONDS = 86400
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _available_event_source(
+    snapshot: EconomicEventSnapshot | PublishedEarningsEvents,
+    observed_at: datetime,
+    event_count: int,
+) -> EventSourceView:
+    """两类事件共用日期交集与秒级检查线, 不改写快照数值。"""
+    age = (observed_at - snapshot.captured_at_utc).total_seconds()
+    if age < 0 or snapshot.as_of_date > observed_at.date():
+        raise ValueError("event capture cannot be in the future")
+    start = max(observed_at.date(), snapshot.window_start)
+    end = min(observed_at.date() + timedelta(days=13), snapshot.window_end)
+    covered_days = max(0, (end - start).days + 1)
+    return EventSourceView(
+        source="eodhd_economic_events"
+        if isinstance(snapshot, EconomicEventSnapshot)
+        else "eodhd_calendar",
+        source_state="available",
+        as_of_date=snapshot.as_of_date,
+        captured_at_utc=snapshot.captured_at_utc,
+        window_start=snapshot.window_start,
+        window_end=snapshot.window_end,
+        freshness=EventFreshnessView(
+            age_seconds=age,
+            stale_after_seconds=_EVENT_STALE_AFTER_SECONDS,
+            state="stale" if age > _EVENT_STALE_AFTER_SECONDS else "fresh",
+        ),
+        coverage=EventWindowCoverageView(
+            state="covered" if covered_days == 14 else "partial" if covered_days else "uncovered",
+            covered_start=start if covered_days else None,
+            covered_end=end if covered_days else None,
+            covered_days=covered_days,
+        ),
+        watchlist_count=snapshot.watchlist_count
+        if isinstance(snapshot, PublishedEarningsEvents)
+        else None,
+        window_event_count=event_count if covered_days else None,
+    )
 
 
 def _metric(value: MetricValue) -> RadarMetricView:
@@ -219,6 +274,180 @@ class MarketRadarQueryService:
     def earnings(self) -> MarketEarningsView:
         """返回最近完整运行发布的统一盈利修正快照。"""
         return self._earnings_at(self._clock().astimezone(UTC))
+
+    def events(self) -> MarketEventsView:
+        """只读两类已发布批次; 来源失败隔离, 不依赖价格或聚合查询。"""
+        observed_at = self._clock()
+        if observed_at.utcoffset() is None:
+            raise ValueError("market radar query clock must be timezone-aware")
+        observed_at = observed_at.astimezone(UTC)
+        start, end = observed_at.date(), observed_at.date() + timedelta(days=13)
+        state: SourceState = "missing" if self._repository is None else "empty"
+        economic_source = EventSourceView("eodhd_economic_events", state)
+        earnings_source = EventSourceView("eodhd_calendar", state)
+        economic_events: tuple[EconomicEventView, ...] = ()
+        earnings_events: tuple[EarningsEventView, ...] = ()
+        if self._repository is not None:
+            try:
+                economic = self._repository.latest_economic_event_snapshot()
+                if economic is not None:
+                    economic_events = tuple(
+                        EconomicEventView(
+                            country=item.country,
+                            event_type=item.event_type,
+                            event_date=item.event_date,
+                            source_time=item.source_time,
+                            comparison=item.comparison,
+                            period=item.period,
+                            actual=item.actual,
+                            estimate=item.estimate,
+                            previous=item.previous,
+                            change=item.change,
+                            change_percentage=item.change_percentage,
+                        )
+                        for item in economic.batch.events
+                        if start <= item.event_date <= end
+                    )
+                    economic_source = _available_event_source(
+                        economic, observed_at, len(economic_events)
+                    )
+            except (RuntimeError, SQLAlchemyError, TypeError, ValueError):
+                economic_source = EventSourceView("eodhd_economic_events", "invalid")
+                economic_events = ()
+            try:
+                earnings = self._repository.latest_earnings_event_batch()
+                if earnings is not None:
+                    earnings_events = tuple(
+                        EarningsEventView(
+                            instrument_id=item.instrument_id,
+                            fiscal_period_end=item.fiscal_period_end,
+                            report_date=item.report_date,
+                            session=item.session,
+                            currency=item.currency,
+                            actual_eps=item.actual_eps,
+                            estimated_eps=item.estimated_eps,
+                        )
+                        for item in earnings.events
+                        if start <= item.report_date <= end
+                    )
+                    earnings_source = _available_event_source(
+                        earnings, observed_at, len(earnings_events)
+                    )
+            except (RuntimeError, SQLAlchemyError, TypeError, ValueError):
+                earnings_source = EventSourceView("eodhd_calendar", "invalid")
+                earnings_events = ()
+        if economic_source.source_state == earnings_source.source_state == "invalid":
+            raise QuerySourceError("market_radar_database", "市场雷达两类事件来源均无法安全读取。")
+        return MarketEventsView(
+            observed_at_utc=observed_at,
+            window_start=start,
+            window_end=end,
+            economic_source=economic_source,
+            earnings_source=earnings_source,
+            days=tuple(
+                MarketEventDayView(
+                    day=start + timedelta(days=index),
+                    economic_events=tuple(
+                        item
+                        for item in economic_events
+                        if item.event_date == start + timedelta(days=index)
+                    ),
+                    earnings_events=tuple(
+                        sorted(
+                            (
+                                item
+                                for item in earnings_events
+                                if item.report_date == start + timedelta(days=index)
+                            ),
+                            key=lambda item: (item.instrument_id, item.fiscal_period_end),
+                        )
+                    ),
+                )
+                for index in range(14)
+            ),
+        )
+
+    def fundamentals(self) -> MarketFundamentalsView:
+        """读取已发布基本面及两条独立新鲜度, 不查询原始财报或计算指标。"""
+        observed_at = self._clock()
+        if observed_at.utcoffset() is None:
+            raise ValueError("market radar query clock must be timezone-aware")
+        observed_at = observed_at.astimezone(UTC)
+        snapshot = None
+        if self._repository is not None:
+            try:
+                snapshot = self._repository.latest_fundamental_snapshot()
+            except (RuntimeError, SQLAlchemyError) as exc:
+                raise QuerySourceError(
+                    "market_radar_database",
+                    "市场雷达基本面快照无法安全读取。",
+                ) from exc
+        if snapshot is None:
+            return MarketFundamentalsView(
+                source_state="missing" if self._repository is None else "empty",
+                observed_at_utc=observed_at,
+                as_of_date=None,
+                calculated_at_utc=None,
+                source=None,
+                validity="unavailable",
+                freshness=None,
+                items=(),
+            )
+        age = (observed_at.date() - snapshot.as_of_date).days
+        if age < 0 or snapshot.calculated_at_utc > observed_at:
+            raise QuerySourceError(
+                "market_radar_database",
+                "市场雷达基本面快照无法安全读取。",
+            )
+        items: list[StockFundamentalsView] = []
+        for item in snapshot.items:
+            source_age = (
+                None
+                if item.source_updated_date is None
+                else (observed_at.date() - item.source_updated_date).days
+            )
+            source_state: FundamentalSourceUpdateState = "unknown"
+            if source_age is not None:
+                source_state = (
+                    "stale" if source_age > _FUNDAMENTAL_SOURCE_STALE_AFTER_DAYS else "recent"
+                )
+            items.append(
+                StockFundamentalsView(
+                    instrument_id=item.instrument_id,
+                    listing_currency=item.listing_currency,
+                    provider_sector=item.provider_sector,
+                    sector_id=item.sector_id,
+                    industry=item.industry,
+                    kind=item.kind,
+                    source_updated_date=item.source_updated_date,
+                    source_age_days=source_age,
+                    source_update_state=source_state,
+                    metrics=tuple(
+                        FundamentalMetricView(
+                            name=metric.name,
+                            value=metric.value,
+                            reason=metric.reason,
+                            period_end=metric.period_end,
+                        )
+                        for metric in item.metrics
+                    ),
+                )
+            )
+        return MarketFundamentalsView(
+            source_state="available",
+            observed_at_utc=observed_at,
+            as_of_date=snapshot.as_of_date,
+            calculated_at_utc=snapshot.calculated_at_utc,
+            source=snapshot.source,
+            validity=snapshot.validity,
+            freshness=FundamentalFreshnessView(
+                snapshot_age_days=age,
+                snapshot_stale_after_days=_FUNDAMENTAL_SNAPSHOT_STALE_AFTER_DAYS,
+                snapshot_state="stale" if age > _FUNDAMENTAL_SNAPSHOT_STALE_AFTER_DAYS else "fresh",
+                source_stale_after_days=_FUNDAMENTAL_SOURCE_STALE_AFTER_DAYS,
+            ),
+            items=tuple(items),
+        )
 
     def sectors(self) -> SectorRadarListView:
         """返回最新快照中的 11 个板块价格指标。"""

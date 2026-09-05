@@ -10,14 +10,22 @@ from pathlib import Path
 from nautilus_trader.model.data import CustomData
 
 from tests.data.helpers import make_bar, utc_ns
+from tests.market_radar.test_economic_events import economic_event, economic_snapshot
+from tests.market_radar.test_fundamentals import CALCULATED, changed
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.market_radar.earnings import (
+    EarningsCalendarEvent,
     Fy1EarningsTrend,
     calculate_earnings_revision_snapshot,
 )
+from trading_assistant.market_radar.economic_events import EconomicEventBatch
 from trading_assistant.market_radar.fred import FredObservation
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalSnapshot,
+    calculate_fundamental_snapshot,
+)
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
     RiskAppetitePoint,
@@ -51,6 +59,36 @@ from trading_assistant.storage.repository import PositionSnapshotInput, TradingR
 from trading_assistant.web_api.config import WebApiSettings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def seed_fundamental_data(tmp_path: Path) -> FundamentalSnapshot:
+    """独立发布基本面, 不依赖价格快照或当前配置股票池。"""
+    observations = (
+        changed(),
+        changed(instrument_id="JPM.US", kind="financial", provider_sector="Financial Services"),
+        changed(instrument_id="REIT.US", kind="reit"),
+        changed(instrument_id="UNKNOWN.US", kind="unknown", provider_sector=None, sector_id=None),
+    )
+    snapshot = calculate_fundamental_snapshot(
+        as_of_date=CALCULATED.date(), calculated_at_utc=CALCULATED, observations=observations
+    )
+    repository = MarketRadarRepository(f"sqlite:///{tmp_path}/market-radar.db")
+    try:
+        repository.create_schema()
+        repository.start_sync_run(
+            run_id="web-fundamental-run",
+            source="eodhd_fundamentals",
+            started_at_utc=CALCULATED,
+            requested_start_date=None,
+            requested_end_date=None,
+            instrument_count=len(observations),
+        )
+        repository.publish_fundamental_bundle_and_complete(
+            "web-fundamental-run", observations=observations, snapshot=snapshot
+        )
+    finally:
+        repository.close()
+    return snapshot
 
 
 def web_settings(tmp_path: Path, *, account: str = "DU123") -> WebApiSettings:
@@ -407,7 +445,7 @@ def seed_market_radar_data(
         bars_fetched=8_000,
         bars_written=8_000,
     )
-    earnings_timestamp = datetime(today.year, today.month, today.day, 1, tzinfo=UTC)
+    earnings_timestamp = datetime(today.year, today.month, today.day, tzinfo=UTC)
     earnings_membership = CurrentMarketMembership(
         source="state_street_spy_holdings",
         membership_date=today - timedelta(days=1),
@@ -456,10 +494,10 @@ def seed_market_radar_data(
     )
     repository.start_sync_run(
         run_id="web-earnings-run",
-        source="eodhd_calendar",
+        source="eodhd_earnings",
         started_at_utc=earnings_timestamp,
-        requested_start_date=today - timedelta(days=1),
-        requested_end_date=today,
+        requested_start_date=today - timedelta(days=365),
+        requested_end_date=today + timedelta(days=60),
         instrument_count=2,
     )
     repository.publish_earnings_bundle_and_complete(
@@ -467,10 +505,37 @@ def seed_market_radar_data(
         membership=earnings_membership,
         classification=earnings_classification,
         trends=earnings_trends,
-        events=(),
+        events=(
+            EarningsCalendarEvent(
+                "AAPL.US", today - timedelta(days=90), today, "unknown", None, 0, -0.1
+            ),
+        ),
         snapshot=earnings,
         ingested_at_utc=earnings_timestamp,
-        completed_at_utc=earnings_timestamp + timedelta(minutes=1),
+        completed_at_utc=earnings_timestamp,
         instruments_processed=2,
+    )
+    repository.start_sync_run(
+        run_id="web-economic-run",
+        source="eodhd_economic_events",
+        started_at_utc=earnings_timestamp,
+        requested_start_date=today,
+        requested_end_date=today + timedelta(days=30),
+        instrument_count=0,
+    )
+    repository.publish_economic_events_and_complete(
+        "web-economic-run",
+        snapshot=economic_snapshot(
+            as_of_date=today,
+            captured_at_utc=earnings_timestamp,
+            window_start=today,
+            window_end=today + timedelta(days=30),
+            batch=EconomicEventBatch(
+                events=(economic_event(event_date=today, source_time=None),),
+                request_count=1,
+                raw_record_count=1,
+                duplicate_count=0,
+            ),
+        ),
     )
     repository.close()

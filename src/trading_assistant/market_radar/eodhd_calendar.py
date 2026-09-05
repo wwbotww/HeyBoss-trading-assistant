@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -13,9 +12,8 @@ from typing import cast
 
 from trading_assistant.data.eodhd_http import (
     EodhdHttpClient,
-    EodhdTemporaryHttpError,
+    HttpSleep,
     HttpTransport,
-    QueryValue,
     download,
 )
 from trading_assistant.market_radar.earnings import (
@@ -24,11 +22,7 @@ from trading_assistant.market_radar.earnings import (
     Fy1EarningsTrend,
 )
 
-LOGGER = logging.getLogger(__name__)
-
 CALENDAR_TRENDS_BATCH_SIZE = 50
-
-CalendarSleep = Callable[[float], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -283,43 +277,17 @@ class EodhdCalendarSource:
         max_attempts: int,
         retry_backoff_seconds: Sequence[float],
         transport: HttpTransport = download,
-        sleep: CalendarSleep = asyncio.sleep,
+        sleep: HttpSleep = asyncio.sleep,
     ) -> None:
-        if max_attempts < 1:
-            raise ValueError("EODHD Calendar max_attempts must be positive")
-        if len(retry_backoff_seconds) < max_attempts - 1 or any(
-            delay < 0 for delay in retry_backoff_seconds
-        ):
-            raise ValueError("EODHD Calendar retry backoff does not cover all attempts")
         self._http = EodhdHttpClient(
             api_token=api_token,
             request_timeout_seconds=request_timeout_seconds,
             max_concurrent_requests=1,
             transport=transport,
+            max_attempts=max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            sleep=sleep,
         )
-        self._max_attempts = max_attempts
-        self._retry_backoff_seconds = tuple(retry_backoff_seconds)
-        self._sleep = sleep
-
-    async def _request_json(
-        self,
-        endpoint: str,
-        query: Mapping[str, QueryValue],
-    ) -> object:
-        for attempt in range(self._max_attempts):
-            try:
-                return await self._http.request_json(endpoint, query)
-            except (ConnectionError, EodhdTemporaryHttpError, TimeoutError) as exc:
-                if attempt + 1 >= self._max_attempts:
-                    raise
-                delay = self._retry_backoff_seconds[attempt]
-                LOGGER.warning(
-                    "EODHD Calendar request failed; retrying in %.1fs: %s",
-                    delay,
-                    type(exc).__name__,
-                )
-                await self._sleep(delay)
-        raise AssertionError("unreachable")
 
     async def request_latest_fy1_trends(
         self,
@@ -327,7 +295,7 @@ class EodhdCalendarSource:
     ) -> EarningsTrendBatch:
         """请求完整 Trends 历史并选出每只标的最新 FY1。"""
         requested = _symbols(symbols)
-        payload = await self._request_json(
+        payload = await self._http.request_json(
             "calendar/trends",
             {"fmt": "json", "symbols": ",".join(requested)},
         )
@@ -366,7 +334,7 @@ class EodhdCalendarSource:
         requested = _symbols(symbols)
         if start > end:
             raise ValueError("EODHD Calendar Earnings start cannot be later than end")
-        payload = await self._request_json(
+        payload = await self._http.request_json(
             "calendar/earnings",
             {
                 "fmt": "json",

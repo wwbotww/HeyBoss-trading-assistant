@@ -11,9 +11,12 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
+import { ApiError } from '../api/client'
 import {
   marketRadarBreadthQuery,
   marketRadarEarningsQuery,
+  marketRadarEventsQuery,
+  marketRadarFundamentalsQuery,
   marketRadarMacroQuery,
   marketRadarSectorQuery,
   marketRadarSectorsQuery,
@@ -30,16 +33,20 @@ import type {
 import DataState from '../components/DataState.vue'
 import DataTable from '../components/DataTable.vue'
 import EarningsRevisionCard from '../components/EarningsRevisionCard.vue'
+import FundamentalMetricValue from '../components/FundamentalMetricValue.vue'
 import MacroRegimeChart from '../components/MacroRegimeChart.vue'
+import MarketEventsPanel from '../components/MarketEventsPanel.vue'
 import PaginationControls from '../components/PaginationControls.vue'
 import RadarMetricValue from '../components/RadarMetricValue.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
 import SideDrawer from '../components/SideDrawer.vue'
 import StatusPill from '../components/StatusPill.vue'
+import StockFundamentalsPanel from '../components/StockFundamentalsPanel.vue'
 import { formatDateTime, formatNumber, formatPercent, formatSourceState } from '../utils/format'
 import { PAGE_SIZE, pageOffset, readPage, readQueryText, withPage } from '../utils/pagination'
 
 type RadarView = 'overview' | 'sectors' | 'stocks'
+type StockDimension = 'price' | 'fundamentals'
 type StockSort = NonNullable<StockRadarQuery['sort']>
 type SortDirection = NonNullable<StockRadarQuery['direction']>
 
@@ -66,6 +73,8 @@ const stockSortValues: readonly StockSort[] = [
 
 const route = useRoute()
 const router = useRouter()
+const radarToolbar = ref<HTMLElement | null>(null)
+const drawerFallback = ref<HTMLElement | null>(null)
 const activeView = computed<RadarView>({
   get: () => {
     const view = route.query.view
@@ -77,6 +86,27 @@ const activeView = computed<RadarView>({
   },
 })
 const page = computed(() => readPage(route.query.page))
+const stockDimension = computed<StockDimension>({
+  get: () => (route.query.dimension === 'fundamentals' ? 'fundamentals' : 'price'),
+  set: (value) => {
+    const query: LocationQueryRaw = { view: 'stocks' }
+    if (value === 'fundamentals') query.dimension = value
+    void router.replace({ query })
+  },
+})
+const dimensionTabs = [
+  { value: 'price', label: '趋势与风险' },
+  { value: 'fundamentals', label: '财务与估值' },
+]
+watch(
+  [activeView, radarToolbar],
+  () => {
+    drawerFallback.value =
+      radarToolbar.value?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]') ??
+      null
+  },
+  { flush: 'post' },
+)
 const sectorFilter = computed(() => readQueryText(route.query.sector))
 const stockSearch = computed(() => readQueryText(route.query.query))
 const selectedSectorId = computed(() =>
@@ -120,6 +150,32 @@ const earnings = useQuery(marketRadarEarningsQuery())
 const macro = useQuery(marketRadarMacroQuery())
 const sectors = useQuery(marketRadarSectorsQuery())
 const stocks = useQuery(computed(() => marketRadarStocksQuery(stockParams.value)))
+const fundamentals = useQuery(
+  computed(() => marketRadarFundamentalsQuery(activeView.value === 'stocks')),
+)
+const events = useQuery(computed(() => marketRadarEventsQuery(activeView.value === 'overview')))
+const eventKind = computed(() => {
+  const value = route.query.event_kind
+  return activeView.value === 'overview' && (value === 'economic' || value === 'earnings')
+    ? value
+    : 'all'
+})
+const eventDate = computed(() => {
+  const value = route.query.event_date
+  return activeView.value === 'overview' &&
+    typeof value === 'string' &&
+    events.data.value?.days.some((day) => day.day === value)
+    ? value
+    : ''
+})
+function setEventFilter(kind: string, date: string): void {
+  const query: LocationQueryRaw = { ...route.query }
+  delete query.event_kind
+  delete query.event_date
+  if (kind === 'economic' || kind === 'earnings') query.event_kind = kind
+  if (events.data.value?.days.some((day) => day.day === date)) query.event_date = date
+  void router.replace({ query })
+}
 const sectorDetail = useQuery(
   computed(() => marketRadarSectorQuery(selectedSectorId.value, selectedSectorId.value.length > 0)),
 )
@@ -128,14 +184,65 @@ const stockDetail = useQuery(
     marketRadarStockQuery(selectedInstrumentId.value, selectedInstrumentId.value.length > 0),
   ),
 )
+const selectedFundamental = computed(() =>
+  fundamentals.isError.value
+    ? undefined
+    : fundamentals.data.value?.items.find(
+        (item) => item.instrument_id === selectedInstrumentId.value,
+      ),
+)
+const priceNotFound = computed(
+  () => stockDetail.error.value instanceof ApiError && stockDetail.error.value.status === 404,
+)
+const stockNotFound = computed(
+  () => priceNotFound.value && fundamentals.isSuccess.value && !selectedFundamental.value,
+)
+const fundamentalKindLabel = computed(() =>
+  selectedFundamental.value
+    ? {
+        operating: '一般企业',
+        financial: '金融企业',
+        reit: 'REIT',
+        unknown: '分类未知',
+      }[selectedFundamental.value.kind]
+    : '',
+)
+const fundamentalSourceLabel = computed(() =>
+  selectedFundamental.value
+    ? {
+        recent: '来源近期更新',
+        stale: '来源更新陈旧',
+        unknown: '来源更新未知',
+      }[selectedFundamental.value.source_update_state]
+    : '',
+)
 
-const tabs = computed(() => [
-  { value: 'overview', label: '总览', count: summary.data.value?.modules.length ?? 0 },
-  { value: 'sectors', label: '板块', count: sectors.data.value?.items.length ?? 0 },
-  { value: 'stocks', label: '个股', count: stocks.data.value?.items.length ?? 0 },
-])
+const tabs = [
+  { value: 'overview', label: '总览' },
+  { value: 'sectors', label: '板块' },
+  { value: 'stocks', label: '个股' },
+]
+const refreshingSources = computed(() =>
+  [
+    { label: '市场摘要', visible: true, query: summary },
+    { label: '宏观象限', visible: activeView.value === 'overview', query: macro },
+    { label: '当前宽度', visible: activeView.value === 'overview', query: breadth },
+    { label: '盈利修正', visible: activeView.value !== 'stocks', query: earnings },
+    { label: '板块价格', visible: activeView.value === 'sectors', query: sectors },
+    {
+      label: '个股价格',
+      visible: activeView.value === 'stocks' && stockDimension.value === 'price',
+      query: stocks,
+    },
+    { label: '基本面', visible: activeView.value === 'stocks', query: fundamentals },
+    { label: '板块详情', visible: !!selectedSectorId.value, query: sectorDetail },
+    { label: '个股详情', visible: !!selectedInstrumentId.value, query: stockDetail },
+  ]
+    .filter((item) => item.visible && item.query.isFetching.value && !item.query.isPending.value)
+    .map((item) => item.label),
+)
 const sectorOptions = computed(() =>
-  [...(sectors.data.value?.items ?? [])].sort((left, right) =>
+  [...(sectors.isError.value ? [] : (sectors.data.value?.items ?? []))].sort((left, right) =>
     sectorName(left.sector_id).localeCompare(sectorName(right.sector_id), 'zh-CN'),
   ),
 )
@@ -168,7 +275,9 @@ const breadthMetrics = computed<
   },
 ])
 const selectedSectorEarnings = computed(() =>
-  earnings.data.value?.sectors.find((item) => item.sector_id === selectedSectorId.value),
+  earnings.isError.value
+    ? undefined
+    : earnings.data.value?.sectors.find((item) => item.sector_id === selectedSectorId.value),
 )
 
 function sectorName(sectorId: string): string {
@@ -202,7 +311,9 @@ function earningsSourceLabel(source: string | null): string {
 }
 
 function sectorEarnings(sectorId: string): EarningsRevisionAggregate | null {
-  return earnings.data.value?.sectors.find((item) => item.sector_id === sectorId)?.revisions ?? null
+  return earnings.isError.value
+    ? null
+    : (earnings.data.value?.sectors.find((item) => item.sector_id === sectorId)?.revisions ?? null)
 }
 
 function metricCellTone(metric: RadarMetric): string {
@@ -315,8 +426,20 @@ async function retrySectors(): Promise<void> {
   await sectors.refetch()
 }
 
+async function retrySectorDetail(): Promise<void> {
+  await sectorDetail.refetch()
+}
+
 async function retryStocks(): Promise<void> {
   await stocks.refetch()
+}
+
+async function retryFundamentals(): Promise<void> {
+  await fundamentals.refetch()
+}
+
+async function retryStockDetail(): Promise<void> {
+  await stockDetail.refetch()
 }
 </script>
 
@@ -325,17 +448,19 @@ async function retryStocks(): Promise<void> {
     <div class="page-intro">
       <div>
         <h1>市场雷达</h1>
-        <p>读取最近一次原子发布的价格、宽度、宏观与盈利快照，观察市场结构；不生成交易信号。</p>
+        <p>
+          读取独立发布的价格、宽度、宏观、盈利、基本面与事件快照，观察市场结构；不生成交易信号。
+        </p>
       </div>
       <StatusPill
-        v-if="summary.data.value"
+        v-if="summary.data.value && !summary.isError.value"
         :status="summary.data.value.source_state"
         :label="`价格快照 · ${formatSourceState(summary.data.value.source_state)}`"
       />
     </div>
 
     <section class="surface radar-workspace">
-      <header class="radar-toolbar">
+      <header ref="radarToolbar" class="radar-toolbar">
         <div>
           <p class="eyebrow">Read-only market intelligence</p>
           <h2>
@@ -351,13 +476,26 @@ async function retryStocks(): Promise<void> {
         <SegmentedTabs v-model="activeView" :tabs="tabs" label="市场雷达视图" />
       </header>
 
-      <div v-if="summary.data.value" class="snapshot-strip">
+      <p v-if="refreshingSources.length" class="radar-read-status" role="status">
+        正在重新读取：{{
+          refreshingSources.join('、')
+        }}。期间保留上次结果，读取失败后停止展示受影响数值。
+      </p>
+      <DataState
+        v-if="activeView !== 'overview' && summary.isError.value"
+        state="error"
+        title="价格摘要读取失败"
+        :detail="summary.error.value?.message"
+        retry-label="重新读取市场摘要"
+        @retry="retrySummary"
+      />
+      <div v-if="summary.data.value && !summary.isError.value" class="snapshot-strip">
         <div>
-          <span>数据日期</span>
+          <span>价格数据日期</span>
           <strong class="tabular">{{ summary.data.value.as_of_date || '—' }}</strong>
         </div>
         <div>
-          <span>计算时间</span>
+          <span>价格计算时间</span>
           <strong>{{ formatDateTime(summary.data.value.calculated_at_utc) }}</strong>
         </div>
         <div v-if="summary.data.value.coverage">
@@ -378,13 +516,11 @@ async function retryStocks(): Promise<void> {
           retry-label="重新读取市场摘要"
           @retry="retrySummary"
         />
-        <DataState
-          v-else-if="summary.data.value?.source_state !== 'available'"
-          :state="summary.data.value?.source_state || 'empty'"
-          title="完整价格快照不可用"
-          detail="先运行市场雷达价格同步；页面不会读取 Catalog 或临时计算指标。"
-        />
         <template v-else-if="summary.data.value">
+          <p class="summary-read-time">
+            六项摘要读取于
+            {{ formatDateTime(summary.data.value.observed_at_utc) }}；各面板保留自己的来源与日期。
+          </p>
           <section class="module-grid" aria-label="市场雷达六项能力状态">
             <article
               v-for="module in summary.data.value.modules"
@@ -399,7 +535,13 @@ async function retryStocks(): Promise<void> {
             </article>
           </section>
 
-          <section v-if="summary.data.value.market" class="price-summary">
+          <DataState
+            v-if="summary.data.value.source_state !== 'available'"
+            :state="summary.data.value.source_state"
+            title="完整价格快照不可用"
+            detail="先运行市场雷达价格同步；页面不会读取 Catalog 或临时计算指标。"
+          />
+          <section v-else-if="summary.data.value.market" class="price-summary">
             <article class="price-hero">
               <div class="radar-orbit" aria-hidden="true"><RadarIcon :size="28" /></div>
               <div>
@@ -437,7 +579,7 @@ async function retryStocks(): Promise<void> {
               <p>横轴使用 DFII10 的 20 观测变化 Robust Z，纵轴组合信用代理与波动率期限结构。</p>
             </div>
             <StatusPill
-              v-if="macro.data.value"
+              v-if="macro.data.value && !macro.isError.value"
               :status="macro.data.value.validity"
               :label="moduleStateLabel(macro.data.value.validity)"
             />
@@ -559,7 +701,7 @@ async function retryStocks(): Promise<void> {
               <p>使用最新 SPY 当前持仓代理观察横截面，只描述当前结构，不代表历史 PIT 指数宽度。</p>
             </div>
             <StatusPill
-              v-if="breadth.data.value"
+              v-if="breadth.data.value && !breadth.isError.value"
               :status="breadth.data.value.validity"
               :label="moduleStateLabel(breadth.data.value.validity)"
             />
@@ -677,7 +819,7 @@ async function retryStocks(): Promise<void> {
               </p>
             </div>
             <StatusPill
-              v-if="earnings.data.value"
+              v-if="earnings.data.value && !earnings.isError.value"
               :status="earnings.data.value.validity"
               :label="moduleStateLabel(earnings.data.value.validity)"
             />
@@ -746,14 +888,14 @@ async function retryStocks(): Promise<void> {
             <div class="earnings-grid">
               <EarningsRevisionCard
                 title="当前市场"
-                description="当前指数成员横截面"
+                description="当前市场成员横截面"
                 :aggregate="earnings.data.value.market"
                 :status-label="moduleStateLabel(earnings.data.value.market.validity)"
                 featured
               />
               <EarningsRevisionCard
-                title="策略 Watchlist"
-                description="配置中的 10 只监测标的"
+                title="观察股 Watchlist"
+                description="独立观察池的已发布聚合"
                 :aggregate="earnings.data.value.watchlist"
                 :status-label="moduleStateLabel(earnings.data.value.watchlist.validity)"
               />
@@ -781,9 +923,54 @@ async function retryStocks(): Promise<void> {
             </p>
           </template>
         </section>
+        <MarketEventsPanel
+          :data="events.data.value"
+          :loading="events.isPending.value"
+          :refreshing="events.isFetching.value"
+          :error="events.error.value?.message"
+          :kind="eventKind"
+          :date="eventDate"
+          @retry="events.refetch()"
+          @update:kind="setEventFilter($event, eventDate)"
+          @update:date="setEventFilter(eventKind, $event)"
+        />
       </template>
 
       <template v-else-if="activeView === 'sectors'">
+        <section class="sector-earnings-source" aria-label="板块盈利来源">
+          <DataState v-if="earnings.isPending.value" state="loading" title="正在读取板块盈利来源" />
+          <DataState
+            v-else-if="earnings.isError.value"
+            state="error"
+            title="板块盈利读取失败"
+            :detail="earnings.error.value?.message"
+            retry-label="重新读取盈利修正"
+            @retry="retryEarnings"
+          />
+          <DataState
+            v-else-if="earnings.data.value?.source_state !== 'available'"
+            :state="earnings.data.value?.source_state || 'empty'"
+            title="板块盈利快照不可用"
+            detail="价格列表保持独立；未发布不代表盈利修正为零。"
+          />
+          <div v-else-if="earnings.data.value" class="earnings-source-meta">
+            <div>
+              <strong>{{ earningsSourceLabel(earnings.data.value.source) }}</strong>
+              <span
+                >盈利日期 {{ earnings.data.value.as_of_date || '—' }} · 已过
+                {{ earnings.data.value.freshness?.snapshot_age_days ?? '—' }} 天 / 阈值
+                {{ earnings.data.value.freshness?.stale_after_days ?? '—' }} 天</span
+              >
+            </div>
+            <StatusPill
+              :status="earnings.data.value.validity"
+              :label="moduleStateLabel(earnings.data.value.validity)"
+            />
+            <p>
+              价格与盈利独立发布；陈旧或部分可用时保留原值，逐板块覆盖见真实分母。不是实时行情或交易建议。
+            </p>
+          </div>
+        </section>
         <DataState v-if="sectors.isPending.value" state="loading" />
         <DataState
           v-else-if="sectors.isError.value"
@@ -812,7 +999,7 @@ async function retryStocks(): Promise<void> {
             </div>
             <p>价格和盈利来自独立快照并分别标注日期；盈利接口不可用时，价格矩阵仍然保留。</p>
           </div>
-          <DataTable caption="11 个标准板块的价格相对强弱与盈利修正" min-width="1080px">
+          <DataTable caption="已发布板块的价格相对强弱与盈利修正" min-width="1080px">
             <thead>
               <tr>
                 <th>板块 / ETF</th>
@@ -875,7 +1062,12 @@ async function retryStocks(): Promise<void> {
                 </td>
                 <td class="snapshot-date-cell tabular">
                   <span>价格 {{ sectors.data.value.as_of_date || '—' }}</span>
-                  <small>盈利 {{ earnings.data.value?.as_of_date || '—' }}</small>
+                  <small
+                    >盈利
+                    {{
+                      earnings.isError.value ? '读取失败' : earnings.data.value?.as_of_date || '—'
+                    }}</small
+                  >
                 </td>
                 <td class="align-right">
                   <button
@@ -894,158 +1086,206 @@ async function retryStocks(): Promise<void> {
       </template>
 
       <template v-else>
-        <form class="stock-filters" @submit.prevent="applySearch">
-          <label class="search-field">
-            <span>搜索 watchlist</span>
-            <div>
-              <Search :size="16" aria-hidden="true" /><input
-                v-model="searchDraft"
-                type="search"
-                maxlength="64"
-                placeholder="AAPL 或 AAPL.US"
-              />
-            </div>
-          </label>
-          <label>
-            <span>板块</span>
-            <select :value="sectorFilter" @change="changeSectorFilter">
-              <option value="">全部板块</option>
-              <option
-                v-for="sector in sectorOptions"
-                :key="sector.sector_id"
-                :value="sector.sector_id"
-              >
-                {{ sectorName(sector.sector_id) }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>排序</span>
-            <select :value="stockSort" @change="changeSort">
-              <option value="instrument">标的</option>
-              <option value="momentum">126–21 动量</option>
-              <option value="relative_momentum">板块相对动量</option>
-              <option value="volatility">20 日波动率</option>
-              <option value="drawdown">126 日回撤</option>
-            </select>
-          </label>
-          <label>
-            <span>方向</span>
-            <select :value="sortDirection" @change="changeDirection">
-              <option value="asc">升序</option>
-              <option value="desc">降序</option>
-            </select>
-          </label>
-          <button class="apply-filter" type="submit">应用搜索</button>
-          <button
-            v-if="
-              stockSearch || sectorFilter || stockSort !== 'instrument' || sortDirection !== 'asc'
-            "
-            class="clear-filter"
-            type="button"
-            @click="clearStockFilters"
-          >
-            清除筛选
-          </button>
-        </form>
-
-        <div class="dimension-note">
-          <ArrowDownUp :size="17" aria-hidden="true" />
-          <p>
-            当前个股接口只具备价格趋势与风险维度。盈利数据已用于市场和板块聚合，但尚未暴露个股修正；质量和估值仍未实现。
-          </p>
+        <div class="stock-dimensions">
+          <SegmentedTabs v-model="stockDimension" :tabs="dimensionTabs" label="个股观察维度" />
+          <span>价格与基本面各自保留日期和可用状态</span>
         </div>
+        <StockFundamentalsPanel
+          v-if="stockDimension === 'fundamentals'"
+          :data="fundamentals.isError.value ? undefined : fundamentals.data.value"
+          :loading="fundamentals.isPending.value"
+          :error="fundamentals.isError.value ? fundamentals.error.value?.message : undefined"
+          @retry="retryFundamentals"
+          @open-stock="openStock"
+        />
+        <template v-else>
+          <form class="stock-filters" @submit.prevent="applySearch">
+            <label class="search-field">
+              <span>搜索 watchlist</span>
+              <div>
+                <Search :size="16" aria-hidden="true" /><input
+                  v-model="searchDraft"
+                  type="search"
+                  maxlength="64"
+                  placeholder="AAPL 或 AAPL.US"
+                />
+              </div>
+            </label>
+            <label>
+              <span>板块</span>
+              <select :value="sectorFilter" @change="changeSectorFilter">
+                <option value="">全部板块</option>
+                <option
+                  v-for="sector in sectorOptions"
+                  :key="sector.sector_id"
+                  :value="sector.sector_id"
+                >
+                  {{ sectorName(sector.sector_id) }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>排序</span>
+              <select :value="stockSort" @change="changeSort">
+                <option value="instrument">标的</option>
+                <option value="momentum">126–21 动量</option>
+                <option value="relative_momentum">板块相对动量</option>
+                <option value="volatility">20 日波动率</option>
+                <option value="drawdown">126 日回撤</option>
+              </select>
+            </label>
+            <label>
+              <span>方向</span>
+              <select :value="sortDirection" @change="changeDirection">
+                <option value="asc">升序</option>
+                <option value="desc">降序</option>
+              </select>
+            </label>
+            <button class="apply-filter" type="submit">应用搜索</button>
+            <button
+              v-if="
+                stockSearch || sectorFilter || stockSort !== 'instrument' || sortDirection !== 'asc'
+              "
+              class="clear-filter"
+              type="button"
+              @click="clearStockFilters"
+            >
+              清除筛选
+            </button>
+          </form>
 
-        <DataState v-if="stocks.isPending.value" state="loading" />
-        <DataState
-          v-else-if="stocks.isError.value"
-          state="error"
-          :detail="stocks.error.value?.message"
-          retry-label="重新读取个股快照"
-          @retry="retryStocks"
-        />
-        <DataState
-          v-else-if="stocks.data.value?.source_state !== 'available'"
-          :state="stocks.data.value?.source_state || 'empty'"
-          title="个股价格快照不可用"
-          detail="watchlist 不从账户持仓自动扩充，也不会读取不完整同步结果。"
-        />
-        <DataState
-          v-else-if="stocks.data.value.items.length === 0"
-          state="empty"
-          title="没有匹配的 watchlist 标的"
-          detail="请调整搜索或板块筛选条件。"
-        />
-        <template v-else-if="stocks.data.value">
-          <DataTable caption="watchlist 个股趋势与风险" min-width="1480px">
-            <thead>
-              <tr>
-                <th>标的 / 板块</th>
-                <th>126–21 动量</th>
-                <th>相对板块</th>
-                <th>距 MA200</th>
-                <th>20 日波动率</th>
-                <th>126 日最大回撤</th>
-                <th>ATR20 / Price</th>
-                <th aria-label="详情"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="stock in stocks.data.value.items" :key="stock.instrument_id">
-                <td>
-                  <button class="entity-link" type="button" @click="openStock(stock.instrument_id)">
-                    <span>
-                      <strong>{{ stock.symbol }}</strong>
-                      <small
-                        >{{ sectorName(stock.sector_id) }} ·
-                        <span class="mono">{{ stock.instrument_id }}</span></small
-                      >
-                    </span>
-                  </button>
-                </td>
-                <td><RadarMetricValue :metric="stock.momentum_126_21" compact /></td>
-                <td>
-                  <RadarMetricValue :metric="stock.sector_relative_momentum_126_21" compact />
-                </td>
-                <td><RadarMetricValue :metric="stock.distance_ma_200" compact /></td>
-                <td><RadarMetricValue :metric="stock.realized_volatility_20" compact /></td>
-                <td><RadarMetricValue :metric="stock.max_drawdown_126" compact /></td>
-                <td><RadarMetricValue :metric="stock.atr_20_ratio" compact /></td>
-                <td class="align-right">
-                  <button
-                    class="row-action"
-                    type="button"
-                    :aria-label="`查看 ${stock.symbol} 详情`"
-                    @click="openStock(stock.instrument_id)"
-                  >
-                    <ChevronRight :size="17" aria-hidden="true" />
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </DataTable>
-          <PaginationControls
-            :offset="stocks.data.value.offset"
-            :limit="stocks.data.value.limit"
-            :item-count="stocks.data.value.items.length"
-            :has-more="stocks.data.value.has_more"
-            @change="changeOffset"
+          <div class="dimension-note">
+            <ArrowDownUp :size="17" aria-hidden="true" />
+            <p>
+              当前展示价格趋势与风险；切换“财务与估值”查看独立基本面快照。个股 EPS 修正、ROIC
+              和同行分位尚未提供。
+            </p>
+          </div>
+
+          <DataState v-if="stocks.isPending.value" state="loading" />
+          <DataState
+            v-else-if="stocks.isError.value"
+            state="error"
+            :detail="stocks.error.value?.message"
+            retry-label="重新读取个股快照"
+            @retry="retryStocks"
           />
+          <DataState
+            v-else-if="stocks.data.value?.source_state !== 'available'"
+            :state="stocks.data.value?.source_state || 'empty'"
+            title="个股价格快照不可用"
+            detail="watchlist 不从账户持仓自动扩充，也不会读取不完整同步结果。"
+          />
+          <DataState
+            v-else-if="stocks.data.value.items.length === 0"
+            state="empty"
+            :title="page > 1 ? '当前页没有记录' : '没有匹配的 watchlist 标的'"
+            :detail="
+              page > 1
+                ? '当前页超出已读结果范围，可返回第一页；不推算总页数。'
+                : '请调整搜索或板块筛选条件。'
+            "
+          />
+          <template v-else-if="stocks.data.value">
+            <DataTable caption="watchlist 个股趋势与风险" min-width="1480px">
+              <thead>
+                <tr>
+                  <th>标的 / 板块</th>
+                  <th>126–21 动量</th>
+                  <th>相对板块</th>
+                  <th>距 MA200</th>
+                  <th>20 日波动率</th>
+                  <th>126 日最大回撤</th>
+                  <th>ATR20 / Price</th>
+                  <th aria-label="详情"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="stock in stocks.data.value.items" :key="stock.instrument_id">
+                  <td>
+                    <button
+                      class="entity-link"
+                      type="button"
+                      @click="openStock(stock.instrument_id)"
+                    >
+                      <span>
+                        <strong>{{ stock.symbol }}</strong>
+                        <small
+                          >{{ sectorName(stock.sector_id) }} ·
+                          <span class="mono">{{ stock.instrument_id }}</span></small
+                        >
+                      </span>
+                    </button>
+                  </td>
+                  <td><RadarMetricValue :metric="stock.momentum_126_21" compact /></td>
+                  <td>
+                    <RadarMetricValue :metric="stock.sector_relative_momentum_126_21" compact />
+                  </td>
+                  <td><RadarMetricValue :metric="stock.distance_ma_200" compact /></td>
+                  <td><RadarMetricValue :metric="stock.realized_volatility_20" compact /></td>
+                  <td><RadarMetricValue :metric="stock.max_drawdown_126" compact /></td>
+                  <td><RadarMetricValue :metric="stock.atr_20_ratio" compact /></td>
+                  <td class="align-right">
+                    <button
+                      class="row-action"
+                      type="button"
+                      :aria-label="`查看 ${stock.symbol} 详情`"
+                      @click="openStock(stock.instrument_id)"
+                    >
+                      <ChevronRight :size="17" aria-hidden="true" />
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </DataTable>
+            <PaginationControls
+              :offset="stocks.data.value.offset"
+              :limit="stocks.data.value.limit"
+              :item-count="stocks.data.value.items.length"
+              :has-more="stocks.data.value.has_more"
+              @change="changeOffset"
+            />
+          </template>
+          <div
+            v-if="
+              stocks.isSuccess.value &&
+              stocks.data.value?.source_state === 'available' &&
+              stocks.data.value.items.length === 0 &&
+              page > 1
+            "
+            class="empty-page-actions"
+          >
+            <button type="button" aria-label="回到第一页" @click="changeOffset(0)">
+              回到第一页
+            </button>
+          </div>
         </template>
       </template>
     </section>
 
     <SideDrawer
       :open="selectedSectorId.length > 0"
+      :fallback-focus="drawerFallback"
       :title="sectorName(selectedSectorId)"
       description="独立日期的价格与盈利聚合；不构成交易建议"
       @close="closeSector"
     >
       <DataState v-if="sectorDetail.isPending.value" state="loading" />
       <DataState
+        v-else-if="
+          sectorDetail.error.value instanceof ApiError && sectorDetail.error.value.status === 404
+        "
+        state="empty"
+        title="该板块无价格快照"
+        detail="下方盈利按完整板块 ID 独立匹配，不推断 ETF 身份。"
+      />
+      <DataState
         v-else-if="sectorDetail.isError.value"
         state="error"
+        title="价格详情读取失败"
         :detail="sectorDetail.error.value?.message"
+        retry-label="重新读取板块价格详情"
+        @retry="retrySectorDetail"
       />
       <template v-else-if="sectorDetail.data.value">
         <div class="drawer-identity">
@@ -1054,7 +1294,9 @@ async function retryStocks(): Promise<void> {
         </div>
         <div class="drawer-section-title">
           <span>价格相对强弱</span>
-          <small class="tabular">{{ sectors.data.value?.as_of_date || '—' }}</small>
+          <small class="tabular">{{
+            sectors.isError.value ? '价格日期读取失败' : sectors.data.value?.as_of_date || '—'
+          }}</small>
         </div>
         <div class="drawer-metrics">
           <article>
@@ -1066,56 +1308,81 @@ async function retryStocks(): Promise<void> {
             ><RadarMetricValue :metric="sectorDetail.data.value.relative_strength_60" />
           </article>
         </div>
-        <div class="drawer-section-title">
-          <span>FY1 盈利修正</span>
-          <small class="tabular">{{ earnings.data.value?.as_of_date || '—' }}</small>
-        </div>
-        <DataState v-if="earnings.isPending.value" state="loading" />
-        <DataState
-          v-else-if="earnings.isError.value"
-          state="error"
-          :detail="earnings.error.value?.message"
-        />
-        <EarningsRevisionCard
-          v-else-if="selectedSectorEarnings"
-          :title="sectorName(selectedSectorId)"
-          description="当前成员行业分类聚合"
-          :aggregate="selectedSectorEarnings.revisions"
-          :status-label="moduleStateLabel(selectedSectorEarnings.revisions.validity)"
-        />
-        <div v-else class="unavailable-block">
-          <CircleOff :size="18" aria-hidden="true" />
-          <div>
-            <strong>该板块盈利修正不可用</strong>
-            <p>盈利快照缺失、读取失败，或该板块不在当前分类结果中；价格详情不受影响。</p>
-          </div>
-        </div>
-        <div class="unavailable-block">
-          <CircleOff :size="18" aria-hidden="true" />
-          <div>
-            <strong>板块历史宽度尚不可用</strong>
-            <p>当前没有历史 PIT 成分，因此不生成板块宽度排名或历史走势。</p>
-          </div>
-        </div>
       </template>
+      <div class="drawer-section-title">
+        <span>FY1 盈利修正</span>
+        <small class="tabular">{{
+          earnings.isError.value ? '读取失败' : earnings.data.value?.as_of_date || '—'
+        }}</small>
+      </div>
+      <DataState v-if="earnings.isPending.value" state="loading" />
+      <DataState
+        v-else-if="earnings.isError.value"
+        state="error"
+        :detail="earnings.error.value?.message"
+        retry-label="重新读取盈利修正"
+        @retry="retryEarnings"
+      />
+      <EarningsRevisionCard
+        v-else-if="selectedSectorEarnings"
+        :title="sectorName(selectedSectorId)"
+        description="当前成员行业分类聚合"
+        :aggregate="selectedSectorEarnings.revisions"
+        :status-label="moduleStateLabel(selectedSectorEarnings.revisions.validity)"
+      />
+      <div v-else class="unavailable-block">
+        <CircleOff :size="18" aria-hidden="true" />
+        <div>
+          <strong>该板块盈利修正不可用</strong>
+          <p>盈利快照缺失、读取失败，或该板块不在当前分类结果中；价格详情不受影响。</p>
+        </div>
+      </div>
+      <div class="unavailable-block">
+        <CircleOff :size="18" aria-hidden="true" />
+        <div>
+          <strong>板块历史宽度尚不可用</strong>
+          <p>当前没有历史 PIT 成分，因此不生成板块宽度排名或历史走势。</p>
+        </div>
+      </div>
     </SideDrawer>
 
     <SideDrawer
       :open="selectedInstrumentId.length > 0"
-      :title="stockDetail.data.value?.symbol || selectedInstrumentId"
-      description="watchlist 当前价格趋势与风险；不构成交易建议"
+      :fallback-focus="drawerFallback"
+      :title="
+        stockDetail.isError.value
+          ? selectedInstrumentId
+          : stockDetail.data.value?.symbol || selectedInstrumentId
+      "
+      description="价格与基本面独立读取、独立日期；不构成交易建议"
       width="620px"
       @close="closeStock"
     >
-      <DataState v-if="stockDetail.isPending.value" state="loading" />
+      <DataState
+        v-if="stockNotFound"
+        state="empty"
+        title="当前已发布快照中不存在该标的"
+        detail="价格与基本面均无此完整标的 ID；页面不会通过 ticker 猜测映射或扩充股票池。"
+      />
+      <div class="drawer-section-title"><span>价格 · 趋势与风险</span></div>
+      <DataState v-if="stockDetail.isPending.value" state="loading" title="正在读取价格详情" />
+      <DataState
+        v-else-if="priceNotFound"
+        state="empty"
+        title="该标的无价格快照"
+        detail="不影响下方基本面展示；两个快照的股票池不取交集。"
+      />
       <DataState
         v-else-if="stockDetail.isError.value"
         state="error"
+        title="价格详情读取失败"
         :detail="stockDetail.error.value?.message"
+        retry-label="重新读取价格详情"
+        @retry="retryStockDetail"
       />
       <template v-else-if="stockDetail.data.value">
         <div class="drawer-identity">
-          <span>{{ sectorName(stockDetail.data.value.sector_id) }}</span>
+          <span>价格配置板块 · {{ sectorName(stockDetail.data.value.sector_id) }}</span>
           <strong class="mono">{{ stockDetail.data.value.instrument_id }}</strong>
         </div>
         <div class="drawer-section-title"><span>趋势</span><small>规范 INTERNAL 日线</small></div>
@@ -1148,19 +1415,215 @@ async function retryStocks(): Promise<void> {
             ><RadarMetricValue :metric="stockDetail.data.value.atr_20_ratio" />
           </article>
         </div>
-        <div class="unavailable-block">
-          <CircleOff :size="18" aria-hidden="true" />
+      </template>
+      <div class="drawer-section-title">
+        <span>基本面 · 财务与估值</span><small>独立采集快照</small>
+      </div>
+      <DataState v-if="fundamentals.isPending.value" state="loading" title="正在读取基本面详情" />
+      <DataState
+        v-else-if="fundamentals.isError.value"
+        state="error"
+        title="基本面详情读取失败"
+        :detail="fundamentals.error.value?.message"
+        retry-label="重新读取基本面详情"
+        @retry="retryFundamentals"
+      />
+      <template v-else-if="selectedFundamental && fundamentals.data.value">
+        <div class="drawer-identity">
+          <span>{{ fundamentalKindLabel }} · {{ selectedFundamental.listing_currency }}</span>
+          <strong class="mono">{{ selectedFundamental.instrument_id }}</strong>
+        </div>
+        <dl class="fundamental-drawer-meta">
           <div>
-            <strong>个股修正、质量与估值尚不可用</strong>
-            <p>当前盈利契约只发布市场与板块聚合；页面不会从原始 Trends 推导第二套个股口径。</p>
+            <dt>基本面采集日 · UTC</dt>
+            <dd>{{ fundamentals.data.value.as_of_date || '—' }}</dd>
           </div>
+          <div>
+            <dt>基本面计算时间</dt>
+            <dd>{{ formatDateTime(fundamentals.data.value.calculated_at_utc) }}</dd>
+          </div>
+          <div>
+            <dt>来源更新日期</dt>
+            <dd>{{ selectedFundamental.source_updated_date || '日期未确认' }}</dd>
+          </div>
+          <div>
+            <dt>来源行业 / 分类映射</dt>
+            <dd>
+              {{ selectedFundamental.provider_sector || '未确认' }} /
+              {{
+                selectedFundamental.sector_id ? sectorName(selectedFundamental.sector_id) : '未映射'
+              }}
+            </dd>
+          </div>
+          <div>
+            <dt>来源细分行业</dt>
+            <dd>{{ selectedFundamental.industry || '未确认' }}</dd>
+          </div>
+          <div>
+            <dt>数据来源</dt>
+            <dd>
+              {{
+                fundamentals.data.value.source === 'eodhd_fundamentals'
+                  ? 'EODHD Fundamentals'
+                  : fundamentals.data.value.source || '—'
+              }}
+            </dd>
+          </div>
+        </dl>
+        <div class="fundamental-drawer-status">
+          <StatusPill
+            v-if="fundamentals.data.value.freshness"
+            :status="fundamentals.data.value.freshness.snapshot_state"
+            :label="
+              fundamentals.data.value.freshness.snapshot_state === 'stale'
+                ? '本地快照陈旧'
+                : '本地快照新鲜'
+            "
+          />
+          <StatusPill
+            :status="selectedFundamental.source_update_state"
+            :label="fundamentalSourceLabel"
+          />
+          <span v-if="fundamentals.data.value.freshness"
+            >采集 {{ fundamentals.data.value.freshness.snapshot_age_days }} 天 / 阈值
+            {{ fundamentals.data.value.freshness.snapshot_stale_after_days }} 天；来源
+            {{
+              selectedFundamental.source_age_days === null
+                ? '未知'
+                : `${selectedFundamental.source_age_days} 天`
+            }}
+            / 阈值 {{ fundamentals.data.value.freshness.source_stale_after_days }} 天。</span
+          >
+        </div>
+        <p class="fundamental-drawer-note">
+          来源更新不等于报告期或实时估值报价。以下保留已发布数值和逐字段原因；金融企业仅适用 ROE 与
+          P/B，REIT 暂无专用口径。不合成分数，不与价格快照强行对齐。
+        </p>
+        <div class="drawer-metrics">
+          <article v-for="metric in selectedFundamental.metrics" :key="metric.name">
+            <FundamentalMetricValue :metric="metric" />
+          </article>
         </div>
       </template>
+      <DataState
+        v-else
+        :state="fundamentals.data.value?.source_state === 'missing' ? 'missing' : 'empty'"
+        title="该标的无基本面快照"
+        detail="尚无已发布基本面，或完整标的 ID 不在该批次中；价格详情不受影响。"
+      />
+      <div class="unavailable-block">
+        <CircleOff :size="18" aria-hidden="true" />
+        <div>
+          <strong>个股 EPS 修正、ROIC 与同行分位尚不可用</strong>
+          <p>盈利修正仍只提供市场和板块聚合；页面不从原始数据补算其他口径。</p>
+        </div>
+      </div>
     </SideDrawer>
   </div>
 </template>
 
 <style scoped>
+.radar-read-status,
+.summary-read-time {
+  margin: 0;
+  padding: 12px 24px;
+  color: var(--color-text-soft);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.radar-read-status {
+  background: var(--color-surface-soft);
+}
+.sector-earnings-source {
+  padding: 20px 24px 0;
+}
+.earnings-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-soft);
+  font-size: 0.74rem;
+}
+.earnings-source-meta > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.earnings-source-meta span,
+.earnings-source-meta p {
+  color: var(--color-text-soft);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+.earnings-source-meta p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.empty-page-actions {
+  padding: 0 24px 24px;
+}
+.empty-page-actions button {
+  min-height: 38px;
+  padding: 8px 16px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  cursor: pointer;
+}
+.stock-dimensions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+}
+.stock-dimensions > span {
+  color: var(--color-text-faint);
+  font-size: 0.7rem;
+}
+.fundamental-drawer-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 0;
+  padding: 18px 0;
+}
+.fundamental-drawer-meta dt {
+  color: var(--color-text-faint);
+  font-size: 0.67rem;
+}
+.fundamental-drawer-meta dd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+.fundamental-drawer-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.fundamental-drawer-status > span:last-child,
+.fundamental-drawer-note {
+  color: var(--color-text-soft);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+.fundamental-drawer-note {
+  margin: 16px 0;
+}
+@media (max-width: 600px) {
+  .stock-dimensions {
+    padding: 20px 16px;
+  }
+}
+
 .radar-workspace {
   min-height: 620px;
 }
@@ -1225,13 +1688,12 @@ async function retryStocks(): Promise<void> {
 .module-grid {
   display: grid;
   gap: 12px;
-  padding: 24px;
+  padding: 10px 24px 24px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .module-card {
-  min-height: 132px;
-  padding: 18px;
+  padding: 14px 16px;
   background: var(--color-surface-soft);
   border: 1px solid var(--color-line);
   border-radius: var(--radius-md);
@@ -1250,7 +1712,7 @@ async function retryStocks(): Promise<void> {
 }
 
 .module-card p {
-  margin: 23px 0 0;
+  margin: 12px 0 0;
   color: var(--color-text-soft);
   font-size: 0.73rem;
   line-height: 1.55;
@@ -1874,6 +2336,7 @@ async function retryStocks(): Promise<void> {
 
 .drawer-identity strong {
   font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .drawer-metrics {
@@ -1900,6 +2363,8 @@ async function retryStocks(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
   margin: 22px 0 10px;
 }
 

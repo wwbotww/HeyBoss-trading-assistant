@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+
 interface TabItem {
   value: string
   label: string
   count?: number
 }
 
-defineProps<{
+const props = defineProps<{
   modelValue: string
   tabs: readonly TabItem[]
   label: string
@@ -14,17 +16,52 @@ defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
+
+const tablist = ref<HTMLElement | null>(null)
+const focusedValue = ref(props.modelValue)
+const focusEntry = computed(() =>
+  props.tabs.some((tab) => tab.value === focusedValue.value)
+    ? focusedValue.value
+    : (props.tabs.find((tab) => tab.value === props.modelValue)?.value ?? props.tabs[0]?.value),
+)
+
+watch(
+  () => props.modelValue,
+  (value) => {
+    focusedValue.value = value
+  },
+)
+
+function handleKeydown(event: KeyboardEvent, index: number): void {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    const tab = props.tabs[index]
+    if (tab) emit('update:modelValue', tab.value)
+    return
+  }
+  let target: number
+  if (event.key === 'ArrowRight') target = (index + 1) % props.tabs.length
+  else if (event.key === 'ArrowLeft') target = (index - 1 + props.tabs.length) % props.tabs.length
+  else if (event.key === 'Home') target = 0
+  else if (event.key === 'End') target = props.tabs.length - 1
+  else return
+  event.preventDefault()
+  tablist.value?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[target]?.focus()
+}
 </script>
 
 <template>
-  <div class="segmented-tabs" role="tablist" :aria-label="label">
+  <div ref="tablist" class="segmented-tabs" role="tablist" :aria-label="label">
     <button
-      v-for="tab in tabs"
+      v-for="(tab, index) in tabs"
       :key="tab.value"
       type="button"
       role="tab"
       :aria-selected="modelValue === tab.value"
+      :tabindex="focusEntry === tab.value ? 0 : -1"
       :class="{ active: modelValue === tab.value }"
+      @focus="focusedValue = tab.value"
+      @keydown="handleKeydown($event, index)"
       @click="emit('update:modelValue', tab.value)"
     >
       {{ tab.label }}

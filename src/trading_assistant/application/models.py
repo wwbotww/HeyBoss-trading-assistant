@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
 
+from trading_assistant.market_radar.earnings import EarningsSession
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalKind,
+    FundamentalMetricName,
+    FundamentalReason,
+    FundamentalValidity,
+)
+
 Scalar = str | int | float | bool | None
 SourceState = Literal[
     "available",
@@ -55,6 +63,8 @@ StockRadarSort = Literal[
     "drawdown",
 ]
 SortDirection = Literal["asc", "desc"]
+FundamentalSnapshotState = Literal["fresh", "stale"]
+FundamentalSourceUpdateState = Literal["recent", "stale", "unknown"]
 
 
 class QuerySourceError(RuntimeError):
@@ -599,6 +609,142 @@ class MarketEarningsView:
     watchlist: EarningsRevisionAggregateView | None
     market: EarningsRevisionAggregateView | None
     sectors: tuple[SectorEarningsRevisionView, ...]
+
+
+@dataclass(frozen=True)
+class EventFreshnessView:
+    """查询时钟下的采集年龄, 不代表事件实时完整性。"""
+
+    age_seconds: float
+    stale_after_seconds: int
+    state: Literal["fresh", "stale"]
+
+
+@dataclass(frozen=True)
+class EventWindowCoverageView:
+    """采集请求与展示日期交集, 不是供应商事件覆盖率。"""
+
+    state: Literal["covered", "partial", "uncovered"]
+    covered_start: date | None
+    covered_end: date | None
+    covered_days: int
+
+
+@dataclass(frozen=True)
+class EventSourceView:
+    """独立来源的发布状态; 无可信批次时不保留元数据。"""
+
+    source: Literal["eodhd_economic_events", "eodhd_calendar"]
+    source_state: SourceState
+    as_of_date: date | None = None
+    captured_at_utc: datetime | None = None
+    window_start: date | None = None
+    window_end: date | None = None
+    freshness: EventFreshnessView | None = None
+    coverage: EventWindowCoverageView | None = None
+    watchlist_count: int | None = None
+    window_event_count: int | None = None
+
+
+@dataclass(frozen=True)
+class EconomicEventView:
+    """直接保留规范经济事件字段, 不解释未确认单位或时区。"""
+
+    country: Literal["US"]
+    event_type: str
+    event_date: date
+    source_time: str | None
+    comparison: Literal["mom", "qoq", "yoy"] | None
+    period: str | None
+    actual: float | None
+    estimate: float | None
+    previous: float | None
+    change: float | None
+    change_percentage: float | None
+
+
+@dataclass(frozen=True)
+class EarningsEventView:
+    """已发布观察池的财报日历, 不受盈利指标有效性筛选。"""
+
+    instrument_id: str
+    fiscal_period_end: date
+    report_date: date
+    session: EarningsSession
+    currency: str | None
+    actual_eps: float | None
+    estimated_eps: float | None
+
+
+@dataclass(frozen=True)
+class MarketEventDayView:
+    """来源报告日期分组, 不表示精确 UTC 发布日。"""
+
+    day: date
+    economic_events: tuple[EconomicEventView, ...]
+    earnings_events: tuple[EarningsEventView, ...]
+
+
+@dataclass(frozen=True)
+class MarketEventsView:
+    """固定十四日事件窗口, 两类来源状态相互独立。"""
+
+    observed_at_utc: datetime
+    window_start: date
+    window_end: date
+    economic_source: EventSourceView
+    earnings_source: EventSourceView
+    days: tuple[MarketEventDayView, ...]
+
+
+@dataclass(frozen=True)
+class FundamentalFreshnessView:
+    """采集检查线与供应商来源更新提示线分别表达。"""
+
+    snapshot_age_days: int
+    snapshot_stale_after_days: int
+    snapshot_state: FundamentalSnapshotState
+    source_stale_after_days: int
+
+
+@dataclass(frozen=True)
+class FundamentalMetricView:
+    """已发布的基本面指标, 保留原值、原因和真实报告期。"""
+
+    name: FundamentalMetricName
+    value: float | None
+    reason: FundamentalReason | None
+    period_end: date | None
+
+
+@dataclass(frozen=True)
+class StockFundamentalsView:
+    """单股基本面与查询时来源新鲜度; 不依赖价格名单。"""
+
+    instrument_id: str
+    listing_currency: str
+    provider_sector: str | None
+    sector_id: str | None
+    industry: str | None
+    kind: FundamentalKind
+    source_updated_date: date | None
+    source_age_days: int | None
+    source_update_state: FundamentalSourceUpdateState
+    metrics: tuple[FundamentalMetricView, ...]
+
+
+@dataclass(frozen=True)
+class MarketFundamentalsView:
+    """当前基本面快照只读投影, 字段可用性不被陈旧状态覆盖。"""
+
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    source: str | None
+    validity: FundamentalValidity
+    freshness: FundamentalFreshnessView | None
+    items: tuple[StockFundamentalsView, ...]
 
 
 @dataclass(frozen=True)

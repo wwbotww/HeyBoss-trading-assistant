@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from tests.market_radar.test_economic_events import ECONOMIC_AT, economic_event, economic_snapshot
+from tests.market_radar.test_fundamentals import CALCULATED, changed
+from tests.market_radar.test_fundamentals import snapshot as fundamental_snapshot
 from trading_assistant.application.market_radar import MarketRadarQueryService
 from trading_assistant.application.models import QuerySourceError, ResourceNotFoundError
 from trading_assistant.market_radar.earnings import (
+    EarningsCalendarEvent,
     EarningsRevisionSnapshot,
     Fy1EarningsTrend,
     calculate_earnings_revision_snapshot,
 )
+from trading_assistant.market_radar.economic_events import EconomicEventBatch, EconomicEventSnapshot
 from trading_assistant.market_radar.fred import FredObservation
+from trading_assistant.market_radar.fundamentals import FundamentalSnapshot
 from trading_assistant.market_radar.macro import (
     RiskAppetiteComponents,
     RiskAppetitePoint,
@@ -45,9 +51,207 @@ from trading_assistant.market_radar.regime import (
     MacroRegimeSnapshot,
     RealRateState,
 )
-from trading_assistant.market_radar.storage import MarketRadarRepository
+from trading_assistant.market_radar.storage import MarketRadarRepository, PublishedEarningsEvents
 
 NOW = datetime(2026, 9, 3, 2, tzinfo=UTC)
+
+
+class EventRepository:
+    """仅提供两个事件读取入口; 调用其他来源会使测试失败。"""
+
+    def __init__(
+        self,
+        economic: EconomicEventSnapshot | Exception | None,
+        earnings: PublishedEarningsEvents | Exception | None,
+    ) -> None:
+        self.economic = economic
+        self.earnings = earnings
+        self.calls: list[str] = []
+
+    def latest_economic_event_snapshot(self) -> EconomicEventSnapshot | None:
+        self.calls.append("economic")
+        if isinstance(self.economic, Exception):
+            raise self.economic
+        return self.economic
+
+    def latest_earnings_event_batch(self) -> PublishedEarningsEvents | None:
+        self.calls.append("earnings")
+        if isinstance(self.earnings, Exception):
+            raise self.earnings
+        return self.earnings
+
+
+@pytest.mark.parametrize("query_day", [date(2026, 9, 5), date(2026, 9, 28), date(2026, 12, 28)])
+def test_event_window_is_fourteen_inclusive_vendor_dates(query_day: date) -> None:
+    observed = datetime.combine(query_day, datetime.min.time(), UTC) + timedelta(hours=2)
+    capture = observed - timedelta(days=1)
+    dates = tuple(query_day + timedelta(days=delta) for delta in (-1, 0, 13, 14))
+    events = tuple(
+        economic_event(event_date=day, actual=0.0, estimate=None, change_percentage=-0.02)
+        for day in dates
+    )
+    economic = economic_snapshot(
+        as_of_date=capture.date(),
+        captured_at_utc=capture,
+        window_start=capture.date(),
+        window_end=capture.date() + timedelta(days=30),
+        batch=EconomicEventBatch(
+            events=events, request_count=1, raw_record_count=4, duplicate_count=0
+        ),
+    )
+    earnings = PublishedEarningsEvents(
+        capture.date(),
+        capture,
+        capture.date() - timedelta(days=365),
+        capture.date() + timedelta(days=60),
+        1,
+        tuple(
+            EarningsCalendarEvent(
+                "AAPL.US", day - timedelta(days=90), day, "unknown", None, 0.0, -1.0
+            )
+            for day in dates
+        ),
+    )
+    repository = EventRepository(economic, earnings)
+    clock_calls: list[bool] = []
+
+    def clock() -> datetime:
+        clock_calls.append(True)
+        return observed.astimezone(timezone(timedelta(hours=8)))
+
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository), clock=clock
+    ).events()
+    assert clock_calls == [True]
+    assert repository.calls == ["economic", "earnings"]
+    assert result.observed_at_utc == observed
+    assert [day.day for day in result.days] == [query_day + timedelta(days=i) for i in range(14)]
+    assert result.window_start == query_day
+    assert result.window_end == dates[2]
+    assert [len(day.economic_events) for day in result.days] == [1] + [0] * 12 + [1]
+    assert [len(day.earnings_events) for day in result.days] == [1] + [0] * 12 + [1]
+    assert result.days[0].economic_events[0].change_percentage == -0.02
+    assert result.days[0].economic_events[0].estimate is None
+    assert result.days[0].earnings_events[0].currency is None
+    assert result.days[0].earnings_events[0].actual_eps == 0.0
+    assert result.days[0].earnings_events[0].estimated_eps == -1.0
+    assert result.earnings_source.watchlist_count == 1
+    assert result.economic_source.watchlist_count is None
+    assert (
+        result.earnings_source.window_event_count == result.economic_source.window_event_count == 2
+    )
+
+
+@pytest.mark.parametrize(
+    ("seconds", "freshness", "covered_days"),
+    [
+        (0, "fresh", 14),
+        (86400, "fresh", 14),
+        (86401, "stale", 14),
+        (20 * 86400, "stale", 11),
+        (31 * 86400, "stale", 0),
+    ],
+)
+def test_event_freshness_and_request_coverage_are_independent(
+    seconds: int, freshness: str, covered_days: int
+) -> None:
+    snapshot = economic_snapshot(
+        batch=EconomicEventBatch(events=(), request_count=1, raw_record_count=0, duplicate_count=0)
+    )
+    repository = EventRepository(snapshot, None)
+    observed = ECONOMIC_AT + timedelta(seconds=seconds)
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository), clock=lambda: observed
+    ).events()
+    source = result.economic_source
+    assert source.source_state == "available"
+    assert source.freshness is not None
+    assert source.freshness.state == freshness
+    assert source.freshness.age_seconds == seconds
+    assert source.freshness.stale_after_seconds == 86400
+    assert source.coverage is not None
+    assert source.coverage.covered_days == covered_days
+    assert source.coverage.state == (
+        "covered" if covered_days == 14 else "partial" if covered_days else "uncovered"
+    )
+    assert source.coverage.covered_start == (observed.date() if covered_days else None)
+    assert source.coverage.covered_end == (
+        min(result.window_end, snapshot.window_end) if covered_days else None
+    )
+    assert source.window_event_count == (0 if covered_days else None)
+    assert all(not item.economic_events for item in result.days)
+
+
+@pytest.mark.parametrize("economic_state", ["available", "empty", "invalid"])
+@pytest.mark.parametrize("earnings_state", ["available", "empty", "invalid"])
+def test_event_source_failures_are_isolated(economic_state: str, earnings_state: str) -> None:
+    economic = {
+        "available": economic_snapshot(),
+        "empty": None,
+        "invalid": RuntimeError("private token"),
+    }[economic_state]
+    earnings = {
+        "available": PublishedEarningsEvents(
+            ECONOMIC_AT.date(),
+            ECONOMIC_AT,
+            ECONOMIC_AT.date(),
+            ECONOMIC_AT.date() + timedelta(days=60),
+            10,
+            (),
+        ),
+        "empty": None,
+        "invalid": ValueError("private path"),
+    }[earnings_state]
+    service = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, EventRepository(economic, earnings)),
+        clock=lambda: ECONOMIC_AT,
+    )
+    if economic_state == earnings_state == "invalid":
+        with pytest.raises(QuerySourceError, match="两类事件来源均无法安全读取") as raised:
+            service.events()
+        assert "private" not in str(raised.value)
+        return
+    result = service.events()
+    for source, state in (
+        (result.economic_source, economic_state),
+        (result.earnings_source, earnings_state),
+    ):
+        assert source.source_state == state
+        if state != "available":
+            assert all(
+                value is None
+                for value in (
+                    source.captured_at_utc,
+                    source.as_of_date,
+                    source.coverage,
+                    source.freshness,
+                    source.window_start,
+                    source.window_end,
+                    source.watchlist_count,
+                    source.window_event_count,
+                )
+            )
+
+
+@pytest.mark.parametrize("offset", [timedelta(seconds=-1), timedelta(days=-1)])
+def test_event_future_capture_is_invalid_but_other_source_is_retained(offset: timedelta) -> None:
+    repository = EventRepository(economic_snapshot(), None)
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository), clock=lambda: ECONOMIC_AT + offset
+    ).events()
+    assert result.economic_source.source_state == "invalid"
+    assert all(not day.economic_events for day in result.days)
+    assert result.earnings_source.source_state == "empty"
+
+
+def test_event_missing_repository_and_naive_clock() -> None:
+    result = MarketRadarQueryService(repository=None, clock=lambda: ECONOMIC_AT).events()
+    assert result.economic_source.source_state == result.earnings_source.source_state == "missing"
+    assert len(result.days) == 14
+    with pytest.raises(ValueError, match="timezone-aware"):
+        MarketRadarQueryService(
+            repository=None, clock=lambda: ECONOMIC_AT.replace(tzinfo=None)
+        ).events()
 
 
 def _metric(value: float, observations: int = 220) -> MetricValue:
@@ -666,3 +870,121 @@ def test_future_earnings_snapshot_fails_closed() -> None:
     )
     with pytest.raises(QuerySourceError, match="无法安全读取"):
         service.earnings()
+
+
+@pytest.mark.parametrize(
+    ("days", "snapshot_state", "source_state"),
+    [
+        (0, "fresh", "recent"),
+        (3, "fresh", "recent"),
+        (4, "fresh", "stale"),
+        (14, "fresh", "stale"),
+        (15, "stale", "stale"),
+    ],
+)
+def test_fundamental_freshness_is_independent_from_validity(
+    days: int, snapshot_state: str, source_state: str
+) -> None:
+    snapshot = fundamental_snapshot(changed(source_updated_date=CALCULATED.date()))
+
+    class Repository:
+        calls = 0
+
+        def latest_fundamental_snapshot(self) -> FundamentalSnapshot:
+            self.calls += 1
+            return snapshot
+
+    repository = Repository()
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository),
+        clock=lambda: CALCULATED + timedelta(days=days),
+    ).fundamentals()
+    assert repository.calls == 1
+    assert result.source_state == "available"
+    assert result.validity == "complete"
+    assert result.freshness is not None
+    assert result.freshness.snapshot_age_days == days
+    assert result.freshness.snapshot_stale_after_days == 14
+    assert result.freshness.snapshot_state == snapshot_state
+    assert result.freshness.source_stale_after_days == 3
+    item = result.items[0]
+    assert item.source_age_days == days
+    assert item.source_update_state == source_state
+    for metric, stored in zip(item.metrics, snapshot.items[0].metrics, strict=True):
+        assert (metric.name, metric.value, metric.reason, metric.period_end) == (
+            stored.name,
+            stored.value,
+            stored.reason,
+            stored.period_end,
+        )
+
+
+def test_fundamental_unknown_source_date_and_negative_values_are_preserved() -> None:
+    snapshot = fundamental_snapshot(changed(source_updated_date=None, return_on_equity_ttm=-0.1))
+
+    class Repository:
+        def latest_fundamental_snapshot(self) -> FundamentalSnapshot:
+            return snapshot
+
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, Repository()), clock=lambda: CALCULATED
+    ).fundamentals()
+    assert result.items[0].source_age_days is None
+    assert result.items[0].source_update_state == "unknown"
+    assert result.items[0].metrics[5].value == -0.1
+
+
+@pytest.mark.parametrize("kind", ["partial", "unavailable"])
+def test_fundamental_partial_and_unavailable_are_not_changed_by_staleness(kind: str) -> None:
+    snapshot = fundamental_snapshot(
+        changed(forward_pe=None) if kind == "partial" else changed(kind="unknown")
+    )
+
+    class Repository:
+        def latest_fundamental_snapshot(self) -> FundamentalSnapshot:
+            return snapshot
+
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, Repository()),
+        clock=lambda: CALCULATED + timedelta(days=15),
+    ).fundamentals()
+    assert result.validity == kind
+    assert result.freshness is not None
+    assert result.freshness.snapshot_state == "stale"
+    assert result.items[0].metrics[3].value is None
+
+
+@pytest.mark.parametrize("offset", [timedelta(days=-1), timedelta(seconds=-1)])
+def test_fundamental_future_date_or_same_day_timestamp_fails_closed(offset: timedelta) -> None:
+    class Repository:
+        def latest_fundamental_snapshot(self) -> FundamentalSnapshot:
+            return fundamental_snapshot()
+
+    with pytest.raises(QuerySourceError, match="无法安全读取"):
+        MarketRadarQueryService(
+            repository=cast(MarketRadarRepository, Repository()),
+            clock=lambda: CALCULATED + offset,
+        ).fundamentals()
+
+
+def test_fundamental_clock_requires_timezone() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        MarketRadarQueryService(
+            repository=None, clock=lambda: CALCULATED.replace(tzinfo=None)
+        ).fundamentals()
+
+
+def test_fundamental_freshness_uses_utc_calendar_days() -> None:
+    from datetime import timezone
+
+    class Repository:
+        def latest_fundamental_snapshot(self) -> FundamentalSnapshot:
+            return fundamental_snapshot(changed(source_updated_date=CALCULATED.date()))
+
+    local_time = datetime(2026, 9, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, Repository()), clock=lambda: local_time
+    ).fundamentals()
+    assert result.observed_at_utc == datetime(2026, 9, 8, 16, tzinfo=UTC)
+    assert result.items[0].source_age_days == 3
+    assert result.items[0].source_update_state == "recent"

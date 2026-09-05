@@ -11,7 +11,7 @@ withDefaults(
 </script>
 
 <template>
-  <div class="table-scroll">
+  <div class="table-scroll" role="region" :aria-label="caption" tabindex="0">
     <table :style="{ minWidth }">
       <caption class="sr-only">
         {{

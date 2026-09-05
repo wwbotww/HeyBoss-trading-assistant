@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
 from trading_assistant.data.eodhd_http import (
     EodhdHttpClient,
-    EodhdTemporaryHttpError,
+    HttpSleep,
     HttpTransport,
-    QueryValue,
     download,
 )
 from trading_assistant.market_radar.membership import (
@@ -21,8 +19,6 @@ from trading_assistant.market_radar.membership import (
     CurrentMarketSectorAssignment,
     CurrentMarketSectorClassification,
 )
-
-LOGGER = logging.getLogger(__name__)
 
 EODHD_INDEX_COMPONENTS_SOURCE = "eodhd_index_components"
 _MIN_EXPECTED_COMPONENTS = 450
@@ -42,7 +38,10 @@ _SECTOR_MAP = {
     "Utilities": "utilities",
 }
 
-ComponentsSleep = Callable[[float], Awaitable[None]]
+
+def eodhd_sector_id(provider_sector: str | None) -> str | None:
+    """共用供应商板块映射; 未知标签交由具体业务处理。"""
+    return _SECTOR_MAP.get(provider_sector) if provider_sector is not None else None
 
 
 @dataclass(frozen=True)
@@ -87,12 +86,9 @@ def parse_eodhd_index_components(payload: object) -> tuple[EodhdIndexComponent, 
             raise ValueError("EODHD index Components contains a duplicate Code")
         seen.add(data_symbol)
         provider_sector = _text(row.get("Sector"), name="EODHD index component Sector")
-        try:
-            sector = _SECTOR_MAP[provider_sector]
-        except KeyError as exc:
-            raise ValueError(
-                f"EODHD index component Sector is unsupported: {provider_sector}"
-            ) from exc
+        sector = eodhd_sector_id(provider_sector)
+        if sector is None:
+            raise ValueError(f"EODHD index component Sector is unsupported: {provider_sector}")
         components.append(EodhdIndexComponent(data_symbol=data_symbol, sector=sector))
     components.sort(key=lambda item: item.data_symbol)
     return tuple(components)
@@ -110,53 +106,27 @@ class EodhdIndexComponentsSource:
         max_attempts: int,
         retry_backoff_seconds: Sequence[float],
         transport: HttpTransport = download,
-        sleep: ComponentsSleep = asyncio.sleep,
+        sleep: HttpSleep = asyncio.sleep,
     ) -> None:
         if not index_symbol or index_symbol != index_symbol.strip() or "." not in index_symbol:
             raise ValueError("EODHD index components symbol must be a canonical ID")
-        if max_attempts < 1:
-            raise ValueError("EODHD index Components max_attempts must be positive")
-        if len(retry_backoff_seconds) < max_attempts - 1 or any(
-            delay < 0 for delay in retry_backoff_seconds
-        ):
-            raise ValueError("EODHD index Components retry backoff does not cover all attempts")
         self._http = EodhdHttpClient(
             api_token=api_token,
             request_timeout_seconds=request_timeout_seconds,
             max_concurrent_requests=1,
             transport=transport,
+            max_attempts=max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            sleep=sleep,
         )
         self._index_symbol = index_symbol
-        self._max_attempts = max_attempts
-        self._retry_backoff_seconds = tuple(retry_backoff_seconds)
-        self._sleep = sleep
-
-    async def _request_json(
-        self,
-        endpoint: str,
-        query: Mapping[str, QueryValue],
-    ) -> object:
-        for attempt in range(self._max_attempts):
-            try:
-                return await self._http.request_json(endpoint, query)
-            except (ConnectionError, EodhdTemporaryHttpError, TimeoutError) as exc:
-                if attempt + 1 >= self._max_attempts:
-                    raise
-                delay = self._retry_backoff_seconds[attempt]
-                LOGGER.warning(
-                    "EODHD index Components request failed; retrying in %.1fs: %s",
-                    delay,
-                    type(exc).__name__,
-                )
-                await self._sleep(delay)
-        raise AssertionError("unreachable")
 
     async def fetch_current_sector_classification(
         self,
         membership: CurrentMarketMembership,
     ) -> CurrentMarketSectorClassification:
         """读取全量分类并只联接权威成员, 明确保留两侧未匹配计数。"""
-        payload = await self._request_json(
+        payload = await self._http.request_json(
             f"fundamentals/{self._index_symbol}",
             {"filter": "Components", "fmt": "json"},
         )

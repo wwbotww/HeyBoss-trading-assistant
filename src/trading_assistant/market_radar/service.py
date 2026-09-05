@@ -1,4 +1,4 @@
-"""市场雷达价格同步与运行状态编排。"""
+"""市场雷达独立数据同步与运行状态编排。"""
 
 from __future__ import annotations
 
@@ -22,8 +22,16 @@ from trading_assistant.market_radar.earnings import (
     EarningsRevisionValidity,
     calculate_earnings_revision_snapshot,
 )
+from trading_assistant.market_radar.economic_events import EconomicEventSnapshot
 from trading_assistant.market_radar.eodhd_calendar import EodhdCalendarSource
+from trading_assistant.market_radar.eodhd_economic_events import EodhdEconomicEventsSource
+from trading_assistant.market_radar.eodhd_fundamentals import EodhdFundamentalsSource
 from trading_assistant.market_radar.fred import FredApiObservationSource, FredObservationSource
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalObservation,
+    FundamentalValidity,
+    calculate_fundamental_snapshot,
+)
 from trading_assistant.market_radar.macro import calculate_risk_appetite_snapshot
 from trading_assistant.market_radar.membership import (
     CurrentMarketMembershipSource,
@@ -157,12 +165,241 @@ class MarketEarningsSyncSummary:
         return self.status == "FAILED"
 
 
+@dataclass(frozen=True)
+class MarketFundamentalsSyncSummary:
+    """当前 watchlist 基本面同步结果; COMPLETE 不代表每个指标都有值。"""
+
+    run_id: str
+    status: SyncRunStatus
+    instrument_count: int
+    instruments_processed: int
+    snapshot_date: date
+    snapshot_validity: FundamentalValidity
+    available_metric_count: int
+    unavailable_metric_count: int
+    not_applicable_metric_count: int
+
+
+@dataclass(frozen=True)
+class MarketEconomicEventsSyncSummary:
+    """美国经济事件一次性同步摘要; 页面数不代表计费次数。"""
+
+    run_id: str
+    status: Literal["COMPLETE"]
+    source: Literal["eodhd_economic_events"]
+    snapshot_date: date
+    captured_at_utc: datetime
+    window_start: date
+    window_end: date
+    request_count: int
+    raw_record_count: int
+    event_count: int
+    duplicate_count: int
+    source_time_present_count: int
+
+
 def _utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
 def _run_id() -> str:
     return uuid4().hex
+
+
+async def sync_market_economic_events(
+    *,
+    database_url: str,
+    data_config_path: Path,
+    eodhd_api_token: str | None = None,
+    eodhd_transport: HttpTransport | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+    run_id_factory: Callable[[], str] = _run_id,
+) -> MarketEconomicEventsSyncSummary:
+    """采集固定美国 31 日窗口, 不读取股票池、Catalog 或其他雷达来源。"""
+    settings = load_data_config(data_config_path).historical_data
+    source = EodhdEconomicEventsSource(
+        api_token=eodhd_api_token or "",
+        request_timeout_seconds=settings.request_timeout_seconds,
+        max_attempts=settings.max_attempts,
+        retry_backoff_seconds=settings.retry_backoff_seconds,
+        transport=eodhd_transport or download,
+    )
+    started_at = clock()
+    if started_at.utcoffset() is None:
+        raise ValueError("market radar clock must return a timezone-aware timestamp")
+    started_at = started_at.astimezone(UTC)
+    capture_date = started_at.date()
+    window_end = capture_date + timedelta(days=30)
+    run_id = run_id_factory()
+    repository = MarketRadarRepository(database_url)
+    run_started = False
+    try:
+        repository.create_schema()
+        repository.start_sync_run(
+            run_id=run_id,
+            source="eodhd_economic_events",
+            started_at_utc=started_at,
+            requested_start_date=capture_date,
+            requested_end_date=window_end,
+            instrument_count=0,
+        )
+        run_started = True
+        batch = await source.request_events(start=capture_date, end=window_end)
+        completed_at = clock()
+        snapshot = EconomicEventSnapshot(
+            as_of_date=capture_date,
+            captured_at_utc=completed_at,
+            source="eodhd_economic_events",
+            country="US",
+            window_start=capture_date,
+            window_end=window_end,
+            batch=batch,
+        )
+        repository.publish_economic_events_and_complete(run_id, snapshot=snapshot)
+        return MarketEconomicEventsSyncSummary(
+            run_id=run_id,
+            status="COMPLETE",
+            source=snapshot.source,
+            snapshot_date=capture_date,
+            captured_at_utc=snapshot.captured_at_utc,
+            window_start=capture_date,
+            window_end=window_end,
+            request_count=batch.request_count,
+            raw_record_count=batch.raw_record_count,
+            event_count=len(batch.events),
+            duplicate_count=batch.duplicate_count,
+            source_time_present_count=sum(item.source_time is not None for item in batch.events),
+        )
+    except Exception as exc:
+        if run_started:
+            # 时钟本身失效时保留最后已验证的时刻, 不能留下伪 COMPLETE。
+            try:
+                failure_at = clock()
+                failure_at = (
+                    max(started_at, failure_at.astimezone(UTC))
+                    if failure_at.utcoffset() is not None
+                    else started_at
+                )
+            except Exception:
+                failure_at = started_at
+            try:
+                repository.fail_sync_run(
+                    run_id,
+                    completed_at_utc=failure_at,
+                    error_summary=type(exc).__name__,
+                )
+            except Exception as transition_error:
+                LOGGER.error(
+                    "Failed to persist market economic events sync failure: %s",
+                    type(transition_error).__name__,
+                )
+        raise
+    finally:
+        repository.close()
+
+
+async def sync_market_fundamentals(
+    *,
+    database_url: str,
+    market_config_path: Path,
+    data_config_path: Path,
+    trading_instruments_config_path: Path,
+    eodhd_api_token: str | None = None,
+    eodhd_transport: HttpTransport | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+    run_id_factory: Callable[[], str] = _run_id,
+) -> MarketFundamentalsSyncSummary:
+    """采集当前观察股的基本面并原子发布; 不写 Catalog 或交易数据库。"""
+    market_config = load_market_radar_config(market_config_path)
+    settings = load_data_config(data_config_path).historical_data
+    instruments = select_instruments(
+        load_instruments(trading_instruments_config_path),
+        market_config.watchlist,
+    )
+    if any(spec.currency != "USD" or spec.instrument_kind != "equity" for spec in instruments):
+        raise ValueError("market fundamentals requires explicit USD equities")
+    if len({spec.data_symbol for spec in instruments}) != len(instruments):
+        raise ValueError("market fundamentals data symbols must be unique")
+    source = EodhdFundamentalsSource(
+        api_token=eodhd_api_token or "",
+        request_timeout_seconds=settings.request_timeout_seconds,
+        max_attempts=settings.max_attempts,
+        retry_backoff_seconds=settings.retry_backoff_seconds,
+        transport=eodhd_transport or download,
+    )
+    started_at = clock()
+    if started_at.utcoffset() is None:
+        raise ValueError("market radar clock must return a timezone-aware timestamp")
+    capture_date = started_at.astimezone(UTC).date()
+    run_id = run_id_factory()
+    repository = MarketRadarRepository(database_url)
+    run_started = False
+    observations: list[FundamentalObservation] = []
+    try:
+        repository.create_schema()
+        repository.start_sync_run(
+            run_id=run_id,
+            source="eodhd_fundamentals",
+            started_at_utc=started_at,
+            requested_start_date=None,
+            requested_end_date=None,
+            instrument_count=len(instruments),
+        )
+        run_started = True
+        for spec in instruments:
+            observation = await source.request_fundamental(
+                instrument_id=spec.instrument_id,
+                data_symbol=spec.data_symbol,
+                captured_on=capture_date,
+            )
+            # 保留每次成功采集的进度, 以便中途失败时记录准确计数。
+            observations.append(observation)
+        completed_at = clock()
+        if completed_at.utcoffset() is None:
+            raise ValueError("market radar clock must return a timezone-aware timestamp")
+        if completed_at.astimezone(UTC).date() != capture_date:
+            raise RuntimeError("market fundamentals sync crossed a UTC capture-date boundary")
+        snapshot = calculate_fundamental_snapshot(
+            as_of_date=capture_date,
+            calculated_at_utc=completed_at,
+            observations=observations,
+        )
+        repository.publish_fundamental_bundle_and_complete(
+            run_id,
+            observations=tuple(observations),
+            snapshot=snapshot,
+        )
+        metrics = [metric for item in snapshot.items for metric in item.metrics]
+        return MarketFundamentalsSyncSummary(
+            run_id=run_id,
+            status="COMPLETE",
+            instrument_count=len(instruments),
+            instruments_processed=len(observations),
+            snapshot_date=capture_date,
+            snapshot_validity=snapshot.validity,
+            available_metric_count=sum(item.value is not None for item in metrics),
+            unavailable_metric_count=sum(
+                item.value is None and item.reason != "not_applicable" for item in metrics
+            ),
+            not_applicable_metric_count=sum(item.reason == "not_applicable" for item in metrics),
+        )
+    except Exception as exc:
+        if run_started:
+            try:
+                repository.fail_sync_run(
+                    run_id,
+                    completed_at_utc=clock(),
+                    error_summary=type(exc).__name__,
+                    instruments_processed=len(observations),
+                )
+            except Exception as transition_error:
+                LOGGER.error(
+                    "Failed to persist market fundamentals sync failure: %s",
+                    type(transition_error).__name__,
+                )
+        raise
+    finally:
+        repository.close()
 
 
 async def sync_market_earnings(

@@ -12,6 +12,9 @@ import type {
   MacroRegime,
   MarketBreadth,
   MarketEarnings,
+  MarketEvents,
+  MarketFundamentals,
+  FundamentalMetric,
   MarketRadarSummary,
   OrderDetail,
   OrderPage,
@@ -432,6 +435,84 @@ const completeMetric = (value: number) => ({
   required: 20,
 })
 
+export const marketEventsFixture: MarketEvents = {
+  observed_at_utc: '2026-09-05T02:00:00Z',
+  window_start: '2026-09-05',
+  window_end: '2026-09-18',
+  economic_source: {
+    source: 'eodhd_economic_events',
+    source_state: 'available',
+    as_of_date: '2026-09-05',
+    captured_at_utc: '2026-09-05T01:00:00Z',
+    window_start: '2026-09-05',
+    window_end: '2026-10-05',
+    freshness: { age_seconds: 3600, stale_after_seconds: 86400, state: 'fresh' },
+    coverage: {
+      state: 'covered',
+      covered_start: '2026-09-05',
+      covered_end: '2026-09-18',
+      covered_days: 14,
+    },
+    watchlist_count: null,
+    window_event_count: 2,
+  },
+  earnings_source: {
+    source: 'eodhd_calendar',
+    source_state: 'available',
+    as_of_date: '2026-09-04',
+    captured_at_utc: '2026-09-04T01:00:00Z',
+    window_start: '2025-09-04',
+    window_end: '2026-11-03',
+    freshness: { age_seconds: 90000, stale_after_seconds: 86400, state: 'stale' },
+    coverage: {
+      state: 'covered',
+      covered_start: '2026-09-05',
+      covered_end: '2026-09-18',
+      covered_days: 14,
+    },
+    watchlist_count: 10,
+    window_event_count: 2,
+  },
+  days: Array.from({ length: 14 }, (_, index) => {
+    const day = `2026-09-${String(5 + index).padStart(2, '0')}`
+    return {
+      day,
+      economic_events:
+        index === 0 || index === 2
+          ? [
+              {
+                country: 'US',
+                event_type: index === 0 ? 'Synthetic Price Index' : 'Synthetic Employment Report',
+                event_date: day,
+                source_time: index === 0 ? '08:30:00' : null,
+                comparison: 'mom',
+                period: 'Aug',
+                actual: 0,
+                estimate: null,
+                previous: -1,
+                change: -0.000012345,
+                change_percentage: -0.2,
+              },
+            ]
+          : [],
+      earnings_events:
+        index === 0 || index === 13
+          ? [
+              {
+                instrument_id: index === 0 ? 'AAPL.US' : 'MSFT.US',
+                fiscal_period_end: '2026-06-30',
+                report_date: day,
+                session: index === 0 ? 'unknown' : 'after_market',
+                currency: index === 0 ? null : 'USD',
+                actual_eps: 0,
+                estimated_eps: -0.12,
+              },
+            ]
+          : [],
+    }
+  }),
+}
+
 export const marketRadarSummaryFixture = {
   source_state: 'available',
   observed_at_utc: '2026-09-03T02:00:00Z',
@@ -710,6 +791,57 @@ export const marketRadarStocksFixture = {
   has_more: false,
 } satisfies StockRadarPage
 
+const fundamentalMetrics: FundamentalMetric[] = [
+  { name: 'fcf_margin', value: -0.12, reason: null, period_end: '2026-06-30' },
+  { name: 'net_debt_to_ebitda', value: -0.5, reason: null, period_end: '2026-06-30' },
+  { name: 'fcf_yield', value: 0, reason: null, period_end: '2026-06-30' },
+  { name: 'forward_pe', value: 20, reason: null, period_end: null },
+  { name: 'enterprise_value_to_ebitda', value: 11, reason: null, period_end: null },
+  { name: 'return_on_equity_ttm', value: 0.2, reason: null, period_end: '2026-06-30' },
+  { name: 'price_to_book', value: 3, reason: null, period_end: null },
+]
+export const marketFundamentalsFixture: MarketFundamentals = {
+  source_state: 'available',
+  observed_at_utc: '2026-09-05T02:00:00Z',
+  as_of_date: '2026-09-05',
+  calculated_at_utc: '2026-09-05T01:00:00Z',
+  source: 'eodhd_fundamentals',
+  validity: 'partial',
+  freshness: {
+    snapshot_age_days: 0,
+    snapshot_stale_after_days: 14,
+    snapshot_state: 'fresh',
+    source_stale_after_days: 3,
+  },
+  items: (['operating', 'financial', 'reit', 'unknown'] as const).map((kind) => ({
+    instrument_id: {
+      operating: 'AAPL.US',
+      financial: 'JPM.US',
+      reit: 'REIT.US',
+      unknown: 'UNKNOWN.US',
+    }[kind],
+    kind,
+    listing_currency: 'USD',
+    provider_sector:
+      kind === 'financial' ? 'Financial Services' : kind === 'unknown' ? null : 'Technology',
+    sector_id:
+      kind === 'financial' ? 'financials' : kind === 'unknown' ? null : 'information_technology',
+    industry: kind === 'unknown' ? null : 'Test industry',
+    source_updated_date: kind === 'unknown' ? null : '2026-09-01',
+    source_age_days: kind === 'unknown' ? null : 4,
+    source_update_state: kind === 'unknown' ? 'unknown' : 'stale',
+    metrics: fundamentalMetrics.map((metric) =>
+      kind === 'unknown'
+        ? { ...metric, value: null, reason: 'unknown_classification', period_end: null }
+        : kind === 'reit' ||
+            (kind === 'financial' &&
+              !['return_on_equity_ttm', 'price_to_book'].includes(metric.name))
+          ? { ...metric, value: null, reason: 'not_applicable', period_end: null }
+          : { ...metric },
+    ),
+  })),
+}
+
 const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/health': healthFixture,
   '/api/overview': overviewFixture,
@@ -736,6 +868,8 @@ const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/market-radar/summary': marketRadarSummaryFixture,
   '/api/market-radar/breadth': marketBreadthFixture,
   '/api/market-radar/earnings': marketEarningsFixture,
+  '/api/market-radar/events': marketEventsFixture,
+  '/api/market-radar/fundamentals': marketFundamentalsFixture,
   '/api/market-radar/macro': marketMacroFixture,
   '/api/market-radar/sectors': marketRadarSectorsFixture,
   '/api/market-radar/sectors/information_technology': firstItem(marketRadarSectorsFixture.items),

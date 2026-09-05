@@ -7,16 +7,24 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy import create_engine, delete, inspect, select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from trading_assistant.market_radar.earnings import (
     EarningsCalendarEvent,
     EarningsRevisionSnapshot,
+    EarningsSession,
     Fy1EarningsTrend,
 )
+from trading_assistant.market_radar.economic_events import EconomicEventSnapshot
 from trading_assistant.market_radar.fred import FredObservation
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalObservation,
+    FundamentalSnapshot,
+    calculate_fundamental_snapshot,
+)
 from trading_assistant.market_radar.macro import RiskAppetiteSnapshot
 from trading_assistant.market_radar.membership import (
     CurrentMarketMember,
@@ -31,6 +39,9 @@ from trading_assistant.market_radar.models import (
     EarningsMarketMemberRecord,
     EarningsRevisionSnapshotRecord,
     EarningsTrendObservationRecord,
+    EconomicEventSnapshotRecord,
+    FundamentalObservationRecord,
+    FundamentalSnapshotRecord,
     MacroObservationRecord,
     MacroRegimeSnapshotRecord,
     MarketRadarBase,
@@ -60,6 +71,18 @@ class MarketRadarSyncRun:
     bars_fetched: int
     bars_written: int
     error_summary: str | None
+
+
+@dataclass(frozen=True)
+class PublishedEarningsEvents:
+    """同一已发布盈利批次的日历事件与实际请求范围。"""
+
+    as_of_date: date
+    captured_at_utc: datetime
+    window_start: date
+    window_end: date
+    watchlist_count: int
+    events: tuple[EarningsCalendarEvent, ...]
 
 
 def _utc(value: datetime) -> datetime:
@@ -133,7 +156,10 @@ class MarketRadarRepository:
             raise ValueError("market radar run_id must contain 1 to 64 characters")
         if not source or len(source) > 32:
             raise ValueError("market radar source must contain 1 to 32 characters")
-        if instrument_count < 1:
+        if source == "eodhd_economic_events":
+            if instrument_count != 0:
+                raise ValueError("economic event sync requires zero instruments")
+        elif instrument_count < 1:
             raise ValueError("market radar sync requires at least one instrument")
         if (
             requested_start_date is not None
@@ -751,6 +777,331 @@ class MarketRadarRepository:
             ):
                 raise RuntimeError("persisted earnings revision snapshot metadata is inconsistent")
             return snapshot
+
+    def latest_earnings_event_batch(self) -> PublishedEarningsEvents | None:
+        """单条 SELECT 读取最新批次, 不复活旧日事件, 不迁移旧库。"""
+        if not inspect(self._engine).has_table(EarningsRevisionSnapshotRecord.__tablename__):
+            return None
+        latest_date = (
+            select(EarningsRevisionSnapshotRecord.as_of_date)
+            .outerjoin(
+                MarketRadarSyncRunRecord,
+                MarketRadarSyncRunRecord.run_id == EarningsRevisionSnapshotRecord.run_id,
+            )
+            .where(
+                (MarketRadarSyncRunRecord.status == "COMPLETE")
+                | MarketRadarSyncRunRecord.run_id.is_(None)
+            )
+            .order_by(EarningsRevisionSnapshotRecord.as_of_date.desc())
+            .limit(1)
+            .correlate(None)
+            .scalar_subquery()
+        )
+        try:
+            with self._sessions() as session:
+                rows = session.execute(
+                    select(
+                        EarningsRevisionSnapshotRecord,
+                        MarketRadarSyncRunRecord,
+                        EarningsCalendarEventRecord,
+                    )
+                    .select_from(EarningsRevisionSnapshotRecord)
+                    .outerjoin(
+                        MarketRadarSyncRunRecord,
+                        MarketRadarSyncRunRecord.run_id == EarningsRevisionSnapshotRecord.run_id,
+                    )
+                    .outerjoin(
+                        EarningsCalendarEventRecord,
+                        EarningsCalendarEventRecord.as_of_date
+                        == EarningsRevisionSnapshotRecord.as_of_date,
+                    )
+                    .where(EarningsRevisionSnapshotRecord.as_of_date == latest_date)
+                    .order_by(
+                        EarningsCalendarEventRecord.report_date,
+                        EarningsCalendarEventRecord.instrument_id,
+                        EarningsCalendarEventRecord.fiscal_period_end,
+                    )
+                ).all()
+                if not rows:
+                    return None
+                record, run, _event = rows[0]
+                if run is None:
+                    raise RuntimeError("persisted earnings event batch has no run")
+                snapshot = EarningsRevisionSnapshot.from_payload(record.payload_json)
+                captured_at = _loaded_utc(record.calculated_at_utc)
+                started_at = _loaded_utc(run.started_at_utc)
+                window_start, window_end = run.requested_start_date, run.requested_end_date
+                if (
+                    snapshot.as_of_date != record.as_of_date
+                    or captured_at is None
+                    or captured_at != snapshot.calculated_at_utc
+                    or captured_at.date() != record.as_of_date
+                    or started_at is None
+                    or started_at.date() != record.as_of_date
+                    or started_at > captured_at
+                    or _loaded_utc(run.completed_at_utc) != captured_at
+                    or run.source != "eodhd_earnings"
+                    or window_start is None
+                    or window_end is None
+                    or not window_start <= record.as_of_date <= window_end
+                    or window_start >= window_end
+                    or run.instrument_count
+                    < max(snapshot.watchlist.eligible, snapshot.market.eligible)
+                    or run.instruments_processed != run.instrument_count
+                    or run.bars_fetched != 0
+                    or run.bars_written != 0
+                    or run.error_summary is not None
+                ):
+                    raise RuntimeError("persisted earnings event batch metadata is inconsistent")
+                events: list[EarningsCalendarEvent] = []
+                for _header, _run, item in rows:
+                    if item is None:
+                        continue
+                    ingested_at = _loaded_utc(item.ingested_at_utc)
+                    if (
+                        item.run_id != record.run_id
+                        or item.as_of_date != record.as_of_date
+                        or not window_start <= item.report_date <= window_end
+                        or item.available_at_utc is not None
+                        or ingested_at is None
+                        or ingested_at.date() != record.as_of_date
+                        or not started_at <= ingested_at <= captured_at
+                    ):
+                        raise RuntimeError("persisted earnings event row metadata is inconsistent")
+                    events.append(
+                        EarningsCalendarEvent(
+                            instrument_id=item.instrument_id,
+                            fiscal_period_end=item.fiscal_period_end,
+                            report_date=item.report_date,
+                            session=cast(EarningsSession, item.session),
+                            currency=item.currency,
+                            actual_eps=item.actual_eps,
+                            estimated_eps=item.estimated_eps,
+                        )
+                    )
+                keys = {
+                    (item.instrument_id, item.report_date, item.fiscal_period_end)
+                    for item in events
+                }
+                if (
+                    len(keys) != len(events)
+                    or len({item.instrument_id for item in events}) > snapshot.watchlist.eligible
+                ):
+                    raise RuntimeError("persisted earnings event batch scope is inconsistent")
+                return PublishedEarningsEvents(
+                    as_of_date=record.as_of_date,
+                    captured_at_utc=captured_at,
+                    window_start=window_start,
+                    window_end=window_end,
+                    watchlist_count=snapshot.watchlist.eligible,
+                    events=tuple(events),
+                )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("persisted earnings event batch is invalid") from exc
+
+    def publish_fundamental_bundle_and_complete(
+        self,
+        run_id: str,
+        *,
+        observations: tuple[FundamentalObservation, ...],
+        snapshot: FundamentalSnapshot,
+    ) -> None:
+        """同事务替换采集日规范输入、指标和完成状态, 失败保留旧批次。"""
+        completed_at = _utc(snapshot.calculated_at_utc)
+        # 发布规模仅为 watchlist, 用同一纯函数核对输入与结果的业务一致性。
+        if (
+            calculate_fundamental_snapshot(
+                as_of_date=snapshot.as_of_date,
+                calculated_at_utc=completed_at,
+                observations=observations,
+            )
+            != snapshot
+        ):
+            raise ValueError("fundamental snapshot does not match its normalized inputs")
+        with self._sessions.begin() as session:
+            run = session.get(MarketRadarSyncRunRecord, run_id)
+            if run is None or run.status != "RUNNING":
+                raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
+            started_at = _loaded_utc(run.started_at_utc)
+            if (
+                run.source != snapshot.source
+                or run.instrument_count != len(observations)
+                or started_at is None
+                or started_at.date() != snapshot.as_of_date
+                or completed_at < started_at
+                or run.requested_start_date is not None
+                or run.requested_end_date is not None
+            ):
+                raise ValueError("fundamental run does not match its capture batch")
+            existing = session.get(FundamentalSnapshotRecord, snapshot.as_of_date)
+            if existing is not None:
+                previous_at = _loaded_utc(existing.calculated_at_utc)
+                if previous_at is not None and previous_at > completed_at:
+                    raise ValueError("fundamental publication must not replace a newer batch")
+            session.execute(
+                delete(FundamentalObservationRecord).where(
+                    FundamentalObservationRecord.as_of_date == snapshot.as_of_date
+                )
+            )
+            session.add_all(
+                FundamentalObservationRecord(
+                    as_of_date=snapshot.as_of_date,
+                    instrument_id=item.instrument_id,
+                    run_id=run_id,
+                    ingested_at_utc=completed_at,
+                    available_at_utc=None,
+                    payload_json=item.model_dump(mode="json"),
+                )
+                for item in observations
+            )
+            if existing is None:
+                session.add(
+                    FundamentalSnapshotRecord(
+                        as_of_date=snapshot.as_of_date,
+                        run_id=run_id,
+                        calculated_at_utc=completed_at,
+                        payload_json=snapshot.to_payload(),
+                    )
+                )
+            else:
+                existing.run_id = run_id
+                existing.calculated_at_utc = completed_at
+                existing.payload_json = snapshot.to_payload()
+            run.status = "COMPLETE"
+            run.completed_at_utc = completed_at
+            run.instruments_processed = len(observations)
+            run.error_summary = None
+
+    def latest_fundamental_snapshot(self) -> FundamentalSnapshot | None:
+        """只返回 COMPLETE 批次的严格快照, 不在查询时计算或补采数据。"""
+        if not inspect(self._engine).has_table(FundamentalSnapshotRecord.__tablename__):
+            return None
+        try:
+            with self._sessions() as session:
+                record = session.scalar(
+                    select(FundamentalSnapshotRecord)
+                    .join(
+                        MarketRadarSyncRunRecord,
+                        MarketRadarSyncRunRecord.run_id == FundamentalSnapshotRecord.run_id,
+                    )
+                    .where(MarketRadarSyncRunRecord.status == "COMPLETE")
+                    .order_by(FundamentalSnapshotRecord.as_of_date.desc())
+                    .limit(1)
+                )
+                if record is None:
+                    return None
+                snapshot = FundamentalSnapshot.from_payload(record.payload_json)
+                if (
+                    snapshot.as_of_date != record.as_of_date
+                    or snapshot.calculated_at_utc != _loaded_utc(record.calculated_at_utc)
+                ):
+                    raise RuntimeError("persisted fundamental snapshot metadata is inconsistent")
+                return snapshot
+        except (TypeError, ValueError) as exc:
+            # ORM 恢复 JSON/日期也可能先于模型校验失败, 统一进入只读错误边界。
+            raise RuntimeError("persisted fundamental snapshot is invalid") from exc
+
+    def publish_economic_events_and_complete(
+        self,
+        run_id: str,
+        *,
+        snapshot: EconomicEventSnapshot,
+    ) -> None:
+        """整批替换与 COMPLETE 同事务; 条件写入防止旧完成批次覆盖新批次。"""
+        snapshot = EconomicEventSnapshot.model_validate(snapshot)
+        completed_at = _utc(snapshot.captured_at_utc)
+        with self._sessions.begin() as session:
+            run = session.get(MarketRadarSyncRunRecord, run_id)
+            if run is None or run.status != "RUNNING":
+                raise LookupError(f"RUNNING market radar sync run not found: {run_id}")
+            started_at = _loaded_utc(run.started_at_utc)
+            if (
+                run.source != snapshot.source
+                or run.instrument_count != 0
+                or run.instruments_processed != 0
+                or run.bars_fetched != 0
+                or run.bars_written != 0
+                or run.completed_at_utc is not None
+                or run.error_summary is not None
+                or started_at is None
+                or started_at.date() != snapshot.as_of_date
+                or completed_at < started_at
+                or run.requested_start_date != snapshot.window_start
+                or run.requested_end_date != snapshot.window_end
+            ):
+                raise ValueError("economic event run does not match its capture batch")
+            statement = insert(EconomicEventSnapshotRecord).values(
+                as_of_date=snapshot.as_of_date,
+                run_id=run_id,
+                captured_at_utc=completed_at,
+                payload_json=snapshot.to_payload(),
+            )
+            # 比较发生在实际写入时, 不依赖事务之前读取的旧时间。
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[EconomicEventSnapshotRecord.as_of_date],
+                        set_={
+                            "run_id": statement.excluded.run_id,
+                            "captured_at_utc": statement.excluded.captured_at_utc,
+                            "payload_json": statement.excluded.payload_json,
+                        },
+                        where=EconomicEventSnapshotRecord.captured_at_utc <= completed_at,
+                    )
+                ),
+            )
+            if result.rowcount != 1:
+                raise ValueError("economic event publication must not replace a newer batch")
+            run.status = "COMPLETE"
+            run.completed_at_utc = completed_at
+
+    def latest_economic_event_snapshot(self) -> EconomicEventSnapshot | None:
+        """只读已发布规范快照; 旧库不迁移, 损坏不伪装为空结果。"""
+        if not inspect(self._engine).has_table(EconomicEventSnapshotRecord.__tablename__):
+            return None
+        try:
+            with self._sessions() as session:
+                row = session.execute(
+                    select(EconomicEventSnapshotRecord, MarketRadarSyncRunRecord)
+                    .outerjoin(
+                        MarketRadarSyncRunRecord,
+                        MarketRadarSyncRunRecord.run_id == EconomicEventSnapshotRecord.run_id,
+                    )
+                    .where(
+                        (MarketRadarSyncRunRecord.status == "COMPLETE")
+                        | MarketRadarSyncRunRecord.run_id.is_(None)
+                    )
+                    .order_by(EconomicEventSnapshotRecord.as_of_date.desc())
+                    .limit(1)
+                ).first()
+                if row is None:
+                    return None
+                record, run = row
+                if run is None:
+                    raise RuntimeError("persisted economic event snapshot has no run")
+                snapshot = EconomicEventSnapshot.from_payload(record.payload_json)
+                started_at = _loaded_utc(run.started_at_utc)
+                if (
+                    record.as_of_date != snapshot.as_of_date
+                    or _loaded_utc(record.captured_at_utc) != snapshot.captured_at_utc
+                    or run.source != snapshot.source
+                    or _loaded_utc(run.completed_at_utc) != snapshot.captured_at_utc
+                    or started_at is None
+                    or started_at.date() != snapshot.as_of_date
+                    or started_at > snapshot.captured_at_utc
+                    or run.requested_start_date != snapshot.window_start
+                    or run.requested_end_date != snapshot.window_end
+                    or run.instrument_count != 0
+                    or run.instruments_processed != 0
+                    or run.bars_fetched != 0
+                    or run.bars_written != 0
+                    or run.error_summary is not None
+                ):
+                    raise RuntimeError("persisted economic event snapshot metadata is inconsistent")
+                return snapshot
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("persisted economic event snapshot is invalid") from exc
 
     def fail_sync_run(
         self,

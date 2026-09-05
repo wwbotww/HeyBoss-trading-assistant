@@ -12,6 +12,8 @@ import {
   fetchLatestFactor,
   fetchMarketRadarBreadth,
   fetchMarketRadarEarnings,
+  fetchMarketRadarEvents,
+  fetchMarketRadarFundamentals,
   fetchMarketRadarMacro,
   fetchMarketRadarSector,
   fetchMarketRadarSectors,
@@ -63,6 +65,8 @@ export const queryKeys = {
   marketRadarSummary: ['market-radar', 'summary'] as const,
   marketRadarBreadth: ['market-radar', 'breadth'] as const,
   marketRadarEarnings: ['market-radar', 'earnings'] as const,
+  marketRadarEvents: ['market-radar', 'events'] as const,
+  marketRadarFundamentals: ['market-radar', 'fundamentals'] as const,
   marketRadarMacro: ['market-radar', 'macro'] as const,
   marketRadarSectors: ['market-radar', 'sectors'] as const,
   marketRadarSector: (sectorId: string) => ['market-radar', 'sectors', sectorId] as const,
@@ -135,6 +139,18 @@ export const marketRadarBreadthQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarBreadth, queryFn: fetchMarketRadarBreadth })
 export const marketRadarEarningsQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarEarnings, queryFn: fetchMarketRadarEarnings })
+export const marketRadarFundamentalsQuery = (enabled: boolean) =>
+  queryOptions({
+    queryKey: queryKeys.marketRadarFundamentals,
+    queryFn: fetchMarketRadarFundamentals,
+    enabled,
+  })
+export const marketRadarEventsQuery = (enabled: boolean) =>
+  queryOptions({
+    queryKey: queryKeys.marketRadarEvents,
+    queryFn: fetchMarketRadarEvents,
+    enabled,
+  })
 export const marketRadarMacroQuery = () =>
   queryOptions({ queryKey: queryKeys.marketRadarMacro, queryFn: fetchMarketRadarMacro })
 export const marketRadarSectorsQuery = () =>

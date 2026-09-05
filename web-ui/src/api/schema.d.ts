@@ -284,6 +284,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/market-radar/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Events
+         * @description 返回固定十四日事件轴, 两类已发布来源独立降级。
+         */
+        get: operations["getMarketRadarEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/fundamentals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Fundamentals
+         * @description 返回已发布的当前基本面与独立新鲜度, 无采集或交易操作。
+         */
+        get: operations["getMarketRadarFundamentals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/market-radar/macro": {
         parameters: {
             query?: never;
@@ -790,6 +830,32 @@ export interface components {
              */
             timestamp_utc: string;
         };
+        /** EarningsEventResponse */
+        EarningsEventResponse: {
+            /** Actual Eps */
+            actual_eps: number | null;
+            /** Currency */
+            currency: string | null;
+            /** Estimated Eps */
+            estimated_eps: number | null;
+            /**
+             * Fiscal Period End
+             * Format: date
+             */
+            fiscal_period_end: string;
+            /** Instrument Id */
+            instrument_id: string;
+            /**
+             * Report Date
+             * Format: date
+             */
+            report_date: string;
+            /**
+             * Session
+             * @enum {string}
+             */
+            session: "before_market" | "after_market" | "unknown";
+        };
         /** EarningsFreshnessResponse */
         EarningsFreshnessResponse: {
             /** Snapshot Age Days */
@@ -853,6 +919,90 @@ export interface components {
              * @enum {string}
              */
             validity: "complete" | "partial" | "unavailable";
+        };
+        /** EconomicEventResponse */
+        EconomicEventResponse: {
+            /** Actual */
+            actual: number | null;
+            /** Change */
+            change: number | null;
+            /** Change Percentage */
+            change_percentage: number | null;
+            /** Comparison */
+            comparison: ("mom" | "qoq" | "yoy") | null;
+            /**
+             * Country
+             * @constant
+             */
+            country: "US";
+            /** Estimate */
+            estimate: number | null;
+            /**
+             * Event Date
+             * Format: date
+             */
+            event_date: string;
+            /** Event Type */
+            event_type: string;
+            /** Period */
+            period: string | null;
+            /** Previous */
+            previous: number | null;
+            /** Source Time */
+            source_time: string | null;
+        };
+        /** EventFreshnessResponse */
+        EventFreshnessResponse: {
+            /** Age Seconds */
+            age_seconds: number;
+            /** Stale After Seconds */
+            stale_after_seconds: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "fresh" | "stale";
+        };
+        /** EventSourceResponse */
+        EventSourceResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Captured At Utc */
+            captured_at_utc: string | null;
+            coverage: components["schemas"]["EventWindowCoverageResponse"] | null;
+            freshness: components["schemas"]["EventFreshnessResponse"] | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "eodhd_economic_events" | "eodhd_calendar";
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /** Watchlist Count */
+            watchlist_count: number | null;
+            /** Window End */
+            window_end: string | null;
+            /** Window Event Count */
+            window_event_count: number | null;
+            /** Window Start */
+            window_start: string | null;
+        };
+        /** EventWindowCoverageResponse */
+        EventWindowCoverageResponse: {
+            /** Covered Days */
+            covered_days: number;
+            /** Covered End */
+            covered_end: string | null;
+            /** Covered Start */
+            covered_start: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "covered" | "partial" | "uncovered";
         };
         /** FactorScoreResponse */
         FactorScoreResponse: {
@@ -938,6 +1088,34 @@ export interface components {
             timestamp_utc: string;
             /** Trade Id */
             trade_id: string;
+        };
+        /** FundamentalFreshnessResponse */
+        FundamentalFreshnessResponse: {
+            /** Snapshot Age Days */
+            snapshot_age_days: number;
+            /** Snapshot Stale After Days */
+            snapshot_stale_after_days: number;
+            /**
+             * Snapshot State
+             * @enum {string}
+             */
+            snapshot_state: "fresh" | "stale";
+            /** Source Stale After Days */
+            source_stale_after_days: number;
+        };
+        /** FundamentalMetricResponse */
+        FundamentalMetricResponse: {
+            /**
+             * Name
+             * @enum {string}
+             */
+            name: "fcf_margin" | "net_debt_to_ebitda" | "fcf_yield" | "forward_pe" | "enterprise_value_to_ebitda" | "return_on_equity_ttm" | "price_to_book";
+            /** Period End */
+            period_end: string | null;
+            /** Reason */
+            reason: ("missing_field" | "insufficient_history" | "non_contiguous_periods" | "period_mismatch" | "missing_currency" | "currency_mismatch" | "invalid_denominator" | "non_positive_multiple" | "non_finite_result" | "not_applicable" | "unknown_classification") | null;
+            /** Value */
+            value: number | null;
         };
         /**
          * HealthResponse
@@ -1150,6 +1328,67 @@ export interface components {
              */
             validity: "complete" | "partial" | "stale" | "unavailable";
             watchlist: components["schemas"]["EarningsRevisionAggregateResponse"] | null;
+        };
+        /** MarketEventDayResponse */
+        MarketEventDayResponse: {
+            /**
+             * Day
+             * Format: date
+             */
+            day: string;
+            /** Earnings Events */
+            earnings_events: components["schemas"]["EarningsEventResponse"][];
+            /** Economic Events */
+            economic_events: components["schemas"]["EconomicEventResponse"][];
+        };
+        /** MarketEventsResponse */
+        MarketEventsResponse: {
+            /** Days */
+            days: components["schemas"]["MarketEventDayResponse"][];
+            earnings_source: components["schemas"]["EventSourceResponse"];
+            economic_source: components["schemas"]["EventSourceResponse"];
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /**
+             * Window End
+             * Format: date
+             */
+            window_end: string;
+            /**
+             * Window Start
+             * Format: date
+             */
+            window_start: string;
+        };
+        /** MarketFundamentalsResponse */
+        MarketFundamentalsResponse: {
+            /** As Of Date */
+            as_of_date: string | null;
+            /** Calculated At Utc */
+            calculated_at_utc: string | null;
+            freshness: components["schemas"]["FundamentalFreshnessResponse"] | null;
+            /** Items */
+            items: components["schemas"]["StockFundamentalsResponse"][];
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /** Source */
+            source: string | null;
+            /**
+             * Source State
+             * @enum {string}
+             */
+            source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "complete" | "partial" | "unavailable";
         };
         /** MarketRadarSummaryResponse */
         MarketRadarSummaryResponse: {
@@ -1514,6 +1753,35 @@ export interface components {
              * @enum {string}
              */
             state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+        };
+        /** StockFundamentalsResponse */
+        StockFundamentalsResponse: {
+            /** Industry */
+            industry: string | null;
+            /** Instrument Id */
+            instrument_id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "operating" | "financial" | "reit" | "unknown";
+            /** Listing Currency */
+            listing_currency: string;
+            /** Metrics */
+            metrics: components["schemas"]["FundamentalMetricResponse"][];
+            /** Provider Sector */
+            provider_sector: string | null;
+            /** Sector Id */
+            sector_id: string | null;
+            /** Source Age Days */
+            source_age_days: number | null;
+            /**
+             * Source Update State
+             * @enum {string}
+             */
+            source_update_state: "recent" | "stale" | "unknown";
+            /** Source Updated Date */
+            source_updated_date: string | null;
         };
         /** StockRadarPageResponse */
         StockRadarPageResponse: {
@@ -2342,6 +2610,100 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketEarningsResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketEventsResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarFundamentals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketFundamentalsResponse"];
                 };
             };
             /** @description 查询对象不存在 */

@@ -16,6 +16,8 @@ import type {
   MacroRegime,
   MarketBreadth,
   MarketEarnings,
+  MarketFundamentals,
+  MarketEvents,
   MarketRadarSummary,
   OrderDetail,
   OrderQuery,
@@ -241,6 +243,14 @@ export function fetchMarketRadarMacro(): Promise<MacroRegime> {
 
 export function fetchMarketRadarEarnings(): Promise<MarketEarnings> {
   return read(http.GET('/api/market-radar/earnings'))
+}
+
+export function fetchMarketRadarFundamentals(): Promise<MarketFundamentals> {
+  return read(http.GET('/api/market-radar/fundamentals'))
+}
+
+export function fetchMarketRadarEvents(): Promise<MarketEvents> {
+  return read(http.GET('/api/market-radar/events'))
 }
 
 export function fetchMarketRadarSectors(): Promise<SectorRadarList> {

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+import logging
+import math
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from http.client import HTTPException, HTTPResponse
 from typing import cast
 from urllib.error import HTTPError, URLError
@@ -15,6 +17,8 @@ from trading_assistant.data.source import HistoricalDataAuthenticationError
 
 HttpTransport = Callable[[str, int], bytes]
 QueryValue = str | int | float
+HttpSleep = Callable[[float], Awaitable[None]]
+LOGGER = logging.getLogger(__name__)
 
 
 class EodhdAuthenticationError(HistoricalDataAuthenticationError):
@@ -79,6 +83,9 @@ class EodhdHttpClient:
         max_concurrent_requests: int = 1,
         transport: HttpTransport = download,
         base_url: str = "https://eodhd.com/api",
+        max_attempts: int = 1,
+        retry_backoff_seconds: Sequence[float] = (),
+        sleep: HttpSleep = asyncio.sleep,
     ) -> None:
         token = api_token.strip()
         if not token:
@@ -87,6 +94,12 @@ class EodhdHttpClient:
             raise ValueError("request_timeout_seconds must be positive")
         if max_concurrent_requests < 1:
             raise ValueError("max_concurrent_requests must be positive")
+        if max_attempts < 1:
+            raise ValueError("EODHD max_attempts must be positive")
+        if len(retry_backoff_seconds) < max_attempts - 1 or any(
+            not math.isfinite(delay) or delay < 0 for delay in retry_backoff_seconds
+        ):
+            raise ValueError("EODHD retry backoff does not cover all attempts")
         root = base_url.rstrip("/")
         if not root.startswith("https://"):
             raise ValueError("EODHD base_url must use HTTPS")
@@ -95,6 +108,9 @@ class EodhdHttpClient:
         self._transport = transport
         self._base_url = root
         self._request_slots = asyncio.Semaphore(max_concurrent_requests)
+        self._max_attempts = max_attempts
+        self._retry_backoff_seconds = tuple(retry_backoff_seconds)
+        self._sleep = sleep
 
     def build_url(self, endpoint: str, query: Mapping[str, QueryValue] | None = None) -> str:
         """构造只供传输层使用的完整 URL; 调用方不得记录返回值。"""
@@ -128,7 +144,18 @@ class EodhdHttpClient:
         query: Mapping[str, QueryValue] | None = None,
     ) -> object:
         """读取任意 EODHD JSON 结构, 具体字段由端点适配器校验。"""
-        payload = await self.request_bytes(endpoint, query)
+        for attempt in range(self._max_attempts):
+            try:
+                payload = await self.request_bytes(endpoint, query)
+                break
+            except (ConnectionError, EodhdTemporaryHttpError, TimeoutError) as exc:
+                if attempt + 1 >= self._max_attempts:
+                    raise
+                delay = self._retry_backoff_seconds[attempt]
+                LOGGER.warning(
+                    "EODHD request failed; retrying in %.1fs: %s", delay, type(exc).__name__
+                )
+                await self._sleep(delay)
         try:
             return cast(object, json.loads(payload))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:

@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict
 from trading_assistant.application.models import (
     BreadthMetricValidity,
     EarningsRevisionValidity,
+    FundamentalSnapshotState,
+    FundamentalSourceUpdateState,
     MacroRegimeCode,
     MacroRegimeValidity,
     MarketBreadthValidity,
@@ -18,6 +20,13 @@ from trading_assistant.application.models import (
     RadarModuleState,
     Scalar,
     SourceState,
+)
+from trading_assistant.market_radar.earnings import EarningsSession
+from trading_assistant.market_radar.fundamentals import (
+    FundamentalKind,
+    FundamentalMetricName,
+    FundamentalReason,
+    FundamentalValidity,
 )
 
 
@@ -478,6 +487,109 @@ class MarketEarningsResponse(ApiSchema):
     watchlist: EarningsRevisionAggregateResponse | None
     market: EarningsRevisionAggregateResponse | None
     sectors: list[SectorEarningsRevisionResponse]
+
+
+class EventFreshnessResponse(ApiSchema):
+    age_seconds: float
+    stale_after_seconds: int
+    state: Literal["fresh", "stale"]
+
+
+class EventWindowCoverageResponse(ApiSchema):
+    state: Literal["covered", "partial", "uncovered"]
+    covered_start: date | None
+    covered_end: date | None
+    covered_days: int
+
+
+class EventSourceResponse(ApiSchema):
+    source: Literal["eodhd_economic_events", "eodhd_calendar"]
+    source_state: SourceState
+    as_of_date: date | None
+    captured_at_utc: datetime | None
+    window_start: date | None
+    window_end: date | None
+    freshness: EventFreshnessResponse | None
+    coverage: EventWindowCoverageResponse | None
+    watchlist_count: int | None
+    window_event_count: int | None
+
+
+class EconomicEventResponse(ApiSchema):
+    country: Literal["US"]
+    event_type: str
+    event_date: date
+    source_time: str | None
+    comparison: Literal["mom", "qoq", "yoy"] | None
+    period: str | None
+    actual: float | None
+    estimate: float | None
+    previous: float | None
+    change: float | None
+    change_percentage: float | None
+
+
+class EarningsEventResponse(ApiSchema):
+    instrument_id: str
+    fiscal_period_end: date
+    report_date: date
+    session: EarningsSession
+    currency: str | None
+    actual_eps: float | None
+    estimated_eps: float | None
+
+
+class MarketEventDayResponse(ApiSchema):
+    day: date
+    economic_events: list[EconomicEventResponse]
+    earnings_events: list[EarningsEventResponse]
+
+
+class MarketEventsResponse(ApiSchema):
+    observed_at_utc: datetime
+    window_start: date
+    window_end: date
+    economic_source: EventSourceResponse
+    earnings_source: EventSourceResponse
+    days: list[MarketEventDayResponse]
+
+
+class FundamentalFreshnessResponse(ApiSchema):
+    snapshot_age_days: int
+    snapshot_stale_after_days: int
+    snapshot_state: FundamentalSnapshotState
+    source_stale_after_days: int
+
+
+class FundamentalMetricResponse(ApiSchema):
+    name: FundamentalMetricName
+    value: float | None
+    reason: FundamentalReason | None
+    period_end: date | None
+
+
+class StockFundamentalsResponse(ApiSchema):
+    instrument_id: str
+    listing_currency: str
+    provider_sector: str | None
+    sector_id: str | None
+    industry: str | None
+    kind: FundamentalKind
+    source_updated_date: date | None
+    source_age_days: int | None
+    source_update_state: FundamentalSourceUpdateState
+    metrics: list[FundamentalMetricResponse]
+
+
+class MarketFundamentalsResponse(ApiSchema):
+    source_state: SourceState
+    observed_at_utc: datetime
+    as_of_date: date | None
+    calculated_at_utc: datetime | None
+    source: str | None
+    validity: FundamentalValidity
+    freshness: FundamentalFreshnessResponse | None
+    items: list[StockFundamentalsResponse]
 
 
 class RadarMarketResponse(ApiSchema):

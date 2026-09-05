@@ -6,6 +6,8 @@
 
 NautilusTrader 是交易内核，不是所有外围功能的框架。行情规范化、Actor、MessageBus、账户、订单、风控引擎、回测交易所和 IBKR 执行都使用 NT；配置、纯信号计算、SQLite 审计和 Telegram 位于其外围。旧 Web 展示层已经移除，只读 Python Web API 与独立 Vue 3 前端作为可删除的外围模块接入。
 
+市场雷达是另一个可删除的只读业务域：复用行情管道，但不产生交易信号，不修改交易标的池，也不向风险、审批或执行模块注入规则。
+
 ```text
 EODHD / IBKR 历史接口
           ↓
@@ -60,6 +62,7 @@ src/trading_assistant/
 ├── backtest/                   BacktestNode、费用、分红模拟和报告
 ├── live/                       TradingNode 与账户快照
 ├── storage/                    SQLAlchemy 模型和审计仓储
+├── market_radar/               成员/分类及市场来源适配、纯指标计算、同步与独立快照仓储
 ├── notify/                     Telegram 审批与通知
 ├── application/                与传输协议无关的只读业务查询
 └── web_api/                    FastAPI、OpenAPI、响应 Schema 与路由
@@ -78,6 +81,7 @@ web-ui/                         独立 Vue 3 只读用户界面、生成式 API 
 | `config/risk.yaml` | 账户级交易风控阈值 |
 | `config/backtest.yaml` | 资金、费用、滑点、时间边界和报告路径 |
 | `config/live.yaml` | Catalog 预热、审批轮询、通知和账户快照间隔 |
+| `config/market-radar.yaml` | 25 只固定监测池、10 只观察股、宏观输入和当前成员分类设置；不授予交易资格 |
 | `.env` | 凭据、账户、连接地址和本地路径，不进入 Git |
 
 ## 数据设计
@@ -147,6 +151,34 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 `FactorScoreData` 是注册到 NT 的逐证券 CustomData。它以固定 CustomData 类身份路由，不在 `DataType.metadata` 中保存契约标记：NT 1.230 的 Catalog 历史查询不会把查询 metadata 带回数据对象，若订阅端依赖 metadata 会形成不同 Topic 并丢失整批数据。回测通过 `BacktestDataConfig` 从 Catalog 流式投递；paper Actor 通过同一 Catalog 历史请求 bootstrap。两条入口最终调用相同的批次聚合方法。Actor 永远不读取 FactorBatch 文件，也不加载 FacDigger 代码。
 
 详细契约与 FacDigger 改造步骤见 [factor-integration.md](factor-integration.md)。
+
+### 市场雷达链路
+
+```text
+六个 sync_market_*.py CLI（操作者显式选择, 无常驻调度）
+  ├─ 价格 / 当前宽度 / 宏观价格 → 共享 EODHD 适配与 NT Catalog
+  ├─ State Street 当前成员 / EODHD 行业分类 → 中立成员契约
+  └─ FRED / EODHD 盈利、基本面、经济事件 → 规范输入
+                              ↓
+                 market_radar 纯计算与批次校验
+                              ↓
+       独立 market-radar.db（快照与 COMPLETE 同事务发布）
+                              ↓
+      application/market_radar.py → GET API → Vue 市场雷达
+```
+
+| CLI | 输入与写入 |
+|---|---|
+| `sync_market_radar.py` | 固定价格池 → 双 BarType Catalog/公司行动/质量报告 → 价格快照 |
+| `sync_market_breadth.py` | 可替换当前成员来源 + 同一行情管道 → 当前成员与宽度快照 |
+| `sync_market_macro.py` | HYG/LQD、VIX/VIX3M + FRED DFII10 → 来源观测与完整宏观象限 |
+| `sync_market_earnings.py` | 当前成员/分类、成员与观察池并集 Trends、仅观察池财报 → FY1 与统一聚合 |
+| `sync_market_fundamentals.py` | 显式观察股当前财报 → 可复算的最小规范输入与基本面快照 |
+| `sync_market_economic_events.py` | 美国固定 31 日请求 → 当前经济事件规范快照 |
+
+成员权威来源在 CLI 装配，当前使用 State Street SPY 持仓代理；EODHD Components 只负责行业分类。更换来源不改变下游成员契约、指标、数据库和 API。当前成员不是历史指数成分，来源不足必须保留覆盖率和缺失状态，不能补成历史 PIT 数据。
+
+快照查询不请求供应商、不扫描市场 Catalog、不现场计算金融指标，也不创建表；旧库补表只由显式同步复用 `create_schema()` 完成。市场库与 Catalog 不是跨存储事务：采集失败可能已留下合法 Catalog 增量和 FAILED 审计，不能承诺整站原子刷新。宏观当前修订、盈利、财报和事件均不得伪装为历史可用数据。详细指标、时间和缺失口径见 [市场雷达实施方案](market-radar-implementation-plan.md)。
 
 ## 策略设计
 
@@ -288,25 +320,31 @@ TradingNode 启动前通过隔离子进程运行同一个历史同步服务，�
 - `account_snapshots`；
 - `position_snapshots`。
 
-live/paper 与 backtest 必须使用不同数据库文件。SQLite 仅保存业务事务和审计，市场行情继续由 NT ParquetDataCatalog 管理。
+live/paper、backtest 与 market radar 必须使用不同数据库文件。前两者保存业务事务与审计，独立市场库保存同步审计、规范观测及可重建指标快照；原始规范 Bar 继续由 NT ParquetDataCatalog 管理。市场库缺失或损坏不应影响交易/回测查询。
 
 `PortfolioSnapshotActor` 定时从 NT Account 和 Cache 读取账户与仓位并写入 SQLite。现有 SQLite 表、NT Catalog 和回测报告是只读 Web 查询的事实来源，不因展示层变化而改变。
 
-`application/` 将账户、策略、因子、工作流、订单、成交、回测和数据状态转换成普通 Python 不可变查询模型，不依赖 FastAPI。`web_api/` 只负责 HTTP 参数、Pydantic 响应 Schema、OpenAPI 和错误转换。两个模块都不连接 IBKR、不调用执行网关，也不导入 live/backtest runner。
+`application/` 将账户、策略、因子、工作流、订单、成交、回测、市场快照和数据状态转换成普通 Python 不可变查询模型，不依赖 FastAPI。`web_api/` 只负责 HTTP 参数、Pydantic 响应 Schema、OpenAPI 和错误转换。两个模块都不连接 IBKR、不调用执行网关，也不导入 live/backtest runner。
 
-Web API 使用 SQLite `mode=ro` 打开 live/backtest 数据库；数据库文件不存在时不会创建文件。Catalog 和报告目录同样只读。账户号在应用层只保留类别与末四位，响应不包含本地路径、凭据或底层异常。EOD EXTERNAL Bar 只能作为带时间戳的参考估值，不能描述成实时价格。
+Web API 使用 SQLite `mode=ro` 打开 live/backtest/market 数据库；数据库文件不存在时不会创建文件。Catalog 和报告目录同样只读。账户号在应用层只保留类别与末四位，响应不包含本地路径、凭据或底层异常。EOD EXTERNAL Bar 只能作为带时间戳的参考估值，不能描述成实时价格。
 
 列表接口使用 `offset/limit/has_more`，时间统一输出 UTC。数据源状态区分 `available`、`empty`、`missing`、`invalid`、`unconfigured` 和 `unobserved`。TradingNode 与 IBKR 当前没有心跳事实源，因此系统接口固定报告 `unobserved`，不会根据数据库陈旧度推断在线状态。
 
-当前 API 覆盖 `/api/overview`、账户与持仓、活动策略、最新完整因子批次、信号与工作流、订单与成交、回测报告、Catalog 覆盖、数据质量和系统状态。回测报告只允许读取固定表名，`run_id` 经过白名单校验。统一错误响应使用 `application/problem+json`，且不暴露内部异常。
+当前 API 覆盖 `/api/overview`、账户与持仓、活动策略、最新完整因子批次、信号与工作流、订单与成交、市场雷达、回测报告、Catalog 覆盖、数据质量和系统状态。回测报告只允许读取固定表名，`run_id` 经过白名单校验。统一错误响应使用 `application/problem+json`，且不暴露内部异常。
 
-Vue 前端提供操作总览、账户与持仓、策略与因子、决策流、订单与成交、回测中心、数据与系统七个一级页面。所有查询经生成式 OpenAPI 类型和集中式 GET 客户端进入；页面不读取本地文件、浏览器持久化或运行时模拟数据。
+Vue 前端提供操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统八个一级页面。所有查询经生成式 OpenAPI 类型和集中式 GET 客户端进入；页面不读取本地文件、浏览器持久化或运行时模拟数据。
 
 账户历史、交易审计和回测报告使用 `offset/limit/has_more` 服务端分页。筛选、页码与选中详情保存在 URL；工作流和订单通过可访问抽屉展示完整审计时间线。ECharts 只按需绘制账户净值、因子横截面和回测权益，并提供文字摘要。回测图只识别报告的 `timestamp_utc/equity` 确定列，Catalog 页面分别展示 INTERNAL signal 与 EXTERNAL execution Bar，不改变或推断数据语义。
 
 Compose 的 `web` profile 将 API 与前端作为两个独立服务装配。`web-api` 不暴露宿主机端口、不继承完整 `.env`，只接收查询所需的路径、账户作用域和快照陈旧阈值；Catalog、数据库目录和报告目录均为只读挂载。`web-ui` 仅绑定本机回环地址，由 Nginx 提供静态资源、SPA 深链和同源 `/api` 代理。上游不可用时代理返回统一的 `application/problem+json`，不会把 Nginx HTML 错误混入前端契约。
 
+独立 `market-radar-sync` profile 复用根 Python 镜像，默认命令覆盖为价格 CLI 的 `--help`，不继承交易应用锚点、完整 `.env`、端口、依赖或重启策略。仅传入 `EODHD_API_TOKEN`、`FRED_API_KEY`、`CATALOG_PATH`、`MARKET_RADAR_DATABASE_URL`、`MARKET_RADAR_REPORT_ROOT` 和 `LOG_LEVEL`；API 仍仅接收原八项查询变量，UI 不获得供应商凭据。同步服务的三个挂载目录可写，因此依靠显式独立库路径与业务写入边界，不能声称操作系统已经逐文件隔离交易数据库。共享 Catalog 的写入必须串行。
+
+市场三视图及个股两维度分别披露各源日期、覆盖和新鲜度；基本面与价格互不遮蔽。未来事件只读已发布经济批次与同批财报，在查询 UTC 日起的 14 日窗口中独立降级。重新读取只有 GET，不采集或下单；同路径保留滚动、跨页回顶，键盘标签、宽表和详情焦点由共用组件实现。
+
 Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。实际停止并删除 `web-ui`、`web-api` 后，IB Gateway、TradingNode 和 Telegram Bot 状态保持不变；交易核心不存在对 Web 的依赖。详细设计与验收记录见 [Web 重构设计](web-rebuild.md)。
+
+R7 已再次用新版正式容器完成 Web 删除恢复与三核心状态不变验收，并通过临时源码副本证明：排除 Web/市场模块后，策略、执行、risk、数据、审计、回测、live 和 Telegram 全部模块仍可离线导入，没有回退加载原包。四源正式数据和真实 URL 的三档宽度、详情、故障/重试验收均已完成；API 停止时隐藏旧值，单源重试只恢复该源，全局刷新再恢复其余模块。用户已取消恢复完全相同旧页面的要求，当前恢复目标为新版 Web，不为旧容器补建镜像，也不自动回退市场数据库。详细证据见 [R7 契约与记录](market-radar-implementation-plan.md#r7部署隔离与文档)。
 
 ## 新策略接入
 
