@@ -16,7 +16,7 @@ from nautilus_trader.model.custom import customdataclass_pyo3
 from nautilus_trader.model.data import BarType, CustomData, DataType
 
 from trading_assistant.data.catalog import CatalogRepository
-from trading_assistant.data.config import InstrumentSpec
+from trading_assistant.data.config import InstrumentSpec, validate_factor_identity_mappings
 
 FACTOR_CONTRACT = "facdigger.factor_batch"
 FACTOR_COLUMNS = ("security_id", "symbol", "asof_date", "score", "eligible")
@@ -245,8 +245,10 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     )
     model_release_id = _sha256(model["release_id"], "manifest.model.release_id")
     _string(model["model_id"], "manifest.model.model_id")
-    if model["model_type"] != "financial_pretrained_patchtst":
-        raise ValueError("manifest.model.model_type must be financial_pretrained_patchtst")
+    # 模型名称仅描述来源; 消费者校验排序语义, 不依赖上游网络结构。
+    model_type = _string(model["model_type"], "manifest.model.model_type")
+    if re.fullmatch(r"[a-z][a-z0-9_]*", model_type) is None:
+        raise ValueError("manifest.model.model_type must be a lowercase model identifier")
     _sha256(model["checkpoint_sha256"], "manifest.model.checkpoint_sha256")
     _string(model["training_dataset_id"], "manifest.model.training_dataset_id")
     if model["higher_score_is_better"] is not True:
@@ -576,14 +578,57 @@ def import_factor_bundle(
 ) -> FactorImportSummary:
     """完整校验一个 FactorBatch 并原子地写入规范 NT Catalog。"""
     bundle = _validate_bundle(bundle_dir)
-    mapped = [spec for spec in instruments if spec.factor_security_id is not None]
+    validate_factor_identity_mappings(instruments)
+    mapped = [spec for spec in instruments if spec.factor_identity_intervals]
     if not mapped:
-        raise ValueError("No instruments define factor_security_id")
-    factor_ids = [cast(str, spec.factor_security_id) for spec in mapped]
-    if len(factor_ids) != len(set(factor_ids)):
-        raise ValueError("factor_security_id mappings must be unique")
-    rows_by_key = {(row.asof_date, row.security_id): row for row in bundle.rows}
-    factor_dates = sorted({row.asof_date for row in bundle.rows})
+        raise ValueError("No instruments define factor identity mappings")
+    identity_owners: dict[str, set[str]] = {}
+    for spec in mapped:
+        for security_id, _, _ in spec.factor_identity_intervals:
+            identity_owners.setdefault(security_id, set()).add(spec.canonical_id)
+    rows_by_date: dict[date, dict[str, _ExternalFactorRow]] = {}
+    for external_row in bundle.rows:
+        rows_by_date.setdefault(external_row.asof_date, {})[external_row.security_id] = external_row
+
+    selected_by_date: dict[date, list[tuple[InstrumentSpec, _ExternalFactorRow]]] = {}
+    for asof_date, daily_rows in sorted(rows_by_date.items()):
+        resolved = [
+            (spec, identity)
+            for spec in mapped
+            if (identity := spec.factor_security_id_on(asof_date)) is not None
+        ]
+        if not resolved:
+            continue
+        active_ids = {spec.canonical_id for spec, _ in resolved}
+        valid_identities = {identity for _, identity in resolved}
+        # 只检查本次活跃目标的身份历史; 错期旧/新身份不能被当作额外股票或缺失预测。
+        for identity in daily_rows:
+            if (
+                identity_owners.get(identity, set()) & active_ids
+                and identity not in valid_identities
+            ):
+                raise ValueError(f"factor identity {identity} is not valid on {asof_date}")
+        selected: list[tuple[InstrumentSpec, _ExternalFactorRow]] = []
+        for spec, security_id in resolved:
+            row = daily_rows.get(security_id)
+            if row is None:
+                if bundle.metadata.source_kind == "signal_inference":
+                    raise ValueError(
+                        f"complete factor cross-section is missing {security_id} on {asof_date}"
+                    )
+                row = _ExternalFactorRow(
+                    security_id=security_id,
+                    symbol=spec.symbol,
+                    asof_date=asof_date,
+                    score=None,
+                    eligible=False,
+                )
+            selected.append((spec, row))
+        selected_by_date[asof_date] = selected
+    if not selected_by_date:
+        raise ValueError("FactorBatch has no rows mapped to active configured instruments")
+
+    # 整个交付的日期身份与覆盖率先通过, 再读取价格并构造待写入批次。
     catalog = CatalogRepository(catalog_path)
     signal_availability = {
         spec.canonical_id: _bar_availability_by_date(
@@ -607,32 +652,7 @@ def import_factor_bundle(
     }
 
     scores: list[FactorScoreData] = []
-    for asof_date in factor_dates:
-        active_specs = [
-            spec
-            for spec in mapped
-            if spec.effective_trading_interval(asof_date, asof_date) is not None
-        ]
-        if not active_specs:
-            continue
-        selected: list[tuple[InstrumentSpec, _ExternalFactorRow]] = []
-        for spec in active_specs:
-            security_id = cast(str, spec.factor_security_id)
-            row = rows_by_key.get((asof_date, security_id))
-            if row is None:
-                if bundle.metadata.source_kind == "signal_inference":
-                    raise ValueError(
-                        f"complete factor cross-section is missing {security_id} on {asof_date}"
-                    )
-                row = _ExternalFactorRow(
-                    security_id=security_id,
-                    symbol=spec.symbol,
-                    asof_date=asof_date,
-                    score=None,
-                    eligible=False,
-                )
-            selected.append((spec, row))
-
+    for asof_date, selected in selected_by_date.items():
         signal_available_times = [
             signal_availability[spec.canonical_id][asof_date]
             for spec, _ in selected
@@ -668,8 +688,6 @@ def import_factor_bundle(
                     ts_init=available_at_ns,
                 )
             )
-    if not scores:
-        raise ValueError("FactorBatch has no rows mapped to active configured instruments")
     scores.sort(key=lambda value: (value.ts_init, value.canonical_id))
 
     existing = _catalog_factor_scores(catalog)

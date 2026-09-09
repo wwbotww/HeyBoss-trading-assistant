@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from nautilus_trader.model.identifiers import ClientId, TraderId
 
 from tests.data.helpers import make_bar
 from trading_assistant.data.catalog import CatalogRepository
-from trading_assistant.data.config import InstrumentSpec, load_instruments
+from trading_assistant.data.config import FactorIdentityPeriod, InstrumentSpec, load_instruments
 from trading_assistant.data.factor import (
     FACTOR_DATA_TYPE,
     FactorScoreData,
@@ -79,6 +80,22 @@ def _rows() -> list[dict[str, object]]:
             "eligible": False,
         },
     ]
+
+
+def _dated_spec() -> InstrumentSpec:
+    """合成两个交易日的身份切换, 不代表真实证券变更。"""
+    return replace(
+        _spec("AAPL", "eodhd:isin:AAPL"),
+        factor_security_id=None,
+        factor_identity_periods=(
+            FactorIdentityPeriod(
+                "eodhd:isin:AAPL", date(2025, 1, 2), date(2025, 1, 2), "合成旧身份"
+            ),
+            FactorIdentityPeriod(
+                "eodhd:isin:AAPL_NEW", date(2025, 1, 3), date(2025, 1, 3), "合成新身份"
+            ),
+        ),
+    )
 
 
 def _write_bundle(
@@ -216,6 +233,255 @@ def _scores(catalog_path: Path) -> list[FactorScoreData]:
     return [cast(FactorScoreData, value.data) for value in values]
 
 
+@pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
+@pytest.mark.parametrize(
+    "model_type", ["financial_pretrained_patchtst", "finance_patch_transformer"]
+)
+def test_factor_import_resolves_identity_by_asof_date(
+    tmp_path: Path, source_kind: str, model_type: str
+) -> None:
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    instrument = _dated_spec()
+    rows = [
+        {**_rows()[0], "asof_date": session, "security_id": identity, "score": score}
+        for session, identity, score in (
+            (date(2025, 1, 2), "eodhd:isin:AAPL", 3.25),
+            (date(2025, 1, 3), "eodhd:isin:AAPL_NEW", -1.75),
+        )
+    ]
+
+    def metadata(manifest: dict[str, object]) -> None:
+        cast(dict[str, object], manifest["model"])["model_type"] = model_type
+
+    groups = [[row] for row in rows] if source_kind == "signal_inference" else [rows]
+    for index, group in enumerate(groups):
+        bundle = _write_bundle(
+            tmp_path / f"bundle-{index}",
+            rows=group,
+            source_kind=source_kind,
+            mutate_manifest=metadata,
+        )
+        for already_imported in (False, True):
+            result = import_factor_bundle(
+                bundle_dir=bundle,
+                catalog_path=catalog_path,
+                instruments=(instrument,),
+                signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+                execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+            )
+            assert result.already_imported is already_imported
+            assert result.rows_imported == (0 if already_imported else len(group))
+    imported = _scores(catalog_path)
+    assert [row.canonical_id for row in imported] == ["AAPL.US", "AAPL.US"]
+    assert [row.security_id for row in imported] == [row["security_id"] for row in rows]
+    assert [row.score for row in imported] == [3.25, -1.75]
+    assert [row.batch_size for row in imported] == [1, 1]
+    assert all(row.eligible and row.source_kind == source_kind for row in imported)
+    assert imported[0].ts_init < imported[1].ts_init
+
+
+@pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
+@pytest.mark.parametrize("include_correct", [False, True])
+@pytest.mark.parametrize("session", [date(2025, 1, 2), date(2025, 1, 3)])
+def test_factor_import_rejects_wrong_date_identity_before_writing(
+    tmp_path: Path, source_kind: str, include_correct: bool, session: date
+) -> None:
+    instrument = _dated_spec()
+    expected = instrument.factor_security_id_on(session)
+    wrong = "eodhd:isin:AAPL_NEW" if session.day == 2 else "eodhd:isin:AAPL"
+    rows = [
+        {**_rows()[0], "asof_date": session, "security_id": wrong},
+        {**_rows()[1], "asof_date": session, "score": 0.5, "eligible": True},
+    ]
+    if include_correct:
+        rows.append({**_rows()[0], "asof_date": session, "security_id": expected})
+    rows.sort(key=lambda row: str(row["security_id"]))
+    bundle = _write_bundle(tmp_path / "bundle", rows=rows, source_kind=source_kind)
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    with pytest.raises(ValueError, match=r"factor identity.*not valid.*2025-01-0"):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=catalog_path,
+            instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    assert _scores(catalog_path) == []
+
+
+@pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
+@pytest.mark.parametrize("missing_date", [date(2025, 1, 2), date(2025, 1, 6)])
+def test_factor_import_rejects_identity_gap_instead_of_evaluation_placeholder(
+    tmp_path: Path, source_kind: str, missing_date: date
+) -> None:
+    instrument = replace(
+        _dated_spec(), factor_identity_periods=_dated_spec().factor_identity_periods[1:]
+    )
+    row = {**_rows()[1], "asof_date": missing_date, "score": 0.5, "eligible": True}
+    bundle = _write_bundle(tmp_path / "bundle", rows=[row], source_kind=source_kind)
+    with pytest.raises(ValueError, match=rf"No factor identity.*AAPL\.US.*{missing_date}"):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=tmp_path / "catalog",
+            instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    assert _scores(tmp_path / "catalog") == []
+
+
+@pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
+def test_dated_mapping_keeps_existing_missing_prediction_rules(
+    tmp_path: Path, source_kind: str
+) -> None:
+    rows = [{**_rows()[1], "score": 0.5, "eligible": True}]
+    bundle = _write_bundle(tmp_path / "bundle", rows=rows, source_kind=source_kind)
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    with (
+        pytest.raises(ValueError, match="complete factor cross-section is missing")
+        if source_kind == "signal_inference"
+        else nullcontext()
+    ):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=catalog_path,
+            instruments=(_dated_spec(), _spec("MSFT", "eodhd:isin:MSFT")),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    if source_kind == "signal_inference":
+        assert _scores(catalog_path) == []
+    else:
+        aapl, msft = sorted(_scores(catalog_path), key=lambda row: row.canonical_id)
+        assert not aapl.eligible
+        assert aapl.security_id == "eodhd:isin:AAPL"
+        assert msft.eligible
+        assert aapl.batch_size == msft.batch_size == 2
+
+
+@pytest.mark.parametrize("duplicate_canonical", [False, True])
+def test_factor_import_validates_direct_api_mapping_collisions(
+    tmp_path: Path, duplicate_canonical: bool
+) -> None:
+    bundle = _write_bundle(tmp_path / "bundle")
+    other = (
+        _spec("AAPL", "eodhd:isin:UNRELATED")
+        if duplicate_canonical
+        else _spec("MSFT", "eodhd:isin:AAPL_NEW")
+    )
+    message = (
+        r"factor identity.*unique canonical IDs"
+        if duplicate_canonical
+        else r"factor identity.*overlap"
+    )
+    with pytest.raises(ValueError, match=message):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=tmp_path / "catalog",
+            instruments=(_dated_spec(), other),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    assert _scores(tmp_path / "catalog") == []
+
+
+@pytest.mark.parametrize("identity_gap", [False, True])
+def test_ineligible_row_does_not_bypass_identity_validation(
+    tmp_path: Path, identity_gap: bool
+) -> None:
+    instrument = _dated_spec()
+    if identity_gap:
+        instrument = replace(
+            instrument, factor_identity_periods=instrument.factor_identity_periods[1:]
+        )
+    row = {**_rows()[0], "security_id": "eodhd:isin:AAPL_NEW", "score": None, "eligible": False}
+    bundle = _write_bundle(tmp_path / "bundle", rows=[row])
+    with pytest.raises(ValueError, match="factor identity"):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=tmp_path / "catalog",
+            instruments=(instrument,),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    assert _scores(tmp_path / "catalog") == []
+
+
+def test_later_identity_failure_does_not_partially_write_history(tmp_path: Path) -> None:
+    rows = [_rows()[0], {**_rows()[0], "asof_date": date(2025, 1, 3)}]
+    bundle = _write_bundle(tmp_path / "bundle", rows=rows, source_kind="evaluation_predictions")
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    with pytest.raises(ValueError, match=r"factor identity.*not valid.*2025-01-03"):
+        import_factor_bundle(
+            bundle_dir=bundle,
+            catalog_path=catalog_path,
+            instruments=(_dated_spec(),),
+            signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+            execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+        )
+    assert _scores(catalog_path) == []
+
+
+def test_identity_checks_ignore_unrelated_and_inactive_instruments(tmp_path: Path) -> None:
+    """接收范围外的无 ISIN 股票及尚未活跃的目标不阻止当天交付。"""
+    instrument = replace(
+        _dated_spec(),
+        first_trading_date=date(2025, 1, 3),
+        factor_identity_periods=_dated_spec().factor_identity_periods[1:],
+    )
+    rows = [
+        _rows()[0],
+        {**_rows()[1], "score": 0.5, "eligible": True},
+        {**_rows()[0], "security_id": "eodhd:symbol:UNRELATED.US", "symbol": "UNRELATED"},
+    ]
+
+    def metadata(manifest: dict[str, object]) -> None:
+        cast(dict[str, object], manifest["input"])["identity_policy"] = (
+            "provider_neutral_security_id"
+        )
+
+    bundle = _write_bundle(tmp_path / "bundle", rows=rows, mutate_manifest=metadata)
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    import_factor_bundle(
+        bundle_dir=bundle,
+        catalog_path=catalog_path,
+        instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
+        signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+        execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+    )
+    imported = _scores(catalog_path)
+    assert [row.canonical_id for row in imported] == ["MSFT.US"]
+    assert imported[0].batch_size == 1
+
+
+def test_identity_can_change_owner_only_in_nonoverlapping_dates(tmp_path: Path) -> None:
+    instrument = _dated_spec()
+    second = _spec("MSFT", "eodhd:isin:AAPL", first_trading_date=date(2025, 1, 3))
+    rows = [
+        {**_rows()[0], "asof_date": date(2025, 1, 3), "symbol": "MSFT"},
+        {**_rows()[0], "asof_date": date(2025, 1, 3), "security_id": "eodhd:isin:AAPL_NEW"},
+    ]
+    bundle = _write_bundle(tmp_path / "bundle", rows=rows)
+    catalog_path = tmp_path / "catalog"
+    _write_price_bars(catalog_path)
+    import_factor_bundle(
+        bundle_dir=bundle,
+        catalog_path=catalog_path,
+        instruments=(instrument, second),
+        signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
+        execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
+    )
+    assert {row.canonical_id: row.security_id for row in _scores(catalog_path)} == {
+        "AAPL.US": "eodhd:isin:AAPL_NEW",
+        "MSFT.US": "eodhd:isin:AAPL",
+    }
+
+
 def test_nt_catalog_request_routes_factor_scores_to_the_actor_topic(tmp_path: Path) -> None:
     """NT Catalog 历史请求不得因 DataType metadata 不一致而静默丢失整批因子。"""
     catalog = CatalogRepository(tmp_path / "catalog")
@@ -321,8 +587,19 @@ def test_real_facdigger_mock_bundle_imports_with_project_identity_mapping(
     }
 
 
-def test_factor_bundle_imports_nt_custom_data_and_is_idempotent(tmp_path: Path) -> None:
-    bundle = _write_bundle(tmp_path / "bundles")
+@pytest.mark.parametrize(
+    "model_type",
+    ["financial_pretrained_patchtst", "finance_patch_transformer", "lightgbm"],
+)
+def test_factor_bundle_imports_nt_custom_data_and_is_idempotent(
+    tmp_path: Path, model_type: str
+) -> None:
+    bundle = _write_bundle(
+        tmp_path / "bundles",
+        mutate_manifest=lambda manifest: cast(dict[str, object], manifest["model"]).update(
+            {"model_type": model_type}
+        ),
+    )
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
     instruments = (
@@ -422,6 +699,9 @@ def test_factor_bundle_rejects_delivery_directory_mismatch(tmp_path: Path) -> No
     [
         lambda manifest: cast(dict[str, object], manifest["model"]).update(
             {"model_id": "another-valid-model"}
+        ),
+        lambda manifest: cast(dict[str, object], manifest["model"]).update(
+            {"model_type": "finance_patch_transformer"}
         ),
         lambda manifest: cast(dict[str, object], manifest["input"]).update(
             {"snapshot_id": "another-valid-snapshot"}
@@ -532,8 +812,16 @@ def test_factor_bundle_rejects_ineligible_evaluation_rows(tmp_path: Path) -> Non
         ),
         (
             lambda manifest: cast(dict[str, object], manifest["model"]).update(
-                {"model_type": "other"}
+                {"model_type": "bad model"}
             ),
+            "model_type",
+        ),
+        (
+            lambda manifest: cast(dict[str, object], manifest["model"]).update({"model_type": ""}),
+            "model_type",
+        ),
+        (
+            lambda manifest: cast(dict[str, object], manifest["model"]).update({"model_type": 123}),
             "model_type",
         ),
         (

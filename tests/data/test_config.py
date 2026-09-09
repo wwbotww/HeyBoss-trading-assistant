@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from trading_assistant.data.config import load_data_config, load_instruments
+from trading_assistant.data.config import (
+    FactorIdentityPeriod,
+    load_data_config,
+    load_instruments,
+    validate_factor_identity_mappings,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -270,8 +276,132 @@ instruments:
     data_symbol: MSFT.US
 """
     path.write_text(base.format(factor_id="eodhd:isin:duplicate", second=second), encoding="utf-8")
-    with pytest.raises(ValueError, match="factor_security_id 不得重复"):
+    with pytest.raises(ValueError, match=r"factor identity.*overlap"):
         load_instruments(path)
+
+
+def _identity_config(tmp_path: Path, periods: str, extra: str = "") -> Path:
+    path = tmp_path / "instruments.yaml"
+    path.write_text(
+        """instruments:
+  - symbol: DEMO
+    instrument_id: DEMO.US
+    data_symbol: DEMO.US
+    exchange: SMART
+    primary_exchange: NASDAQ
+    currency: USD
+    price_precision: 2
+    price_increment: "0.01"
+    lot_size: 1
+    first_trading_date: 2025-01-02
+    last_trading_date: 2025-12-31
+    factor_identity_periods:
+"""
+        + periods
+        + extra,
+        encoding="utf-8",
+    )
+    return path
+
+
+_IDENTITY_PERIODS = """      - security_id: example:old
+        valid_from: 2025-01-02
+        valid_to: 2025-06-30
+        evidence: 合成测试旧身份依据
+      - security_id: example:new
+        valid_from: "2025-07-01"
+        valid_to: "2025-12-31"
+        evidence: 合成测试新身份依据
+"""
+
+
+def test_factor_identity_periods_resolve_inclusive_dates(tmp_path: Path) -> None:
+    instrument = load_instruments(_identity_config(tmp_path, _IDENTITY_PERIODS))[0]
+    assert instrument.factor_security_id is None
+    assert instrument.factor_security_id_on(date(2025, 1, 2)) == "example:old"
+    assert instrument.factor_security_id_on(date(2025, 6, 30)) == "example:old"
+    assert instrument.factor_security_id_on(date(2025, 7, 1)) == "example:new"
+    assert instrument.factor_security_id_on(date(2025, 12, 31)) == "example:new"
+    assert instrument.factor_security_id_on(date(2025, 1, 1)) is None
+    assert instrument.factor_security_id_on(date(2026, 1, 1)) is None
+
+    fixed = replace(instrument, factor_identity_periods=(), factor_security_id="example:fixed")
+    assert fixed.factor_security_id_on(date(2025, 1, 2)) == "example:fixed"
+    assert fixed.factor_security_id_on(date(2025, 1, 1)) is None
+    assert replace(fixed, factor_security_id=None).factor_security_id_on(date(2025, 1, 2)) is None
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("2025-06-30", "2025-07-01"),
+        ("2025-06-30", "2025-01-01"),
+        ("valid_from: 2025-01-02", "valid_from: null"),
+        ("valid_to: 2025-06-30", "valid_to: null"),
+        ("valid_to: 2025-06-30", "valid_to: not-a-date"),
+        ("valid_to: 2025-06-30", "valid_to: 2025-06-30T00:00:00Z"),
+        ("security_id: example:old", "security_id: 123"),
+        ("security_id: example:old", 'security_id: "  "'),
+        ("evidence: 合成测试旧身份依据", 'evidence: ""'),
+        ("evidence: 合成测试旧身份依据", "evidence: 123"),
+        ("evidence: 合成测试旧身份依据", "evidnce: typo"),
+    ],
+)
+def test_factor_identity_periods_reject_invalid_fields(tmp_path: Path, old: str, new: str) -> None:
+    path = _identity_config(tmp_path, _IDENTITY_PERIODS.replace(old, new))
+    with pytest.raises(ValueError, match="字段类型无效"):
+        load_instruments(path)
+
+
+@pytest.mark.parametrize(
+    "periods", ["      []\n", "      null\n", "      {}\n", "      - invalid\n"]
+)
+def test_factor_identity_periods_require_nonempty_list(tmp_path: Path, periods: str) -> None:
+    with pytest.raises(ValueError, match=r"factor identity|factor_identity_periods"):
+        load_instruments(_identity_config(tmp_path, periods))
+
+
+def test_factor_identity_periods_cannot_fall_back_to_static_mapping(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        load_instruments(
+            _identity_config(tmp_path, _IDENTITY_PERIODS, "    factor_security_id: example:new\n")
+        )
+    path = _identity_config(tmp_path, _IDENTITY_PERIODS.replace("2025-06-30", "2025-06-29"))
+    instrument = load_instruments(path)[0]
+    with pytest.raises(ValueError, match=r"No factor identity.*DEMO\.US.*2025-06-30"):
+        instrument.factor_security_id_on(date(2025, 6, 30))
+    expired = replace(instrument, last_trading_date=None)
+    with pytest.raises(ValueError, match=r"No factor identity.*2026-01-01"):
+        expired.factor_security_id_on(date(2026, 1, 1))
+
+
+def test_factor_identity_uniqueness_respects_dates_and_lifecycle(tmp_path: Path) -> None:
+    instrument = load_instruments(_identity_config(tmp_path, _IDENTITY_PERIODS))[0]
+    second = replace(
+        instrument,
+        instrument_id="OTHER.US",
+        factor_identity_periods=(
+            FactorIdentityPeriod("example:old", date(2025, 7, 1), date(2025, 12, 31), "测试依据"),
+        ),
+    )
+    validate_factor_identity_mappings((instrument, second))
+    collision = replace(second, factor_identity_periods=instrument.factor_identity_periods)
+    with pytest.raises(ValueError, match=r"factor identity.*overlap"):
+        validate_factor_identity_mappings((instrument, collision))
+    fixed = replace(second, factor_identity_periods=(), factor_security_id="example:old")
+    with pytest.raises(ValueError, match=r"factor identity.*overlap"):
+        validate_factor_identity_mappings((instrument, fixed))
+    validate_factor_identity_mappings(
+        (instrument, replace(fixed, first_trading_date=date(2025, 7, 1)))
+    )
+    with pytest.raises(ValueError, match=r"factor identity.*overlap"):
+        validate_factor_identity_mappings(
+            (instrument, replace(fixed, first_trading_date=date(2025, 6, 30)))
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        replace(instrument, factor_security_id="example:new")
+    with pytest.raises(ValueError, match="overlap"):
+        replace(instrument, factor_identity_periods=instrument.factor_identity_periods * 2)
 
 
 def test_trading_instrument_config_rejects_non_equity_kind(tmp_path: Path) -> None:

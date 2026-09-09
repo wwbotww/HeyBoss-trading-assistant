@@ -3,13 +3,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
 
 InstrumentKind = Literal["equity", "index"]
+
+
+@dataclass(frozen=True)
+class FactorIdentityPeriod:
+    """有明确依据和首尾有效日期的外部因子交付身份。"""
+
+    security_id: str
+    valid_from: date
+    valid_to: date
+    evidence: str
+
+    def __post_init__(self) -> None:
+        for name in ("security_id", "evidence"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"factor identity {name} must be a non-empty string")
+        for value in (self.valid_from, self.valid_to):
+            if not isinstance(value, date) or isinstance(value, datetime):
+                raise ValueError("factor identity valid_from/valid_to must be dates without time")
+        if self.valid_from > self.valid_to:
+            raise ValueError("factor identity valid_from must not exceed valid_to")
 
 
 @dataclass(frozen=True)
@@ -30,6 +52,44 @@ class InstrumentSpec:
     last_trading_date: date | None = None
     factor_security_id: str | None = None
     instrument_kind: InstrumentKind = "equity"
+    factor_identity_periods: tuple[FactorIdentityPeriod, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.factor_security_id is not None and (
+            not isinstance(self.factor_security_id, str) or not self.factor_security_id.strip()
+        ):
+            raise ValueError("factor_security_id must be a non-empty string")
+        if not isinstance(self.factor_identity_periods, tuple) or not all(
+            isinstance(period, FactorIdentityPeriod) for period in self.factor_identity_periods
+        ):
+            raise ValueError("factor_identity_periods must be a tuple of FactorIdentityPeriod")
+        if self.factor_security_id is not None and self.factor_identity_periods:
+            raise ValueError(
+                "factor_security_id and factor_identity_periods are mutually exclusive"
+            )
+        periods = sorted(self.factor_identity_periods, key=lambda period: period.valid_from)
+        if any(left.valid_to >= right.valid_from for left, right in pairwise(periods)):
+            raise ValueError(f"factor identity periods overlap for {self.canonical_id}")
+
+    @property
+    def factor_identity_intervals(self) -> tuple[tuple[str, date, date], ...]:
+        """把固定映射与日期映射展开为同一解析输入, 生命周期另行取交集。"""
+        if self.factor_security_id is not None:
+            return ((self.factor_security_id, date.min, date.max),)
+        return tuple(
+            (period.security_id, period.valid_from, period.valid_to)
+            for period in self.factor_identity_periods
+        )
+
+    def factor_security_id_on(self, asof_date: date) -> str | None:
+        """仅按因子日期解析; 活跃映射标的的身份缺口不得降级为缺失预测。"""
+        intervals = self.factor_identity_intervals
+        if not intervals or self.effective_trading_interval(asof_date, asof_date) is None:
+            return None
+        for security_id, start, end in intervals:
+            if start <= asof_date <= end:
+                return security_id
+        raise ValueError(f"No factor identity for {self.canonical_id} on {asof_date}")
 
     @property
     def canonical_id(self) -> str:
@@ -58,6 +118,30 @@ class InstrumentSpec:
         if effective_end is not None and effective_start > effective_end:
             return None
         return effective_start, effective_end
+
+
+def validate_factor_identity_mappings(instruments: tuple[InstrumentSpec, ...]) -> None:
+    """配置加载和直接导入共同校验同日外部身份到标的的唯一性。"""
+    canonical_ids = [instrument.canonical_id for instrument in instruments]
+    if len(canonical_ids) != len(set(canonical_ids)):
+        raise ValueError("factor identity instruments must have unique canonical IDs")
+    by_identity: dict[str, list[tuple[date, date, str]]] = {}
+    for instrument in instruments:
+        for security_id, start, end in instrument.factor_identity_intervals:
+            effective = instrument.effective_trading_interval(start, end)
+            if effective is not None:
+                active_start, active_end = effective
+                assert active_end is not None  # 输入为有限闭区间, 取交集不会丢失终点。
+                by_identity.setdefault(security_id, []).append(
+                    (active_start, active_end, instrument.canonical_id)
+                )
+    for security_id, intervals in by_identity.items():
+        intervals.sort()
+        for left, right in pairwise(intervals):
+            if left[1] >= right[0]:
+                raise ValueError(
+                    f"factor identity {security_id} mappings overlap: {left[2]} and {right[2]}"
+                )
 
 
 HistoricalProvider = Literal["eodhd", "ibkr"]
@@ -129,6 +213,26 @@ def _optional_date(value: object) -> date | None:
     raise TypeError("expected ISO date")
 
 
+def _load_factor_identity_periods(value: object) -> tuple[FactorIdentityPeriod, ...]:
+    """严格读取显式日期映射; 空列表不能悄悄关闭目标标的的因子接入。"""
+    if not isinstance(value, list) or not value:
+        raise ValueError("factor_identity_periods must be a non-empty list")
+    periods: list[FactorIdentityPeriod] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "security_id",
+            "valid_from",
+            "valid_to",
+            "evidence",
+        }:
+            raise ValueError("factor identity requires security_id, valid_from, valid_to, evidence")
+        start, end = _optional_date(item["valid_from"]), _optional_date(item["valid_to"])
+        if start is None or end is None:
+            raise ValueError("factor identity valid_from and valid_to are required")
+        periods.append(FactorIdentityPeriod(item["security_id"], start, end, item["evidence"]))
+    return tuple(periods)
+
+
 def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
     """从 YAML 加载并校验标的清单。"""
     root = _load_mapping(path)
@@ -167,13 +271,18 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
                     InstrumentKind,
                     str(value.get("instrument_kind", "equity")),
                 ),
+                factor_identity_periods=(
+                    _load_factor_identity_periods(value["factor_identity_periods"])
+                    if "factor_identity_periods" in value
+                    else ()
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, KeyError):
                 raise ValueError(
                     f"instruments[{index}] 缺少字段 {exc.args[0]!r}: {path}",
                 ) from exc
-            raise ValueError(f"instruments[{index}] 字段类型无效: {path}") from exc
+            raise ValueError(f"instruments[{index}] 字段类型无效: {path}: {exc}") from exc
         instruments.append(instrument)
 
         if instrument.price_precision < 0:
@@ -196,8 +305,6 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
             raise ValueError(
                 f"instruments[{index}].first_trading_date 不得晚于 last_trading_date: {path}"
             )
-        if instrument.factor_security_id is not None and not instrument.factor_security_id.strip():
-            raise ValueError(f"instruments[{index}].factor_security_id 不得为空: {path}")
         if instrument.instrument_kind != "equity":
             raise ValueError(f"instruments[{index}].instrument_kind 只允许 equity: {path}")
 
@@ -207,13 +314,7 @@ def load_instruments(path: Path) -> tuple[InstrumentSpec, ...]:
     live_instrument_ids = [instrument.resolved_live_instrument_id for instrument in instruments]
     if len(live_instrument_ids) != len(set(live_instrument_ids)):
         raise ValueError(f"live_instrument_id 不得重复: {path}")
-    factor_security_ids = [
-        instrument.factor_security_id
-        for instrument in instruments
-        if instrument.factor_security_id is not None
-    ]
-    if len(factor_security_ids) != len(set(factor_security_ids)):
-        raise ValueError(f"factor_security_id 不得重复: {path}")
+    validate_factor_identity_mappings(tuple(instruments))
 
     return tuple(instruments)
 

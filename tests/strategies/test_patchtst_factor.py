@@ -84,11 +84,14 @@ def _row(
     batch_size: int = 2,
     score: float = 1.0,
     source_kind: str = "signal_inference",
+    security_id: str | None = None,
+    asof_date: str = "2025-01-02",
+    timestamp_ns: int = 10,
 ) -> FactorScoreData:
     return FactorScoreData(
         canonical_id=canonical_id,
-        security_id=f"isin:{canonical_id}",
-        asof_date="2025-01-02",
+        security_id=security_id or f"isin:{canonical_id}",
+        asof_date=asof_date,
         score=score,
         eligible=True,
         batch_id=batch_id,
@@ -96,8 +99,8 @@ def _row(
         delivery_id="d" * 64,
         model_release_id="r" * 64,
         source_kind=source_kind,
-        ts_event=10,
-        ts_init=10,
+        ts_event=timestamp_ns,
+        ts_init=timestamp_ns,
     )
 
 
@@ -196,6 +199,53 @@ def test_actor_publishes_audited_signal_and_deduplicates_workflow(tmp_path: Path
         assert connection.scalar(select(func.count()).select_from(SignalRecord)) == 1
     actor.on_stop()
     assert actor._repository is None
+
+
+@pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
+def test_actor_keeps_canonical_targets_across_identity_change(
+    tmp_path: Path, source_kind: str
+) -> None:
+    """身份切换不改变 Actor 的标的、完整批次和逐日审计语义。"""
+    database_url = f"sqlite:///{tmp_path}/identity-change.db"
+    actor = _PublishingActor(
+        PatchTSTFactorActorConfig(
+            instrument_ids=("AAPL.US",),
+            top_n=1,
+            target_gross_exposure=0.25,
+            signal_expiry_hours=24,
+            database_url=database_url,
+            stream_data=False,
+            allow_evaluation_predictions=source_kind == "evaluation_predictions",
+        )
+    )
+    actor._repository = TradingRepository(database_url)
+    actor._repository.create_schema()
+    for index, (session, identity) in enumerate(
+        (("2025-01-02", "example:old"), ("2025-01-03", "example:new")), start=1
+    ):
+        timestamp_ns = index * 86_400_000_000_000
+        actor.test_clock.set_time(timestamp_ns + 1)
+        row = _row(
+            "AAPL.US",
+            security_id=identity,
+            asof_date=session,
+            batch_id=f"delivery:{session}",
+            batch_size=1,
+            source_kind=source_kind,
+            timestamp_ns=timestamp_ns,
+        )
+        actor.on_data(row)
+        actor.on_data(row)
+    assert len(actor.events) == 2
+    assert all(event.target_weights == (("AAPL.US", 0.25),) for event in actor.events)
+    assert [event.rebalance_key.rsplit(":", 1)[1] for event in actor.events] == [
+        "2025-01-02",
+        "2025-01-03",
+    ]
+    assert actor.events[0].ts_event < actor.events[1].ts_event
+    with create_engine(database_url).connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(SignalRecord)) == 2
+    actor.on_stop()
 
 
 def test_actor_reset_and_empty_catalog_callback_are_safe(tmp_path: Path) -> None:
