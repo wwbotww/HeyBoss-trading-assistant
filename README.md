@@ -24,17 +24,16 @@
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、市场新闻或大语言模型分析。
 
-Vue 3 八个一级页面、只读 API、Compose 本机部署和响应式浏览器验收均已完成。市场雷达页面已接通价格、当前宽度、宏观象限、盈利修正、个股基本面和未来事件；最新页面及交互已部署，完成三档宽度、详情、键盘和故障恢复验收。浏览器只呈现后端指标，不在浏览器计算金融指标。交易、回测和 Telegram 均不依赖 Web 模块，停止或删除 Web 容器不会改变交易核心状态。今后升级代码仍需重新构建并更新 Web 容器，单纯刷新浏览器不会更新服务版本。
-
-本机市场库已于 2026-09-06（采集 UTC 日为 09-05）初始化宏观、盈利、基本面和美国经济事件。价格/宽度仍为 09-02，宏观为 09-04，其他三项为 09-05；全市场盈利和行业分类为部分覆盖。这不是全部来源同日刷新。R7 的一次性同步、正式数据、Web 部署与新版删除恢复验收已通过；用户已取消恢复完全相同旧页面的要求。详细证据见 [R7 验收记录](docs/market-radar-implementation-plan.md#r7部署隔离与文档)。
+Web 提供八个一级页面，浏览器只呈现后端指标。交易、回测和 Telegram 均不依赖 Web 模块。代码更新后需要重新构建并更新 Web 容器，刷新浏览器不会更新服务版本。
 
 ## 文档
 
-- [项目事实与硬性约束](docs/project-context.md)
-- [技术设计参考](docs/technical-reference.md)
+- [项目事实与硬性约束](docs/project-context.md)：当前能力、范围和必须遵守的架构规则。
+- [技术参考](docs/technical-reference.md)：模块职责、交易链路、数据语义与 Web 边界。
+- [市场雷达参考](docs/market-radar.md)：当前指标、数据来源、接口、缺失处理与新鲜度。
 - [FacDigger 因子接入与改造说明](docs/factor-integration.md)
-- [Web 重构设计与里程碑](docs/web-rebuild.md)
-- [市场雷达口径与实施进度](docs/market-radar-implementation-plan.md)
+- [FacDigger / HeyBoss 联合实施方案（待确认）](docs/facdigger-heyboss-joint-implementation-plan.md)
+- [历史方案与验收归档](docs/archive/README.md)：已完成的 Web 重构、市场雷达实施与阶段证据。
 - [回测研究 notebook](notebooks/README.md)
 
 ## 环境要求
@@ -186,7 +185,7 @@ docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_b
 docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_breadth.py --mode daily
 ```
 
-宽度成员来自 State Street 官方 SPY 当日持仓代理，价格仍走 EODHD、NautilusTrader 双 BarType 和同一 Catalog。该成员集合不会写入 `config/instruments.yaml`，也不会成为可交易股票池。宽度脚本不提供 `reconcile`，避免用短观察窗截断共享 Catalog 的长期历史。命令会产生约 1,500 次远端请求，实际额度和耗时取决于 EODHD 套餐。
+宽度成员来自 State Street 官方 SPY 当日持仓代理，价格仍走 EODHD、NautilusTrader 双 BarType 和同一 Catalog。该成员集合不会写入 `config/instruments.yaml`，也不会成为可交易股票池。宽度脚本不提供 `reconcile`，避免用短观察窗截断共享 Catalog 的长期历史。远端请求量随成员数增长，执行前应核对可用配额；成员数量以本次采集结果为准。
 
 宏观象限输入首次同步和日常更新：
 
@@ -197,9 +196,7 @@ docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_m
 docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_macro.py --mode daily
 ```
 
-该命令通过 EODHD 同步 `HYG.US`、`LQD.US`、`VIX.INDX` 和 `VIX3M.INDX`，并通过 FRED v1 API 同步 `DFII10`。ETF 使用 NT `Equity`，指数使用 NT `IndexInstrument`；价格仍经共享历史数据管道写入同一 Catalog。后端以 HYG/LQD 的 20 个共同观测相对变化和 VIX/VIX3M 期限结构计算风险偏好，以 DFII10 的 20 个有效观测变化计算实际利率压力；两者至少需要 504 个变化观测，最多使用 756 个观测做 Robust Z 标准化。
-
-实际利率只保存 FRED 当前修订值，不具备历史 vintage/PIT 回放语义。两轴按风险日期作向后 as-of 对齐，实际利率最多允许滞后 3 个日历日；风险偏好、实际利率观测、完整象限和同步运行状态在同一数据库事务发布。历史不足、输入缺失、日期过旧或任一写入失败都不会伪造完整状态。
+宏观同步通过 EODHD 获取 HYG/LQD、VIX/VIX3M，通过 FRED 获取 DFII10 当前修订观测；ETF 与指数身份分开，价格继续写入共享 Catalog。需要足够历史才能形成有效象限，具体窗口和公式见 [宏观口径](docs/market-radar.md#宏观象限)。FRED 当前修订数据不具备历史 vintage/PIT 回放语义。
 
 当前市场盈利修正与观察股财报事件同步：
 
@@ -215,13 +212,9 @@ docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_f
 
 基本面命令使用 `EODHD_API_TOKEN`，按 `config/market-radar.yaml` 的完整 watchlist 和 `config/instruments.yaml` 中的显式股票身份采集。规范输入与指标写入 `MARKET_RADAR_DATABASE_URL` 指定的独立市场数据库（默认 `data/market-radar.db`），不会写交易数据库或 Catalog。
 
-目前提供 FCF Margin、Net Debt/EBITDA、FCF Yield，以及供应商 ForwardPE、EV/EBITDA、ROE/PB 背景；金融企业仅保留 ROE/PB，REIT 的通用指标标为不适用。`status=COMPLETE` 表示整批同步成功，`snapshot_validity` 和缺失/不适用计数另行说明指标状态，不代表实时行情或投资建议。
+在“市场雷达 → 个股 → 财务与估值”查看已发布结果和逐字段缺失原因。价格与基本面独立读取，页面分别展示采集日、供应商更新日和报告期；只读查询不会为旧库自动建表，需显式运行同步。
 
-在 Web 中打开“市场雷达 → 个股 → 财务与估值”查看已发布批次，点击标的打开价格与基本面共用的详情抽屉。两种快照独立读取，任一缺失或失败不屏蔽另一种；切换维度会清除原价格筛选、分页和标的选择。基本面 API 为无参数的 `GET /api/market-radar/fundamentals`，只读取已发布快照，不需要供应商或券商凭据。
-
-页面分别展示采集日、供应商更新日和各指标报告期。本地采集超过 14 个 UTC 日历日标记陈旧，供应商更新超过 3 日单独提示；陈旧仍保留上次发布的值，不等于同步失败。“来源近期更新”不表示实时估值报价。没有基本面表的旧数据库显示尚未发布，不会因打开页面自动建表；需手动运行上述同步命令。页面的刷新或“重新读取”均不会触发同步。
-
-两条命令都只采集当前可见数据，没有历史回填参数。同日再次成功运行会替换该日结果，失败保留上次成功快照；请串行执行同一种同步命令。财报期、供应商更新日和采集日不是同一概念，当前修订值不能用于历史 PIT 回测。详细口径见 [市场雷达实施方案](docs/market-radar-implementation-plan.md)。
+盈利与基本面命令只采集当前可见数据，没有历史回填参数。同日成功重跑替换该日结果，失败保留上次成功快照；请串行执行同一种同步。指标、行业适用性、新鲜度和失败语义统一见 [市场雷达参考](docs/market-radar.md)。
 
 美国经济事件同步：
 
@@ -231,21 +224,11 @@ docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_e
 
 使用现有 `EODHD_API_TOKEN`，请求美国从当前 UTC 日期至未来第 30 日的事件，共 31 个日历日期。无需股票池、IBKR、Telegram 或 FRED；仅写入 `MARKET_RADAR_DATABASE_URL` 指定的独立市场库，不写交易库或 Catalog。可用 `--data-config` 指定 HTTP 配置，不能通过命令参数改变国家或伪回填历史。
 
-同日重跑整批替换；成功空批次清除该日旧事件，失败保留上次发布结果。每次最多两个逻辑页面，分页未结束或跨页交叠时失败关闭；`request_count` 不是供应商计费次数，`COMPLETE` 也不承诺来源覆盖全部美国事件。来源时钟未确认时区，数值单位与重要性未确认，不能用于精确倒计时或历史 PIT 回测；actual/estimate 缺失保持为空。
+同日成功重跑整批替换，包括合法空批次；失败保留上次发布结果。每次最多两个逻辑页面，分页未结束或跨页交叠时失败关闭。该命令不重复采集观察股财报，也没有推送或常驻调度。
 
-该命令不重复采集 watchlist 财报事件，也没有推送或常驻调度。
+在“市场雷达 → 总览 → 未来事件”查看从查询 UTC 当天开始的十四个日历日期，可按来源和日期筛选并打开详情。两类来源分别显示采集时间与覆盖；没有事件、未采集、损坏和日期未覆盖是不同状态。
 
-在“市场雷达 → 总览”底部打开“未来事件”。默认显示从查询 UTC 当天开始的 14 个日历日期，可切换“全部 / 美国经济 / 观察股财报”、选择单日，并点击事件查看详情。来源和日期筛选保存在 URL；离开总览会清理事件筛选和详情。
-
-事件通过无参数 `GET /api/market-radar/events` 读取，两类来源分别展示采集时间、实际请求范围与 24 小时新鲜度。日期覆盖仅表示该批请求包含哪些日期，不保证供应商事件完整；“未采集 / 来源损坏 / 日期未覆盖”和“该批次在窗口未返回事件”不同。财报范围是该次已发布 watchlist，不等于当前配置名单逐股检查结果。
-
-经济事件时钟的时区和数值单位未确认；详情原样展示数值，不把 `change_percentage` 自动转换成百分比。财报保留盘前/盘后/未知，EPS 币种缺失不补 USD。`—` 表示来源未提供，不补零或推导 surprise。
-
-“重新读取事件”只重新读取本地已发布批次，不触发上述同步或交易。窗口与新鲜度以页面显示的读取时刻为准，页面跨午夜不会自动换日。
-
-同一页面的筛选、分页和详情切换不主动回到页顶，跨页面导航回顶；浏览器前进/后退恢复已有历史项的位置。筛选会替换当前 URL，不生成逐次可撤销的历史记录；内容变短时，滚动位置会自然限制在页面底部。标签组可用左右键、Home/End 移动焦点，Enter/空格确认切换；宽表可聚焦后使用方向键横向滚动。详情支持 Escape 关闭，并返回原入口；直接打开详情链接或原记录已消失时，回到当前视图标签或“重新读取事件”。
-
-市场雷达各来源独立显示日期与状态。重新读取期间会提示并暂留上次结果；本次读取失败后隐藏受影响的旧值，提供重试入口，不影响其他成功来源。成功读取的陈旧或部分可用批次仍显示原值及原因。板块价格缺失不屏蔽已有盈利详情；个股价格列表的越界空页可点击“回到第一页”，保留当前搜索、板块和排序，不猜测股票总数或总页数。
+来源未提供的时区、单位和币种不会被补齐，缺失值显示为“—”。重新读取仅查询本地批次，不触发采集或交易；页面跨午夜不会自动换日。各来源独立处理读取失败与重试，成功读取的陈旧或部分批次保留原值和说明。详细 [事件口径](docs/market-radar.md#经济事件与十四日事件轴) 与 [页面交互](docs/market-radar.md#页面交互与运行边界) 见模块参考。
 
 ## 导入 PatchTST 因子
 
@@ -305,7 +288,7 @@ docker compose --profile web ps web-api web-ui
 
 浏览器访问 `http://127.0.0.1:8080`。如在 `.env` 修改了 `WEB_PORT`，请使用对应端口。命令应保留末尾两个服务名；profile 不能替代明确目标，不使用无目标的 `up/down`、`--remove-orphans` 或 prune。
 
-本项目当前直接部署新版 Web，不要求恢复完全相同的旧页面，也不为旧容器补建恢复镜像。单纯更新 Web 不需要重跑市场数据采集；涉及真实同步时，应先用 SQLite backup 备份市场库，并备份会改写的 Catalog/公司行动数据。Web 故障只在 Web 范围内排查或重建，不自动回退市场库，不启动交易核心。
+Web 部署与市场数据采集分别执行，单纯更新 Web 不需要重跑采集；涉及真实同步时，应先用 SQLite backup 备份市场库，并备份会改写的 Catalog/公司行动数据。Web 故障只在 Web 范围内排查或重建，不自动回退市场库，不启动交易核心。
 
 操作台包含八个一级页面：操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统。市场雷达总览中的 B50、B200、AD10 和 NHNL 来自已发布的 SPY 当前持仓代理快照，每项都会披露成员日期、价格日期、真实分母和覆盖率；它不是历史 PIT 指数宽度。宏观卡片披露 DFII10 当前修订口径、双轴日期和新鲜度，象限标签及最多 60 个轨迹点均来自同次后端原子快照。页面统一使用 UTC 时间；行情价格是 EOD 参考值而非实时行情，`unobserved` 只表示没有可证明的运行时观测，不能解释为 IBKR 离线。只读 API 文档位于 `http://127.0.0.1:8080/api/docs`。
 

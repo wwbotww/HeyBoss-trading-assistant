@@ -4,7 +4,7 @@
 
 ## 总体架构
 
-NautilusTrader 是交易内核，不是所有外围功能的框架。行情规范化、Actor、MessageBus、账户、订单、风控引擎、回测交易所和 IBKR 执行都使用 NT；配置、纯信号计算、SQLite 审计和 Telegram 位于其外围。旧 Web 展示层已经移除，只读 Python Web API 与独立 Vue 3 前端作为可删除的外围模块接入。
+NautilusTrader 是交易内核，不是所有外围功能的框架。行情规范化、Actor、MessageBus、账户、订单、风控引擎、回测交易所和 IBKR 执行都使用 NT；配置、纯信号计算、SQLite 审计和 Telegram 位于其外围。只读 Python Web API 与独立 Vue 3 前端作为可删除的外围模块接入。
 
 市场雷达是另一个可删除的只读业务域：复用行情管道，但不产生交易信号，不修改交易标的池，也不向风险、审批或执行模块注入规则。
 
@@ -178,7 +178,7 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 
 成员权威来源在 CLI 装配，当前使用 State Street SPY 持仓代理；EODHD Components 只负责行业分类。更换来源不改变下游成员契约、指标、数据库和 API。当前成员不是历史指数成分，来源不足必须保留覆盖率和缺失状态，不能补成历史 PIT 数据。
 
-快照查询不请求供应商、不扫描市场 Catalog、不现场计算金融指标，也不创建表；旧库补表只由显式同步复用 `create_schema()` 完成。市场库与 Catalog 不是跨存储事务：采集失败可能已留下合法 Catalog 增量和 FAILED 审计，不能承诺整站原子刷新。宏观当前修订、盈利、财报和事件均不得伪装为历史可用数据。详细指标、时间和缺失口径见 [市场雷达实施方案](market-radar-implementation-plan.md)。
+快照查询不请求供应商、不扫描市场 Catalog、不现场计算金融指标，也不创建表；旧库补表只由显式同步复用 `create_schema()` 完成。市场库与 Catalog 不是跨存储事务：采集失败可能已留下合法 Catalog 增量和 FAILED 审计，不能承诺整站原子刷新。宏观当前修订、盈利、财报和事件均不得伪装为历史可用数据。详细指标、时间和缺失口径见 [市场雷达参考](market-radar.md)。
 
 ## 策略设计
 
@@ -334,17 +334,17 @@ Web API 使用 SQLite `mode=ro` 打开 live/backtest/market 数据库；数据�
 
 Vue 前端提供操作总览、账户与持仓、策略与因子、决策流、订单与成交、市场雷达、回测中心、数据与系统八个一级页面。所有查询经生成式 OpenAPI 类型和集中式 GET 客户端进入；页面不读取本地文件、浏览器持久化或运行时模拟数据。
 
-账户历史、交易审计和回测报告使用 `offset/limit/has_more` 服务端分页。筛选、页码与选中详情保存在 URL；工作流和订单通过可访问抽屉展示完整审计时间线。ECharts 只按需绘制账户净值、因子横截面和回测权益，并提供文字摘要。回测图只识别报告的 `timestamp_utc/equity` 确定列，Catalog 页面分别展示 INTERNAL signal 与 EXTERNAL execution Bar，不改变或推断数据语义。
+账户历史、交易审计和回测报告使用 `offset/limit/has_more` 服务端分页。筛选、页码与选中详情保存在 URL；工作流和订单通过可访问抽屉展示完整审计时间线。ECharts 按需绘制账户净值、因子横截面、回测权益和市场雷达图表，并提供文字摘要。回测图只识别报告的 `timestamp_utc/equity` 确定列，Catalog 页面分别展示 INTERNAL signal 与 EXTERNAL execution Bar，不改变或推断数据语义。
 
 Compose 的 `web` profile 将 API 与前端作为两个独立服务装配。`web-api` 不暴露宿主机端口、不继承完整 `.env`，只接收查询所需的路径、账户作用域和快照陈旧阈值；Catalog、数据库目录和报告目录均为只读挂载。`web-ui` 仅绑定本机回环地址，由 Nginx 提供静态资源、SPA 深链和同源 `/api` 代理。上游不可用时代理返回统一的 `application/problem+json`，不会把 Nginx HTML 错误混入前端契约。
 
-独立 `market-radar-sync` profile 复用根 Python 镜像，默认命令覆盖为价格 CLI 的 `--help`，不继承交易应用锚点、完整 `.env`、端口、依赖或重启策略。仅传入 `EODHD_API_TOKEN`、`FRED_API_KEY`、`CATALOG_PATH`、`MARKET_RADAR_DATABASE_URL`、`MARKET_RADAR_REPORT_ROOT` 和 `LOG_LEVEL`；API 仍仅接收原八项查询变量，UI 不获得供应商凭据。同步服务的三个挂载目录可写，因此依靠显式独立库路径与业务写入边界，不能声称操作系统已经逐文件隔离交易数据库。共享 Catalog 的写入必须串行。
+独立 `market-radar-sync` profile 复用根 Python 镜像，默认命令覆盖为价格 CLI 的 `--help`，不继承交易应用锚点、完整 `.env`、端口、依赖或重启策略。仅传入 `EODHD_API_TOKEN`、`FRED_API_KEY`、`CATALOG_PATH`、`MARKET_RADAR_DATABASE_URL`、`MARKET_RADAR_REPORT_ROOT` 和 `LOG_LEVEL`；API 仅接收八项查询变量，UI 不获得供应商凭据。同步服务的三个挂载目录可写，因此依靠显式独立库路径与业务写入边界，不能声称操作系统已经逐文件隔离交易数据库。共享 Catalog 的写入必须串行。
 
 市场三视图及个股两维度分别披露各源日期、覆盖和新鲜度；基本面与价格互不遮蔽。未来事件只读已发布经济批次与同批财报，在查询 UTC 日起的 14 日窗口中独立降级。重新读取只有 GET，不采集或下单；同路径保留滚动、跨页回顶，键盘标签、宽表和详情焦点由共用组件实现。
 
-Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。实际停止并删除 `web-ui`、`web-api` 后，IB Gateway、TradingNode 和 Telegram Bot 状态保持不变；交易核心不存在对 Web 的依赖。详细设计与验收记录见 [Web 重构设计](web-rebuild.md)。
+Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。部署时明确指定 Web 服务，不启动交易核心；操作命令见 [README](../README.md#打开只读-web-操作台)。历史删除恢复验收保留在 [Web 重构记录](archive/web-rebuild.md) 与 [市场雷达 R7 记录](archive/market-radar-implementation-plan.md#r7部署隔离与文档)，不据此推断当前容器状态。
 
-R7 已再次用新版正式容器完成 Web 删除恢复与三核心状态不变验收，并通过临时源码副本证明：排除 Web/市场模块后，策略、执行、risk、数据、审计、回测、live 和 Telegram 全部模块仍可离线导入，没有回退加载原包。四源正式数据和真实 URL 的三档宽度、详情、故障/重试验收均已完成；API 停止时隐藏旧值，单源重试只恢复该源，全局刷新再恢复其余模块。用户已取消恢复完全相同旧页面的要求，当前恢复目标为新版 Web，不为旧容器补建镜像，也不自动回退市场数据库。详细证据见 [R7 契约与记录](market-radar-implementation-plan.md#r7部署隔离与文档)。
+界面采用浅色中性背景，品牌强调色与成功、警告、错误状态色分开。公共组件统一加载、空数据和失败展示；图表具有文字摘要，抽屉支持 Escape、焦点恢复和窄屏展示。前端不在浏览器计算金融指标。详细市场交互见 [市场雷达参考](market-radar.md#页面交互与运行边界)。
 
 ## 新策略接入
 
