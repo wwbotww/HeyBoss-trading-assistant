@@ -20,8 +20,9 @@ from nautilus_trader.backtest.config import (
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.common.config import LoggingConfig
 from nautilus_trader.config import ImportableActorConfig, ImportableStrategyConfig
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import BarType, QuoteTick
 from nautilus_trader.model.identifiers import AccountId
+from nautilus_trader.model.objects import Quantity
 
 from trading_assistant.backtest.config import BacktestSettings, load_backtest_settings
 from trading_assistant.backtest.reporting import (
@@ -34,6 +35,7 @@ from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec, load_data_config, load_instruments
 from trading_assistant.data.corporate_actions import corporate_action_path
 from trading_assistant.data.factor import FactorScoreData
+from trading_assistant.data.market_calendar import regular_session
 from trading_assistant.data.service import select_instruments
 from trading_assistant.risk.config import load_risk_limits
 from trading_assistant.storage.repository import TradingRepository
@@ -130,6 +132,8 @@ def _build_run_config(
                 datetime.combine(evaluation_start, time.min, tzinfo=UTC).timestamp() * 1_000_000_000
             ),
             allow_evaluation_predictions=True,
+            catalog_path=str(catalog_path),
+            max_factor_unscorable_fraction=risk.max_factor_unscorable_fraction,
         ),
     )
     execution = ImportableStrategyConfig(
@@ -147,6 +151,9 @@ def _build_run_config(
             "max_instrument_weight": risk.max_instrument_weight,
             "max_daily_new_positions": risk.max_daily_new_positions,
             "max_gross_exposure": risk.max_gross_exposure,
+            "max_factor_unscorable_fraction": risk.max_factor_unscorable_fraction,
+            "max_factor_preserved_price_age_sessions": risk.max_factor_preserved_price_age_sessions,
+            "model_release_id": getattr(strategy.settings, "model_release_id", None),
             "backtest_run_id": run_id,
             "bootstrap_from_catalog": False,
         },
@@ -166,7 +173,9 @@ def _build_run_config(
         config_path="nautilus_trader.backtest.config:LatencyModelConfig",
         config={
             "base_latency_nanos": 0,
-            "insert_latency_nanos": settings.bar_availability_delay_ns,
+            "insert_latency_nanos": (
+                0 if strategy.name == "patchtst_e3" else settings.bar_availability_delay_ns
+            ),
             "update_latency_nanos": 0,
             "cancel_latency_nanos": 0,
         },
@@ -182,6 +191,7 @@ def _build_run_config(
             fill_model=fill_model,
             latency_model=latency_model,
             allow_cash_borrowing=False,
+            bar_execution=strategy.name != "patchtst_e3",
             modules=[
                 ImportableActorConfig(
                     actor_path=("trading_assistant.backtest.dividends:DividendSimulationModule"),
@@ -209,6 +219,18 @@ def _build_run_config(
     )
     data = [bar_data]
     if strategy.name == "patchtst_e3":
+        # 完整日线仍在日末交付;开盘只向 NT 撮合器提供当日 open。
+        opening_catalog = snapshot_path.parent / "opening-quotes"
+        _write_opening_quotes(catalog_path, opening_catalog, execution_bar_types, data_start, end)
+        data.append(
+            BacktestDataConfig(
+                catalog_path=str(opening_catalog),
+                data_cls="nautilus_trader.model.data:QuoteTick",
+                instrument_ids=list(instrument_ids),
+                start_time=data_start.isoformat(),
+                end_time=None if end is None else (end + timedelta(days=1)).isoformat(),
+            )
+        )
         data.append(
             BacktestDataConfig(
                 catalog_path=str(catalog_path),
@@ -231,6 +253,43 @@ def _build_run_config(
         raise_exception=True,
         dispose_on_completion=False,
     )
+
+
+def _write_opening_quotes(
+    source: Path,
+    destination: Path,
+    execution_bar_types: dict[str, str],
+    start: date,
+    end: date | None,
+) -> None:
+    """由拆股调整日线生成开盘撮合输入, 不提前暴露当日收盘或成交量。"""
+    catalog = CatalogRepository(source)
+    output = CatalogRepository(destination)
+    output.write_instruments(catalog.catalog.instruments(instrument_ids=list(execution_bar_types)))
+    ticks: list[QuoteTick] = []
+    for bar_type in execution_bar_types.values():
+        for bar in catalog.read_bars(BarType.from_str(bar_type)):
+            day = datetime.fromtimestamp(bar.ts_event / 1e9, tz=UTC).date()
+            if day < start or (end is not None and day > end):
+                continue
+            session = regular_session(day)
+            if session is None:
+                raise ValueError(f"Execution bar is on a non-session date: {day}")
+            timestamp = int(session.open_utc.timestamp() * 1e9)
+            ticks.append(
+                QuoteTick(
+                    instrument_id=bar.bar_type.instrument_id,
+                    bid_price=bar.open,
+                    ask_price=bar.open,
+                    # 固定充足流动性是日线回测假设, 不是伪造的历史盘口。
+                    bid_size=Quantity.from_int(1_000_000),
+                    ask_size=Quantity.from_int(1_000_000),
+                    ts_event=timestamp,
+                    ts_init=timestamp,
+                )
+            )
+    if ticks:
+        output.catalog.write_data(sorted(ticks, key=lambda tick: tick.ts_init))
 
 
 def run_backtest(
@@ -344,7 +403,14 @@ def run_backtest(
                 "end": None if effective_end is None else effective_end.isoformat(),
                 "commission_per_share_usd": float(settings.commission_per_share_usd),
                 "slippage_ticks": settings.slippage_ticks,
-                "bar_availability_delay_ns": settings.bar_availability_delay_ns,
+                "bar_availability_delay_ns": (
+                    0 if strategy.name == "patchtst_e3" else settings.bar_availability_delay_ns
+                ),
+                "execution_price_model": (
+                    "daily_open_quote_with_fixed_liquidity"
+                    if strategy.name == "patchtst_e3"
+                    else "next_bar"
+                ),
                 "starting_balance_usd": settings.starting_balance_usd,
                 "nt_stats_returns": result.stats_returns,
                 "nt_stats_pnls": result.stats_pnls,

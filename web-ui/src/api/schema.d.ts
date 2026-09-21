@@ -663,19 +663,29 @@ export interface components {
         AccountHistoryPointResponse: {
             /** Account Id */
             account_id: string;
+            /** Account Updated At Utc */
+            account_updated_at_utc?: string | null;
+            /** Available Funds */
+            available_funds: number | null;
+            /** Broker Connected */
+            broker_connected?: boolean | null;
+            /** Broker Stale After Seconds */
+            broker_stale_after_seconds?: number | null;
             /** Currency */
             currency: string;
-            /** Free Cash */
-            free_cash: number;
-            /** Locked Cash */
-            locked_cash: number;
             /** Net Liquidation */
             net_liquidation: number;
+            /** Not Ready Reason */
+            not_ready_reason?: string | null;
+            /** Reconciliation Complete */
+            reconciliation_complete?: boolean | null;
             /**
              * Timestamp Utc
              * Format: date-time
              */
             timestamp_utc: string;
+            /** Total Cash Value */
+            total_cash_value: number | null;
         };
         /** BacktestDetailResponse */
         BacktestDetailResponse: {
@@ -1004,6 +1014,34 @@ export interface components {
              */
             state: "covered" | "partial" | "uncovered";
         };
+        /** FactorDecisionResponse */
+        FactorDecisionResponse: {
+            /** Asof Date */
+            asof_date: string;
+            /** Candidate Count */
+            candidate_count: number | null;
+            /** Delivery Id */
+            delivery_id: string | null;
+            /** Eligible Count */
+            eligible_count: number | null;
+            /** Id */
+            id: number;
+            /**
+             * Last Seen
+             * Format: date-time
+             */
+            last_seen: string;
+            /** Model Release Id */
+            model_release_id: string | null;
+            /** Preserve Positions */
+            preserve_positions: string[];
+            /** Reason */
+            reason: string;
+            /** Recovered At */
+            recovered_at: string | null;
+            /** Status */
+            status: string;
+        };
         /** FactorScoreResponse */
         FactorScoreResponse: {
             /** Canonical Id */
@@ -1013,7 +1051,7 @@ export interface components {
             /** Rank */
             rank: number | null;
             /** Score */
-            score: number;
+            score: number | null;
             /** Security Id */
             security_id: string;
             /** Selected */
@@ -1511,18 +1549,24 @@ export interface components {
         PortfolioResponse: {
             /** Account Id */
             account_id: string | null;
+            /** Account Updated At Utc */
+            account_updated_at_utc?: string | null;
             /** Age Seconds */
             age_seconds: number | null;
+            /** Available Funds */
+            available_funds: number | null;
+            /** Broker Connected */
+            broker_connected?: boolean | null;
+            /** Broker Stale After Seconds */
+            broker_stale_after_seconds?: number | null;
             /** Currency */
             currency: string | null;
-            /** Free Cash */
-            free_cash: number | null;
             /** Is Stale */
             is_stale: boolean | null;
-            /** Locked Cash */
-            locked_cash: number | null;
             /** Net Liquidation */
             net_liquidation: number | null;
+            /** Not Ready Reason */
+            not_ready_reason?: string | null;
             /**
              * Observed At Utc
              * Format: date-time
@@ -1530,6 +1574,8 @@ export interface components {
             observed_at_utc: string;
             /** Positions */
             positions: components["schemas"]["PositionResponse"][];
+            /** Reconciliation Complete */
+            reconciliation_complete?: boolean | null;
             /** Snapshot At Utc */
             snapshot_at_utc: string | null;
             /**
@@ -1537,6 +1583,8 @@ export interface components {
              * @enum {string}
              */
             source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+            /** Total Cash Value */
+            total_cash_value: number | null;
         };
         /** PositionResponse */
         PositionResponse: {
@@ -1883,14 +1931,24 @@ export interface components {
         WorkflowDetailResponse: {
             /** Decisions */
             decisions: components["schemas"]["DecisionResponse"][];
+            /** Delivery Id */
+            delivery_id?: string | null;
+            /** Factor Asof Date */
+            factor_asof_date?: string | null;
             /** Fills */
             fills: components["schemas"]["FillResponse"][];
+            /** Model Release Id */
+            model_release_id?: string | null;
+            /** Not Before Utc */
+            not_before_utc?: string | null;
             /** Orders */
             orders: components["schemas"]["OrderEventResponse"][];
             /** Planned Orders */
             planned_orders: {
                 [key: string]: string | number | boolean | null;
             }[];
+            /** Preserve Positions */
+            preserve_positions?: string[];
             /** Target Weights */
             target_weights: [
                 string,
@@ -1902,6 +1960,8 @@ export interface components {
         };
         /** WorkflowPageResponse */
         WorkflowPageResponse: {
+            /** Factor Decisions */
+            factor_decisions?: components["schemas"]["FactorDecisionResponse"][];
             /** Has More */
             has_more: boolean;
             /** Items */

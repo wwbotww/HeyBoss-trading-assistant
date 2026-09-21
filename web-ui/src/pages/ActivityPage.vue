@@ -150,6 +150,36 @@ async function retrySignals(): Promise<void> {
       <div class="read-only-badge"><RadioTower :size="15" aria-hidden="true" />只读审计视图</div>
     </div>
 
+    <section v-if="workflows.data.value?.factor_decisions?.length" class="surface records-card">
+      <div class="records-toolbar"><h2>因子检查与持仓保护</h2></div>
+      <DataTable caption="因子检查记录" min-width="960px">
+        <thead>
+          <tr>
+            <th>因子日期</th>
+            <th>状态</th>
+            <th>原因</th>
+            <th>保护标的</th>
+            <th>有效 / 候选</th>
+            <th>模型发布</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="decision in workflows.data.value.factor_decisions" :key="decision.id">
+            <td>{{ decision.asof_date }}</td>
+            <td>
+              {{
+                decision.recovered_at ? '已恢复' : decision.status === 'SKIP' ? '已跳过' : '可调仓'
+              }}
+            </td>
+            <td>{{ decision.reason }}</td>
+            <td>{{ decision.preserve_positions.join(', ') || '无' }}</td>
+            <td>{{ decision.eligible_count ?? '—' }} / {{ decision.candidate_count ?? '—' }}</td>
+            <td class="mono">{{ decision.model_release_id || '—' }}</td>
+          </tr>
+        </tbody>
+      </DataTable>
+    </section>
+
     <section class="surface records-card">
       <div class="records-toolbar">
         <div>
@@ -408,6 +438,28 @@ async function retrySignals(): Promise<void> {
               <dt>计划订单</dt>
               <dd>{{ workflowDetail.data.value.workflow.planned_order_count }}</dd>
             </div>
+            <template v-if="workflowDetail.data.value.factor_asof_date">
+              <div>
+                <dt>因子日期</dt>
+                <dd>{{ workflowDetail.data.value.factor_asof_date }}</dd>
+              </div>
+              <div>
+                <dt>最早执行</dt>
+                <dd>
+                  {{ formatDateTime(workflowDetail.data.value.not_before_utc ?? null) }}
+                </dd>
+              </div>
+              <div>
+                <dt>保护标的</dt>
+                <dd>
+                  {{ workflowDetail.data.value.preserve_positions?.join(', ') || '无' }}
+                </dd>
+              </div>
+              <div>
+                <dt>模型发布</dt>
+                <dd class="mono">{{ workflowDetail.data.value.model_release_id }}</dd>
+              </div>
+            </template>
           </dl>
         </section>
 

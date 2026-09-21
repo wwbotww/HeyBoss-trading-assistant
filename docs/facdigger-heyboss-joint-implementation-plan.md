@@ -1,6 +1,6 @@
 FacDigger 与 HeyBoss 联合实施方案
 更新日期：2026-09-16
-状态：待确认。本文仅提交方案，尚未修改实现、安装依赖、迁移数据库或运行 826 联调。
+状态：三个里程碑已获用户确认并实施；下文保留获批设计，实际变更与验收见第八节。未升级真实运行库，也未启动 paper 下单。
 
 一、范围与核对基线
 
@@ -54,7 +54,7 @@ FacDigger 现有 regular_session_frame 已有多个真实调用方，迁移后�
 
 三、共同事实之上的业务规则
 
-定义 D 为因子对应的交易日，N 为 D 的下一交易日。以下规则纳入本次待确认方案：
+定义 D 为因子对应的交易日，N 为 D 的下一交易日。以下规则已纳入本次获批方案：
 
 1. FacDigger 保留现有生产策略：D 日纽约时间 19:00 首次尝试，每 30 分钟重新获取并校验数据，到 N 开盘停止发布 D。提前收盘日也仍在 19:00 开始。calendar 模块只提供交易时段事实，production/calendar.py 继续负责生产窗口。
 
@@ -215,7 +215,103 @@ FacDigger 文件清单：
 
 同一依赖版本、相同接口、共同固定样例、跨仓整段日期比较、交付标识验证和实际 NT 回放共同组成一致性验收。升级日历来源时仍沿用这些检查，不新增另一套机制。
 
-本次待确认的是三个里程碑的文件范围、接口、验收方式，以及文中明确提出的执行期限、接纳截止、20% 缺分上限、一个交易日估值容忍和 1800 秒检查间隔。日历来源方向已按用户选择确定，不再重新选型。
+本次已确认三个里程碑的文件范围、接口、验收方式，以及文中明确提出的执行期限、接纳截止、20% 缺分上限、一个交易日估值容忍和 1800 秒检查间隔。日历来源方向已按用户选择确定，不再重新选型。
 
-按用户“待我确认后再编码”的要求，以及 /Users/young/Documents/HeyBoss/AGENTS.md 中“每个里程碑编码前先向用户提交文件清单、关键接口和验收方式，获得确认后再修改代码”的约束，收到确认后才开始上述实现。可以一次确认这三个已列明的里程碑；之后在获批范围内顺序实施，不重复索要同一授权。发现需要扩大文件范围、改变核心政策或增加其他直接依赖时，先补充具体方案。
+按用户“待我确认后再编码”的要求，以及 /Users/young/Documents/HeyBoss/AGENTS.md 中“每个里程碑编码前先向用户提交文件清单、关键接口和验收方式，获得确认后再修改代码”的约束，用户已一次确认三个里程碑，随后在获批范围内顺序实施，不重复索要同一授权。发现需要扩大文件范围、改变核心政策或增加其他直接依赖时，先补充具体方案。
 
+
+
+八、2026-09-16 实施与验收记录
+
+实施从 HeyBoss b68340e 开始；它相对原计划基线仅多了文档整理。FacDigger 从 dc6f245 开始，
+日历文件路径迁移先独立提交为 1eb845f，并通过原有相关测试；后续功能修改保留在这两侧工作区，
+没有推送远端。旧 /Users/young/Documents/FacDiggerNN 只读提供 826 原始数据，未改其模型、
+训练快照、holdout 或运行记录。
+
+三个里程碑均已实施：统一日历与严格发布来源；HeyBoss 完整候选/持仓保护、执行窗口、验收审计、
+审批恢复与专用迁移；只读展示、Telegram 假客户端回归和真实 826 历史联调。
+因子缺分不再被解释为清仓。日线 NT 回放以 N 的 open 生成撮合 QuoteTick，完整 Bar 不参与因子
+撮合，也不提前暴露 N 的 high/low/close/volume。报告显式记录这一价格模型及订单附加延迟为 0。
+真实回放发现并修复了纳秒转数据库时间向上舍入、计划买入被重复计入每日额度，以及同步卖单
+回调可能提前启动补买的问题；回归包含多个卖单同步成交、SKIP、撤单拒绝与持仓变化。
+Actor 在缺批次时仍会于开盘/失效时刻主动检查；提醒按 D 只排期一次。稀疏行情回测验证了
+NT 已排队提醒不会被周期检查重复注册，沿用原有 60 秒测试超时与开盘价格断言。
+
+为覆盖已批准行为，实际还同步调整了现有 Web /workflows 路由、配置字段断言、README 和技术
+参考；FacDigger 的两个集成测试改用已有 factor_fixtures.sessions，让历史周末/节假日样例符合
+新发布校验。没有新增生产端点、依赖选型、格式版本或插件机制。
+
+共同一致性：2000-01-01 至 2027-12-31 的 10,227 个自然日、7,041 个交易日，完整集合、逐日
+UTC 开收盘、严格前后日均一致。固定 JSON 两侧字节相同。exchange_calendars 均为 4.13.2，
+pandas 均为 2.3.3；FacDigger 使用 numpy 2.2.6 / tzdata 2026.4，HeyBoss 使用 numpy 2.5.1 /
+tzdata 2026.3，不同环境下实测结果相同。两仓 uv lock --check 通过。
+
+826 输入与输出：
+
+- 原始完整运行：finance_patch_transformer_pretrained-20260902T045825Z-72c1db3f。
+- 冻结发布：fbd630164624c71fe67c5b7c6637f5be08ef3179bdf93f9c3aa48d208c44d7ef。
+- 原始 FactorBatch：02172c408d11f2032da4f08567b3d54659bd5ee2199fad9c0dad62b26ef5a87a。
+- 来源 evaluation_predictions；2023-02-01 至 2024-12-02，共 462 天、10 个候选、4,620 行，
+  全部有效，原数据没有缺分行。缺分/全 false/迟到等故障场景由独立确定性测试覆盖。
+- 用 FacDigger 自身 release create、factor-batch from-predictions 与显式 delivery profile 发布，
+  HeyBoss 只消费生成的两文件。来源 run 与发布工作树均含未提交改动，发布显式使用 allow-dirty；
+  没有把它们标为 clean，也不声称仅凭 Git commit 能重建原始运行。
+- 快照 dataset_id b7ca76a74dbe396c8e157eb7ecc826460931ed66e917d939ab56746cb70d2696 的
+  features 日期集合（2010-01-04—2025-12-31，4,024 日）、market_features（3,773 日）与
+  inference_index（3,262 日）全部与新日历吻合；sample_index 的缺口由原 split purge/embargo
+  产生，没有非交易日。原始 checkpoint、manifest、scaler 与 predictions 哈希通过发布验证。
+- XOM 在隔离配置中明确绑定旧 ISIN US30231G1022，仅限 2023-02-01—2024-12-02；依据为
+  原始 predictions 与 SEC 历史披露，未套用当前配置中的 US30233Q1085。
+  [SEC 历史 CUSIP](https://www.sec.gov/Archives/edgar/data/34088/000009375125000015/xslSCHEDULE_13G_X01/primary_doc.xml)、
+  [SEC 历史 ISIN](https://www.sec.gov/Archives/edgar/data/1407737/000090266424005319/xslNPX-INFO-TABLE_X01/proxytable.xml)。
+- 行情使用 FacDigger 现有 EODHD 历史缓存，由 HeyBoss 原有供应商解析、公司行动和质量管道
+  转换为隔离 Catalog：2023-01-30 至 2024-12-03，9,300 根双价格日线，质量错误为 0。
+  本次可完成验收所需的价格均来自已有缓存，无需外部行情下载。
+- historical 导入成功写入 4,620 行；再次导入 rows_imported=0、already_imported=true，成功
+  验收时间不变。没有将历史接纳记录用于 paper。
+- 最终 NT run：20260916T065922Z-d1035895；462 个工作流、970 笔成交；每笔成交都在自身
+  [not_before, expires_at) 内，且全部等于对应 N 开盘价加/减已配置滑点，时间/价格偏差数均为 0。
+  初始边界有 1 条 2023-01-31 缺批次 SKIP，未回退旧 D；没有执行错误 SKIP。
+
+可复查本地产物统一放在 /Users/young/Documents/HeyBoss/reports/facdigger-826-validation/：
+acceptance.json、delivery.yaml、project/config、import-audit.db、backtest-accepted.db、catalog、
+price-quality，以及 backtests/20260916T065922Z-d1035895/。cached-price-inputs.json 与
+import_cached_prices.py 记录仅本次验收使用的本地缓存清单和原有解析管道入口。该目录是双方
+验收产物归档，HeyBoss 交易代码不读取其中的发布模型或 checkpoint。全部产物由 Git 忽略。
+
+实际主要命令（以下路径均从上述验收根目录解析）：
+
+- FacDigger release create --run <原始运行目录> --dataset <原始训练快照目录>
+  --output-root <验收目录>/releases --allow-dirty。
+- FacDigger factor-batch from-predictions --predictions <原始运行>/predictions.parquet
+  --release <验收目录>/releases/<release_id> --delivery-config <验收目录>/delivery.yaml
+  --output-root <验收目录>/factor-batches。
+- HeyBoss scripts/import_factor_bundle.py <验收目录>/factor-batches/<delivery_id> --mode historical
+  --database-url sqlite:////Users/young/Documents/HeyBoss/reports/facdigger-826-validation/import-audit.db
+  --catalog-path <验收目录>/catalog --instruments-config <验收目录>/project/config/instruments.yaml。
+- HeyBoss scripts/run_backtest.py --project-root <验收目录>/project --catalog-path <验收目录>/catalog
+  --database-url sqlite:////Users/young/Documents/HeyBoss/reports/facdigger-826-validation/backtest-accepted.db。
+
+离线工程验收不等于 paper 持续运行或收益有效性认证。826 使用的是原 validation 预测交付，
+不是 signal_inference；当前真实策略配置 model_release_id 保持 null，真实数据库未迁移，
+没有启动 IBKR 下单或 Telegram 对外发送。paper 后续需要选定真实生产 release、按日期匹配的
+signal_inference、开盘前接纳、行情准备和真实运行库显式迁移。
+
+最终质量结果：
+
+- HeyBoss：Ruff、格式检查、mypy strict（99 个源文件）、uv.lock 检查均通过；完整 pytest
+  996 项通过，总覆盖率 91.05%，因子纯函数覆盖率 95.92%，迁移模块覆盖率 100%。
+- FacDigger：Ruff、uv.lock 检查通过；Python 3.10、3.11、3.12 的完整 pytest 均为 277 项通过。
+  3.10/3.11 使用 /tmp 独立锁定环境；不改变原工作树解释器。两次仅有 pytest 缓存目录写权限
+  提醒，测试未失败。
+- Vue：OpenAPI 类型已重新生成，类型检查、Prettier、ESLint、生产构建通过；127 项测试通过。
+- 运行日志中的上游 NumPy/NT/FastAPI 弃用提醒保留，未通过禁用告警或放宽断言通过验收。
+- 两侧 git diff --check 通过；真实库、Catalog、账户、模型文件、报告与本地缓存没有加入版本控制。
+
+九、2026-09-19 正式本地回测与清理
+
+已按用户要求清理旧测试回测，并使用原始 826 交付重新运行 NT backtest。新运行
+20260919T093538Z-c5d70233 直接写入当前网页实际使用的 500e 工作树 data/backtest.db 与
+reports/backtests，网页已显示 COMPLETED。原始数据与其他业务数据保留；旧试跑结果备份后
+移出活动目录。因此，第八节引用的旧 backtest 数据库和报告现在位于恢复归档中。
+路径、清理记录、结果、网页验证和复现命令见 [826 正式本地回测运行记录](local-backtest-826.md)。

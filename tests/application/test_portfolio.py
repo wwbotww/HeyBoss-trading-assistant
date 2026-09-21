@@ -15,6 +15,49 @@ from trading_assistant.data.config import InstrumentSpec
 from trading_assistant.storage.repository import PositionSnapshotInput, TradingRepository
 
 
+@pytest.mark.parametrize(
+    ("updated", "connected", "reconciled", "expected"),
+    [
+        (datetime(2026, 8, 14, 23, 56, tzinfo=UTC), True, True, "stale"),
+        (None, True, True, "unavailable"),
+        (datetime(2026, 8, 15, 0, 1, tzinfo=UTC), False, True, "disconnected"),
+        (datetime(2026, 8, 15, 0, 1, tzinfo=UTC), True, False, "reconciliation"),
+        (datetime(2026, 8, 15, 0, 1, tzinfo=UTC), True, True, None),
+    ],
+)
+def test_recent_sampling_does_not_hide_old_or_unknown_broker_facts(
+    tmp_path: Path,
+    updated: datetime | None,
+    connected: bool,
+    reconciled: bool,
+    expected: str | None,
+) -> None:
+    repository = TradingRepository(f"sqlite:///{tmp_path / 'live.db'}")
+    repository.create_schema()
+    repository.record_portfolio_snapshot(
+        timestamp_ns=int(datetime(2026, 8, 15, 0, 2, tzinfo=UTC).timestamp() * 1e9),
+        account_id="IB-DU12345678",
+        currency="USD",
+        net_liquidation=5000,
+        total_cash_value=2000,
+        available_funds=1500,
+        positions=(),
+        account_updated_at_utc=updated,
+        broker_connected=connected,
+        reconciliation_complete=reconciled,
+        broker_stale_after_seconds=300,
+    )
+    view = _service(repository, tmp_path).latest()
+    assert view.age_seconds == 0
+    assert view.net_liquidation == 5000
+    assert view.total_cash_value == 2000
+    assert view.available_funds == 1500
+    assert view.is_stale is (expected is not None)
+    if expected is not None:
+        assert expected in str(view.not_ready_reason)
+    repository.close()
+
+
 def _spec() -> InstrumentSpec:
     return InstrumentSpec(
         symbol="AAPL",
@@ -58,8 +101,8 @@ def test_portfolio_masks_account_maps_instrument_and_adds_eod_reference(
         account_id="IB-DU12345678",
         currency="USD",
         net_liquidation=1_000.0,
-        free_cash=800.0,
-        locked_cash=200.0,
+        available_funds=800.0,
+        total_cash_value=200.0,
         positions=(
             PositionSnapshotInput(
                 instrument_id="AAPL.NASDAQ",
@@ -75,8 +118,8 @@ def test_portfolio_masks_account_maps_instrument_and_adds_eod_reference(
         account_id="IB-DU12345678",
         currency="USD",
         net_liquidation=900.0,
-        free_cash=900.0,
-        locked_cash=0.0,
+        available_funds=900.0,
+        total_cash_value=0.0,
         positions=(),
     )
     writer.close()

@@ -34,3 +34,25 @@ describe('策略与因子', () => {
     expect(wrapper.find('[role="img"]').exists()).toBe(false)
   })
 })
+
+describe('缺分展示', () => {
+  it('不把不可评分显示为零分或卖出目标', async () => {
+    installApiMock({
+      '/api/factors/latest': {
+        ...factorFixture,
+        scores: factorFixture.scores.map((score) =>
+          score.symbol === 'NVDA'
+            ? { ...score, score: null, eligible: false, selected: false, rank: null }
+            : score,
+        ),
+      },
+    })
+    const { wrapper } = await mountPage(StrategyPage, '/strategy')
+    await flushPromises()
+    const row = wrapper.findAll('tbody tr').find((item) => item.text().includes('NVDA'))
+    expect(row?.text()).toContain('不可评分')
+    expect(row?.text()).toContain('保持持仓 / 不新开仓')
+    expect(row?.text()).not.toContain('0.000000')
+    expect(wrapper.text()).toContain('权重仅为研究预览')
+  })
+})

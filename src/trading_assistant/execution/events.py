@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+from typing import Any
+
 from nautilus_trader.core.message import Event
 from nautilus_trader.core.uuid import UUID4
 
 TRADE_SIGNAL_TOPIC = "events.trade_signal"
+
+
+@dataclass(frozen=True)
+class FactorContext:
+    """随审批和恢复保留的因子依据。"""
+
+    asof_date: str
+    delivery_id: str
+    model_release_id: str
+    source_kind: str
+    calendar_version: str
+    candidate_ids: tuple[str, ...]
+    eligible_count: int
+    catalog_path: str
+
+    def to_payload(self) -> dict[str, Any]:
+        """转换为数据库可序列化的普通数据。"""
+        return asdict(self)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> FactorContext:
+        """恢复必填上下文; 不替旧记录补造来源。"""
+        return cls(
+            asof_date=str(payload["asof_date"]),
+            delivery_id=str(payload["delivery_id"]),
+            model_release_id=str(payload["model_release_id"]),
+            source_kind=str(payload["source_kind"]),
+            calendar_version=str(payload["calendar_version"]),
+            candidate_ids=tuple(str(value) for value in payload["candidate_ids"]),
+            eligible_count=int(payload["eligible_count"]),
+            catalog_path=str(payload["catalog_path"]),
+        )
 
 
 class TradeSignalEvent(Event):  # type: ignore[misc]
@@ -22,12 +57,18 @@ class TradeSignalEvent(Event):  # type: ignore[misc]
         ts_event: int,
         ts_init: int,
         event_id: UUID4 | None = None,
+        preserve_positions: tuple[str, ...] = (),
+        not_before_ns: int = 0,
+        factor_context: FactorContext | None = None,
     ) -> None:
         self._id = event_id or UUID4()
         self._strategy_name = strategy_name
         self._target_weights = target_weights
         self._rebalance_key = rebalance_key
         self._reason = reason
+        self._preserve_positions = preserve_positions
+        self._not_before_ns = not_before_ns
+        self._factor_context = factor_context
         self._expires_at_ns = expires_at_ns
         self._ts_event = ts_event
         self._ts_init = ts_init
@@ -38,6 +79,21 @@ class TradeSignalEvent(Event):  # type: ignore[misc]
         if getattr(self, "_locked", False):
             raise AttributeError("TradeSignalEvent is immutable")
         super().__setattr__(name, value)
+
+    @property
+    def preserve_positions(self) -> tuple[str, ...]:
+        """返回保持执行时数量的标的。"""
+        return self._preserve_positions
+
+    @property
+    def not_before_ns(self) -> int:
+        """返回最早可执行 UTC 纳秒。"""
+        return self._not_before_ns
+
+    @property
+    def factor_context(self) -> FactorContext | None:
+        """返回因子特有的交付及时间依据。"""
+        return self._factor_context
 
     @property
     def id(self) -> UUID4:

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Path, Query
 from trading_assistant.web_api.dependencies import ApplicationServices, get_services
 from trading_assistant.web_api.schemas import (
     ERROR_RESPONSES,
+    FactorDecisionResponse,
     FillPageResponse,
     OrderDetailResponse,
     OrderPageResponse,
@@ -47,9 +48,14 @@ def list_workflows(
     status: Annotated[str | None, Query(max_length=32)] = None,
 ) -> WorkflowPageResponse:
     """分页筛选信号审批与执行工作流。"""
-    return WorkflowPageResponse.model_validate(
+    response = WorkflowPageResponse.model_validate(
         services.trading.list_workflows(offset=offset, limit=limit, status=status)
     )
+    response.factor_decisions = [
+        FactorDecisionResponse.model_validate(row)
+        for row in services.trading.list_factor_decisions()
+    ]
+    return response
 
 
 @router.get(

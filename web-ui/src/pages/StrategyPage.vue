@@ -30,13 +30,11 @@ const eligibleCount = computed(
 )
 const factorPoints = computed(
   () =>
-    factor.data.value?.scores
-      .filter((score) => score.eligible)
-      .map((score) => ({
-        label: score.symbol,
-        value: score.score,
-        emphasis: score.selected,
-      })) ?? [],
+    factor.data.value?.scores.flatMap((score) =>
+      score.eligible && score.score !== null
+        ? [{ label: score.symbol, value: score.score, emphasis: score.selected }]
+        : [],
+    ) ?? [],
 )
 
 async function retryStrategy(): Promise<void> {
@@ -162,9 +160,10 @@ async function retryFactor(): Promise<void> {
           <p class="eyebrow">Latest complete batch</p>
           <h2>PatchTST 因子横截面</h2>
           <p v-if="factor.data.value">
-            因子日期 {{ factor.data.value.asof_date || '—' }} · 可用于交易链路
+            因子日期 {{ factor.data.value.asof_date || '—' }} · 研究数据可用时间
             {{ formatDateTime(factor.data.value.available_at_utc) }}
           </p>
+          <p>权重仅为研究预览；实际执行需重新检查持仓保护、预算与审批。</p>
         </div>
         <StatusPill
           v-if="factor.data.value"
@@ -246,7 +245,7 @@ async function retryFactor(): Promise<void> {
               <th class="align-right">得分</th>
               <th>可选</th>
               <th>目标组合</th>
-              <th class="align-right">目标权重</th>
+              <th class="align-right">预览权重</th>
               <th>Security ID</th>
             </tr>
           </thead>
@@ -262,13 +261,15 @@ async function retryFactor(): Promise<void> {
               <td>
                 <StatusPill
                   :status="score.eligible ? 'ok' : 'unobserved'"
-                  :label="score.eligible ? '可选' : '排除'"
+                  :label="score.eligible ? '可选' : '不可评分'"
                 />
               </td>
               <td>
                 <StatusPill
                   :status="score.selected ? 'approved' : 'unobserved'"
-                  :label="score.selected ? '已选中' : '未选中'"
+                  :label="
+                    !score.eligible ? '保持持仓 / 不新开仓' : score.selected ? '已选中' : '未选中'
+                  "
                 />
               </td>
               <td class="align-right tabular">{{ formatPercent(score.target_weight) }}</td>
@@ -365,6 +366,7 @@ async function retryFactor(): Promise<void> {
   display: grid;
   gap: 0;
   margin: 0;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .key-value-list div {
@@ -375,6 +377,12 @@ async function retryFactor(): Promise<void> {
 .key-value-list dt {
   color: var(--color-text-soft);
   font-size: 0.72rem;
+}
+
+.key-value-list dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .config-card :deep(.data-state) {

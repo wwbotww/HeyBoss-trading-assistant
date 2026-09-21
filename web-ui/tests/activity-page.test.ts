@@ -63,3 +63,37 @@ describe('决策流', () => {
     expect(router.currentRoute.value.query.instrument).toBeUndefined()
   })
 })
+
+describe('缺批次检查记录', () => {
+  it('没有交易工作流时仍显示跳过及恢复原因', async () => {
+    installApiMock({
+      '/api/workflows': {
+        items: [],
+        offset: 0,
+        limit: 50,
+        has_more: false,
+        factor_decisions: [
+          {
+            id: 1,
+            asof_date: '2025-01-02',
+            status: 'SKIP',
+            reason: 'missing_expected_factor_batch',
+            preserve_positions: ['NVDA.US'],
+            eligible_count: null,
+            candidate_count: null,
+            model_release_id: null,
+            delivery_id: null,
+            last_seen: '2025-01-03T12:00:00Z',
+            recovered_at: null,
+          },
+        ],
+      },
+    })
+    const { wrapper } = await mountPage(ActivityPage, '/activity')
+    await flushPromises()
+    expect(wrapper.text()).toContain('没有匹配的工作流')
+    expect(wrapper.text()).toContain('已跳过')
+    expect(wrapper.text()).toContain('missing_expected_factor_batch')
+    expect(wrapper.text()).toContain('NVDA.US')
+  })
+})

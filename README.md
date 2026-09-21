@@ -20,7 +20,7 @@
 - 同步并展示当前市场、watchlist 和板块盈利修正，以及观察股的财务比率、估值背景、行业适用性与独立新鲜度。
 - 一次性同步美国经济事件，复用已发布的观察股财报事件，在只读 Web 中展示含当天的 14 日事件轴、来源新鲜度和日期覆盖。
 
-当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 E3 FactorBatch。
+当前默认活动策略是 PatchTST E3，配置的是 10 只高流动性大市值普通股联调池。项目只内置一份显式标记为非交易用的 FacDigger 单日模拟批次，用于契约和链路回归；正式运行仍必须由 FacDigger 发布合规的真实 ModelRelease 对应 FactorBatch。
 
 当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、市场新闻或大语言模型分析。
 
@@ -32,7 +32,9 @@ Web 提供八个一级页面，浏览器只呈现后端指标。交易、回测�
 - [技术参考](docs/technical-reference.md)：模块职责、交易链路、数据语义与 Web 边界。
 - [市场雷达参考](docs/market-radar.md)：当前指标、数据来源、接口、缺失处理与新鲜度。
 - [FacDigger 因子接入与改造说明](docs/factor-integration.md)
-- [FacDigger / HeyBoss 联合实施方案（待确认）](docs/facdigger-heyboss-joint-implementation-plan.md)
+- [FacDigger / HeyBoss 联合实施方案](docs/facdigger-heyboss-joint-implementation-plan.md)：日历统一与缺分持仓保护的实施记录。
+- [826 release 接入 IBKR paper 每日自动交易方案](docs/826-ibkr-paper-daily-implementation-plan.md)：免 Bot 自动执行、每日生产接入、账户与订单恢复修复、文件清单与验收标准，实施状态见 [验收记录](docs/826-ibkr-paper-daily-acceptance.md)。
+- [FacDigger 生产交接缺口记录](docs/facdigger-826-paper-production-gaps.md)：上游生产准备、时效及验收缺口，留交 FacDigger 项目处理。
 - [历史方案与验收归档](docs/archive/README.md)：已完成的 Web 重构、市场雷达实施与阶段证据。
 - [回测研究 notebook](notebooks/README.md)
 
@@ -169,7 +171,7 @@ docker compose run --rm --no-deps market-radar-sync
 
 第二条命令默认只显示帮助，不采集、不连接 IBKR，也不会启动其他服务。以下六类任务须由操作者明确选择；同步容器没有常驻调度和自动重启。若使用宿主机 Python，可将命令前缀 `docker compose run --rm --no-deps market-radar-sync python` 替换为 `uv run --frozen --env-file .env python`。
 
-容器仅接收 EODHD/FRED 凭据、Catalog/市场库/质量报告路径及日志级别，不接收券商和 Telegram 凭据。`catalog/`、`data/`、`reports/` 按目录可写，**并非逐数据库文件的沙箱**；务必使市场库与 live/backtest 库路径不同。所有共享 Catalog 写入须串行，包括市场价格、宽度、宏观、历史数据同步及 TradingNode 启动预热。同步时不要同时启动其他写入者。
+容器仅接收 EODHD/FRED 凭据、Catalog/市场库/质量报告路径及日志级别，不接收券商和 Telegram 凭据。`catalog/`、`data/`、`reports/` 按目录可写，**并非逐数据库文件的沙箱**；务必使市场库与 live/backtest 库路径不同。所有共享 Catalog 写入须串行，包括市场价格、宽度、宏观及历史数据同步。它们共用 Catalog 文件锁；正式 paper 运行期间由每日数据服务独占生产写入，维护前先停该服务。
 
 固定 25 只价格监测池首次同步和日常更新：
 
@@ -237,7 +239,7 @@ docker compose run --rm --no-deps market-radar-sync python scripts/sync_market_e
 相同日期的 INTERNAL 信号 Bar 和 EXTERNAL 执行 Bar 必须先存在于 Catalog，然后导入批次：
 
 ```bash
-uv run --frozen --env-file .env python scripts/import_factor_bundle.py \
+uv run --frozen --env-file .env python scripts/import_factor_bundle.py --mode historical \
   /path/to/<delivery_id>
 ```
 
@@ -301,30 +303,32 @@ docker compose --profile web rm -f web-ui web-api
 
 以上命令不会停止 IB Gateway、TradingNode 或 Telegram Bot。已保留目标镜像时，用上述 `up -d --no-deps --no-build web-api web-ui` 恢复即可，无需重建或启动交易核心。正式操作前仍应记录各核心容器状态，不能将退出中的节点或 Bot 视作健康运行。
 
-## 运行 Telegram 审批与 IBKR paper
+## 运行每日 auto 与 IBKR paper
 
-先启动 Gateway 和 Bot：
+826 正式配置已固定 release、选择 auto，正常路径不需要 Bot。2026-09-21 已启用数据消费者和 IBKR paper 交易节点，首次自动成交与受控重启验收通过；连续五日观察仍待完成，当前记录见 [实施验收记录](docs/826-ibkr-paper-daily-acceptance.md)。以下为运行入口，维护时先核对现有服务状态与最新审计。
 
-```bash
-docker compose --profile application up -d ib-gateway approval-bot
-```
-
-首次使用时向 Bot 发送 `/start`，将返回的 chat ID 写入 `.env` 的 `TELEGRAM_CHAT_ID`，然后重启 Bot：
+统一运行根目录为 `HEYBOSS_RUNTIME_ROOT`（默认 `./runtime`）。先停写、保留原目录并完成 live/backtest 库备份与显式迁移，核对原回测和市场报告仍可读。`FACDIGGER_FACTOR_BATCH_ROOT` 指向上游完成批次目录，数据服务只读挂载它。
 
 ```bash
-docker compose --profile application up -d --force-recreate approval-bot
-```
-
-启动交易节点：
-
-```bash
+# 只运行每日输入服务，不连接券商
+docker compose --profile application up -d paper-data-sync
+# 单次输入验收可使用同一入口；不要与常驻消费者并行
+uv run --frozen --env-file .env python scripts/sync_paper_daily.py --once
+# 完成当前交付、账户和部署检查后再显式启动交易节点
 docker compose --profile application up -d trading-node
-docker compose logs -f trading-node approval-bot
 ```
 
-交易节点会先更新 Catalog，再由活动策略形成信号。执行网关统一从同一 Catalog 预热全部 EXTERNAL 执行 Bar；预热完成前信号保持 `NEW`，启动顺序造成的未消费信号会按当前 paper 作用域恢复。manual 模式下，未确认前不会提交订单；确认后执行网关会重新读取账户和持仓并进行第二次风控。
+`paper-data-sync` 每 60 秒发现当前 D 的固定 release 交付，准备 EODHD 行情、验证完整契约并严格在 N 开盘前记录 paper 接纳；失败每 1800 秒重试。首次历史补数应提前完成。它不运行 FacDigger、不连接 IBKR、不产生订单。目录里尚无当日合格交付时等待或截止，不使用旧日期替代。
 
-如果活动策略是 `patchtst_e3`，当前启动命令不会调用 FacDigger，也不会自动导入因子。必须先按“同步行情 → FacDigger 推理 → 导入生产 FactorBatch”的顺序完成准备，再启动或重启节点。paper 会拒绝评估 predictions 和不完整的生产批次。
+TradingNode 启动只检查已准备的目录和数据库。Gateway 通过 NT 加载 EXTERNAL 参考价，并在新交易日重新请求；未就绪时不提交。auto 批准与领取在提交前落库，持续保留风控、交易窗口、账户更新和订单恢复门禁。
+
+需要 manual 时，停止节点后显式修改策略配置，再启用独立 Bot：
+
+```bash
+docker compose --profile manual up -d approval-bot
+```
+
+manual 需要环境变量中的 Telegram 凭据及已确认 chat ID；批准后仍重新计算仓位和风控。auto 不领取遗留 manual 的 APPROVED 工作流。
 
 如果工作流停留在 `PROCESSING`，系统不会自动重试。必须先核对 IBKR paper 和 SQLite 审计，排除已经提交订单的可能，再人工处理。
 
@@ -353,7 +357,7 @@ docker compose stop web-ui web-api trading-node approval-bot ib-gateway
 - **收不到 Telegram 消息**：检查 token、chat ID，并查看 `approval-bot` 日志。
 - **无法提交订单**：确认是 paper 账户、`READ_ONLY_API=no`，且应用风控与账户产品权限均允许该订单。
 - **每月没有自动产生新信号**：当前没有常驻月末调度，需要显式重新启动 `trading-node`。
-- **因子策略没有新信号**：确认最新生产 FactorBatch 已在启动前导入，且相同 as-of 日期的 INTERNAL Bar 已存在；当前没有跨项目自动调度。
+- **因子策略没有新信号**：检查固定 release、预期 D、开盘前 paper 接纳记录、完整候选、缺分和估值门槛；活动页可查看 SKIP 原因。仍需自行安排生产和传输。
 
 ## 开发检查
 

@@ -46,6 +46,20 @@ def test_package_version() -> None:
     assert __version__ == "0.1.0"
 
 
+def test_auto_data_service_has_no_broker_or_telegram_credentials() -> None:
+    services = _load_yaml(PROJECT_ROOT / "docker-compose.yml")["services"]
+    data = services["paper-data-sync"]
+    assert "env_file" not in data
+    assert not any(name.startswith(("IB_", "TWS_", "TELEGRAM_")) for name in data["environment"])
+    assert "depends_on" not in data
+    assert data["volumes"][-1].endswith("/app/incoming/factors:ro")
+    node = services["trading-node"]
+    assert "env_file" not in node
+    assert node["environment"]["TRADING_MODE"] == "paper"
+    assert not any(name.startswith("TELEGRAM_") for name in node["environment"])
+    assert services["approval-bot"]["profiles"] == ["manual"]
+
+
 def test_required_modules_exist() -> None:
     """项目应保持事实源约定的模块边界。"""
     required_modules = {
@@ -268,9 +282,9 @@ def test_web_compose_services_are_isolated_and_read_only() -> None:
         "TWS_ACCOUNT",
     }
     assert web_api["volumes"] == [
-        "./catalog:/app/catalog:ro",
-        "./data:/app/data:ro",
-        "./reports:/app/reports:ro",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog:ro",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data:ro",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports:ro",
     ]
 
     assert web_ui["profiles"] == ["web"]
@@ -303,9 +317,9 @@ def test_market_sync_compose_service_is_explicit_and_credential_scoped() -> None
     }
     assert set(sync).isdisjoint({"env_file", "ports", "expose", "depends_on", "restart"})
     assert sync["volumes"] == [
-        "./catalog:/app/catalog",
-        "./data:/app/data",
-        "./reports:/app/reports",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports",
     ]
     assert sync["environment"]["CATALOG_PATH"] == services["web-api"]["environment"]["CATALOG_PATH"]
     assert (
@@ -367,6 +381,8 @@ def test_configuration_has_required_defaults() -> None:
         "max_instrument_weight",
         "max_daily_new_positions",
         "max_gross_exposure",
+        "max_factor_unscorable_fraction",
+        "max_factor_preserved_price_age_sessions",
     }
     assert strategies["active_strategy"] == "patchtst_e3"
     assert strategies["strategies"]["patchtst_e3"]["approval_mode"] in {"manual", "auto"}

@@ -130,7 +130,7 @@ HeyBoss 仅接受：
 - `model_type` 是匹配 `[a-z][a-z0-9_]*` 的非空字符串，仅记录来源，不设置模型白名单；
 - `score_semantics=raw_cross_sectional_rank_score`；
 - `higher_score_is_better=true`；
-- `calendar=US_EQUITIES_REGULAR` 且 `calendar_version` 非空；
+- `calendar=US_EQUITIES_REGULAR` 且 `calendar_version=exchange_calendars:4.13.2:XNYS`，所有 D 均是实际交易日；
 - `timezone=America/New_York`；
 - `signal_available=after_regular_session_close`；
 - `earliest_execution=next_regular_session_open`；
@@ -216,7 +216,7 @@ HeyBoss 不读取 FacDigger 配置、训练快照或映射审计文件，也不�
 映射标的缺任一价格序列都会停止导入：
 
 ```bash
-uv run --frozen --env-file .env python scripts/import_factor_bundle.py \
+uv run --frozen --env-file .env python scripts/import_factor_bundle.py --mode historical \
   /path/to/<delivery_id> \
   --instruments-config /path/to/reviewed-instruments.yaml \
   --catalog-path /path/to/isolated-catalog
@@ -250,4 +250,85 @@ CustomData 类身份，不依赖 Catalog 查询 metadata；这样 BacktestNode �
 研究结果，不能用于 paper 下单或策略有效性判断。
 
 现有旧 `artifacts2` 不符合当前训练与 FactorBatch 协议，不能增加 legacy bypass。当前也不实现
-scheduler；自动调度仍需等待真实交易日历、半日市和准确收盘时间完善。
+跨项目通用 scheduler；交易日、半日市和开收盘时段由统一日历实现。FacDigger 生产仍由其项目部署，HeyBoss 的每日消费者只读接纳原始交付。
+
+## 统一日历、缺分保护与恢复（2026-09）
+
+两侧直接锁定 `exchange_calendars==4.13.2`，各自仅有 `data/market_calendar.py` 隔离库来源。
+业务只使用 `MarketSession(session_date, open_utc, close_utc)` 与五个普通日期函数；没有插件、
+注册表、共享运行时包或第二套手写日历。来源标识是既有字段
+`exchange_calendars:4.13.2:XNYS`，包括休市、夏令时和提前收盘。
+
+固定 `config/strategies.yaml` 的 `model_release_id` 后才能装配因子 Actor；当前配置已绑定通过完整性校验的 826 release。预期 D 是当前运行时钟下最近已收盘的交易日，不能用最新可找到
+的旧批次替代。日线因子在对应信号 Bar 可见且 D 已收盘后才可使用。
+
+完整候选集中不可评分项继续保留。`FactorDecision` 明确区分 REBALANCE 与 SKIP：
+有效数不足 top_n 或缺分超过 `max_factor_unscorable_fraction`（初始 20%）时，不发布交易事件。
+缺分已持仓按执行时数量保留；缺分未持有则不建仓；有效但未入选的原持仓可退出。
+保护估值缺失、超过 `max_factor_preserved_price_age_sessions`（初始 1 个交易日）、风险超限，
+或持仓无法由候选集解释，均停止整批调仓。正常仓位预算是
+`max(0, min(请求总敞口, 总风险上限) - 保护敞口)`，不把保护仓位视为零估值。
+研究页权重只是预览；审批卡片的风险摘要显示实际保护敞口和剩余预算。
+
+historical 与 paper 的导入审计分开。paper 必须显式指定固定 release，且为 signal_inference；
+导入先校验、写 Catalog，成功后按本地时钟保存验收证据。N 为 D 的下一交易日，首次验收
+必须严格早于 N 开盘。Catalog 存在数据但没有成功验收记录时不具备 paper 执行资格。
+重复导入同一交付复用首次成功验收时刻；历史验收不能授权 paper，源 created_at 也不能替代
+本地完成时刻。
+
+```bash
+uv run --frozen --env-file .env python scripts/import_factor_bundle.py \
+  /path/to/<delivery_id> --mode paper --model-release-id <fixed-release-id> \
+  --catalog-path /path/to/paper-catalog --database-url sqlite:////path/to/paper.db
+```
+
+可在开盘前审批，执行窗口是 `[N.open, min(N.close, N.open + TTL))`。审批领取只匹配当前 scope
+和 not_before；执行前、卖单全部终态后都会复核 D、release、保护状态、仓位和风控。买入重算
+只统计已提交的新开仓，不重复计算尚未提交的计划；同步卖单成交也必须等待整组卖单终态。
+撤单失败或重启发现未确认的因子订单时停止补买，保留审计，不自动重放旧流程。
+
+paper 每 60 秒通过原有 NT Catalog 请求检查预期 D；Actor 在开盘/失效时刻也主动检查，
+即使尚无批次也能触发。提醒按 D 只排期一次，避免 NT 稀疏行情回放将已排队提醒重复注册。
+网关继续负责具体工作流的开盘/失效事件与审批轮询。
+缺批次也能留下 SKIP；Telegram 和活动页按 scope、策略、D、原因去重展示跳过和恢复。
+输入恢复不会自动清除执行失败；显式 rearm 仍须满足原窗口、固定 release、当前 D 和无提交
+证据，不能延长原因子有效期。上游生产由 FacDigger 项目安排；HeyBoss 的 `paper-data-sync` 以只读共享目录自动发现完整交付，失败每 1800 秒重试。
+
+因子历史回测不再增加 24 小时订单延迟。节点装配层仅从 N 的 EXTERNAL 日线提取 open，
+生成 N 开盘 QuoteTick，关闭完整 Bar 撮合；完整日线仍在日末可见。Gateway 在同刻报价全部
+入缓存后 1 微秒执行；缺少需要交易标的的 N 开盘报价时 SKIP。固定充足流动性、零价差加
+既有滑点是日线模拟假设，不代表真实盘口或精确开盘成交。订单仍全部由同一个 Gateway
+经过 NT RiskEngine 与 ExecutionEngine 提交。
+
+升级前停止写库进程，先对数据库副本检查，再对目标库显式执行专用迁移：
+
+```bash
+uv run --frozen python scripts/migrate_factor_protection.py /path/to/paper.db
+uv run --frozen python scripts/migrate_factor_protection.py /path/to/paper.db --apply
+```
+
+默认 dry-run；执行会生成 `.before-factor-protection.bak`，重复执行幂等。旧因子工作流没有
+保护上下文时失败关闭；仅有证据证明未提交订单/成交的旧记录让出调仓去重键，PROCESSING
+或有订单证据者保留键等待核对。新库直接建表，旧库不得依赖 create_all 自动补列。
+旧 FactorScoreData 缺 calendar_version 时从原始两文件重建隔离 Catalog，不静默补来源标签。
+
+共同一致性验收：
+
+```bash
+uv run --frozen python scripts/check_calendar_consistency.py \
+  --facdigger-root /path/to/FacDiggerNN \
+  --facdigger-python /path/to/FacDiggerNN/.venv/bin/python \
+  --heyboss-python /path/to/HeyBoss/.venv/bin/python \
+  --start 2000-01-01 --end 2027-12-31
+```
+
+脚本比较两份固定 JSON 样例，并用各自解释器比较完整交易日集合、开收盘和前后日，同时
+记录依赖环境。真实 826 交付、运行命令和限制见 [联合实施与验收记录](facdigger-heyboss-joint-implementation-plan.md)。
+
+## 826 每日接纳入口与当前状态
+
+`scripts/sync_paper_daily.py --once/--serve` 使用同一接纳流程；单实例锁避免误开两个消费者。固定 release、source_kind、D、身份、日历、内容及同日冲突全部复用公开的 `validate_factor_bundle` 和原导入器。通过这些检查后才准备行情，不把调用开始时间作为接纳完成时间。迟到或跨过截止的同步不得产生 paper 接纳。
+
+生产 Catalog 的读写都使用 `.catalog.lock`；写进程异常终止留下 `.catalog-writing` 时，NT 与 Web 都停止消费，不能仅删除标记后把旧目录当作完整数据。需停止写入并保留现场，在新目录从真实来源重建、重新核验接纳与引用路径，保留最新交易审计库。
+
+当前独立开发与真实交接的边界见 [826 验收记录](826-ibkr-paper-daily-acceptance.md)。历史 826 evaluation 仍只用于隔离回测，不能因 auto 已启用就进入 paper。

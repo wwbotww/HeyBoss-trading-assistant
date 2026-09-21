@@ -298,13 +298,19 @@ BacktestNode 和 TradingNode 都装配：
 
 ## Paper 运行设计
 
-TradingNode 启动前通过隔离子进程运行同一个历史同步服务，避免多个 NT 组件在同一进程重复初始化全局日志器。双动量策略只从 Catalog 请求 INTERNAL 信号 Bar；因子策略只请求已经导入的最新完整生产批次。执行网关独立请求全部 EXTERNAL Bar，等待请求完成后再处理暂存或恢复的信号；IBKR 连接只负责账户、仓位、对账和订单执行。
+TradingNode 只验证已准备的 Catalog 和运行库，不在启动路径采集供应商。`paper-data-sync` 独立发现固定 release 的完整当日交付，复用原导入器与 EODHD 同步服务，并使用完成时的 UTC 时钟接纳。NT 与 Web 使用 `CoordinatedParquetDataCatalog`，不绕过共享文件锁；runner 在 NT 注册边界替换同名 Catalog。
 
-`trading-node` 与 `approval-bot` 是独立进程，以 SQLite 工作流作为唯一审批邮箱。`trading-node` 禁用 Compose 自动重启，避免数据同步失败或订单提交边界异常后自动重放。
+Gateway 在启动、当前 D 改变及请求超时后通过 NT 刷新 EXTERNAL Bar。回调按请求世代隔离，未完成请求不规划订单。因子 Actor 的历史请求也防止重入与旧回调重新触发决策。交易日历与因子格式保持原契约。
 
-当前没有常驻月末调度器。需要同步新数据并形成下一期信号时，由操作者显式启动或重启 `trading-node`。
+`trading-node`、数据服务和 manual Bot 是独立进程；默认配置是固定 826 / auto。自动领取保存计划、风险依据和批准后才允许提交，auto 不领取人工 APPROVED。交易节点禁止 Compose 自动重启，异常提交状态不自动重放。
 
-因子策略当前也没有跨项目调度。固定顺序是：同步 EODHD → FacDigger 用冻结 scaler 推理并原子发布 → HeyBoss 导入 FactorBatch → 启动/重启 TradingNode。缺少生产批次、最新批次不完整或只有评估数据时，paper 启动失败关闭。
+BrokerSession 复用当前 NT IB 客户端，检查 transport ready、执行客户端连接与 NT 核对结果。断连世代变化立即失效旧核对，并异步请求有界重连核对；NT 1.230 的客户端断连世代字段是本处唯一的固定版本内部字段依赖，升级 NT 必须回归这条边界。
+
+IBKR MarginAccount 的 total 已为净值；CASH 回测才叠加持仓。快照保留采样时间与券商回报时间，Web 使用快照给出的 300 秒阈值判定来源陈旧。现金来自 TotalCashValue，可用资金来自 FullAvailableFunds，二者不相加。旧快照的未知来源保留空值。
+
+恢复按持久化 client_order_id、venue_order_id 和 scope 关联原始报告，不依赖内存 tags，也不按证券接管手工订单。paper 不记录 NT 推断成交。成交写入幂等并与对应订单事件共用事务；累计持仓数量与本策略成交不能解释时停止调仓。日内已提交开仓计数来自批准计划与提交记录。
+
+数据库需停写后显式运行 `migrate_factor_protection.py` 与 `migrate_execution_audit.py`，两者默认预检、应用时备份，不在启动时自动迁移。SQLite 忙最多等待 50ms 后失败关闭。部署与真实连续运行状态见 [826 验收记录](826-ibkr-paper-daily-acceptance.md)。
 
 ## 存储与 Web 边界
 
@@ -312,7 +318,9 @@ TradingNode 启动前通过隔离子进程运行同一个历史同步服务，�
 
 - `backtest_runs`；
 - `signals`；
-- `signal_workflows`；
+- `signal_workflows`（保留保护集合、not_before 和 FactorContext）；
+- `factor_imports`（区分 paper 与 historical 的本地验收证据）；
+- `factor_decisions`（独立于交易事件的 SKIP、保护、恢复与通知去重依据）；
 - `approvals`；
 - `order_events`；
 - `fills`；

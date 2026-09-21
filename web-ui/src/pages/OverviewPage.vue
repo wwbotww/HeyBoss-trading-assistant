@@ -64,7 +64,7 @@ async function retry(): Promise<void> {
             <p id="asset-heading" class="eyebrow">Net liquidation</p>
             <StatusPill
               :status="portfolio.is_stale ? 'new' : portfolio.source_state"
-              :label="portfolio.is_stale ? '快照已过期' : formatSourceState(portfolio.source_state)"
+              :label="portfolio.is_stale ? '账户未就绪' : formatSourceState(portfolio.source_state)"
             />
           </div>
           <p class="asset-value tabular">
@@ -72,7 +72,7 @@ async function retry(): Promise<void> {
           </p>
           <div class="asset-context">
             <span>{{ portfolio.account_id || '未发现账户快照' }}</span>
-            <span>{{ portfolio.currency || 'USD' }} cash account</span>
+            <span>{{ portfolio.currency || 'USD' }} · 账户快照</span>
             <span>{{ formatAge(portfolio.age_seconds) }}</span>
           </div>
         </div>
@@ -98,15 +98,15 @@ async function retry(): Promise<void> {
 
       <section class="metric-grid" aria-label="账户关键指标">
         <MetricCard
-          label="可用现金"
-          :value="formatCurrency(portfolio.free_cash, portfolio.currency)"
-          helper="可用于新订单的账户现金"
+          label="可用资金"
+          :value="formatCurrency(portfolio.available_funds, portfolio.currency)"
+          helper="券商报告的可用资金; 不等同于现金"
           accent
         />
         <MetricCard
-          label="锁定现金"
-          :value="formatCurrency(portfolio.locked_cash, portfolio.currency)"
-          helper="已被订单或结算占用"
+          label="现金余额"
+          :value="formatCurrency(portfolio.total_cash_value, portfolio.currency)"
+          helper="券商报告的现金余额"
         />
         <MetricCard
           label="当前持仓"
@@ -114,6 +114,9 @@ async function retry(): Promise<void> {
           helper="最近完整账户快照"
         />
       </section>
+      <p v-if="portfolio.not_ready_reason" role="status">
+        账户未就绪：{{ portfolio.not_ready_reason }}
+      </p>
 
       <section class="overview-grid">
         <article class="surface section-card decision-card">

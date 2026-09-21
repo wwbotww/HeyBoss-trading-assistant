@@ -129,11 +129,16 @@ class PortfolioView:
     account_id: str | None
     currency: str | None
     net_liquidation: float | None
-    free_cash: float | None
-    locked_cash: float | None
+    available_funds: float | None
+    total_cash_value: float | None
     age_seconds: float | None
     is_stale: bool | None
     positions: tuple[PositionView, ...]
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,8 +149,13 @@ class AccountHistoryPoint:
     account_id: str
     currency: str
     net_liquidation: float
-    free_cash: float
-    locked_cash: float
+    available_funds: float | None
+    total_cash_value: float | None
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,7 +178,7 @@ class FactorScoreView:
     canonical_id: str
     symbol: str
     security_id: str
-    score: float
+    score: float | None
     eligible: bool
     rank: int | None
     selected: bool
@@ -285,6 +295,28 @@ class WorkflowDetailView:
     orders: tuple[OrderEventView, ...]
     fills: tuple[FillView, ...]
     timeline: tuple[TimelineEventView, ...]
+    preserve_positions: tuple[str, ...] = ()
+    not_before_utc: datetime | None = None
+    factor_asof_date: str | None = None
+    model_release_id: str | None = None
+    delivery_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FactorDecisionView:
+    """无交易事件时仍可展示的因子状态。"""
+
+    id: int
+    asof_date: str
+    status: str
+    reason: str
+    preserve_positions: tuple[str, ...]
+    candidate_count: int | None
+    eligible_count: int | None
+    model_release_id: str | None
+    delivery_id: str | None
+    last_seen: datetime
+    recovered_at: datetime | None
 
 
 @dataclass(frozen=True)

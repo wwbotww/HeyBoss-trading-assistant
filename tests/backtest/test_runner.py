@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import shutil
+from collections.abc import Iterator
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
-from nautilus_trader.model.data import CustomData
+from nautilus_trader.model.data import BarType, CustomData
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from sqlalchemy import create_engine, text
 
@@ -26,11 +28,12 @@ from trading_assistant.data.corporate_actions import (
 from trading_assistant.data.factor import (
     FACTOR_DATA_TYPE,
     FactorScoreData,
-    import_factor_bundle,
 )
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
+from trading_assistant.storage.repository import TradingRepository
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FACDIGGER_MOCK_DELIVERY_ID = "3b9eaacfb408310ed421659b12ffca70c8e84620169a208d6614a7a47e6bbea4"
+FACDIGGER_MOCK_DELIVERY_ID = "577949642a10b1cdbf8bab569c306f38838c58df203ba0bafb849ba3eda2798b"
 
 
 def _write_yaml(path: Path, value: object) -> None:
@@ -191,6 +194,7 @@ def _write_factor_test_config(project_root: Path) -> None:
                         "target_gross_exposure": 0.25,
                         "rebalance_frequency": "daily",
                         "allow_evaluation_predictions": False,
+                        "model_release_id": "b" * 64,
                     },
                 }
             },
@@ -209,6 +213,7 @@ def _write_factor_scores(path: Path) -> None:
                 CustomData(
                     FACTOR_DATA_TYPE,
                     FactorScoreData(
+                        calendar_version=CALENDAR_VERSION,
                         canonical_id=f"{symbol}.US",
                         security_id=f"isin:{symbol}",
                         asof_date=session.isoformat(),
@@ -217,7 +222,7 @@ def _write_factor_scores(path: Path) -> None:
                         batch_id=f"delivery:{session}",
                         batch_size=2,
                         delivery_id="d" * 64,
-                        model_release_id="r" * 64,
+                        model_release_id="b" * 64,
                         source_kind="signal_inference",
                         ts_event=timestamp_ns,
                         ts_init=timestamp_ns,
@@ -324,6 +329,22 @@ def _write_mock_factor_backtest_project(project_root: Path) -> None:
         }
     )
     _write_yaml(backtest_path, values)
+    strategy_path = project_root / "config" / "strategies.yaml"
+    strategy = yaml.safe_load(strategy_path.read_text())
+    manifest = json.loads(
+        (
+            PROJECT_ROOT
+            / "tests"
+            / "fixtures"
+            / "factor_batches"
+            / FACDIGGER_MOCK_DELIVERY_ID
+            / "manifest.json"
+        ).read_text()
+    )
+    strategy["strategies"]["patchtst_e3"]["parameters"]["model_release_id"] = manifest["model"][
+        "release_id"
+    ]
+    _write_yaml(strategy_path, strategy)
 
 
 def _write_mock_factor_market_data(path: Path) -> None:
@@ -430,6 +451,27 @@ def test_factor_backtest_runs_custom_data_actor_gateway_chain(tmp_path: Path) ->
     catalog_path = tmp_path / "catalog"
     _write_test_catalog(catalog_path)
     _write_factor_scores(catalog_path)
+    # 下一交易日开盘必须明显区别于 D 收盘和 N 收盘, 防止时间正确但价格穿越。
+    catalog = CatalogRepository(catalog_path)
+    catalog.replace_bars(
+        [
+            bar
+            for symbol in ("SPY", "BIL")
+            for bar in catalog.read_bars(BarType.from_str(f"{symbol}.US-1-DAY-LAST-EXTERNAL"))
+        ]
+        + [
+            make_bar(
+                day,
+                instrument_id=f"{symbol}.US",
+                open_price=110.0,
+                high=131.0,
+                low=109.0,
+                close=130.0,
+            )
+            for day in (date(2025, 2, 3), date(2025, 3, 3), date(2025, 4, 1))
+            for symbol in ("SPY", "BIL")
+        ]
+    )
     database_url = f"sqlite:///{tmp_path}/factor-audit.db"
 
     process = multiprocessing.get_context("spawn").Process(
@@ -444,76 +486,17 @@ def test_factor_backtest_runs_custom_data_actor_gateway_chain(tmp_path: Path) ->
         raise AssertionError("factor backtest process timed out")
     assert process.exitcode == 0
     with create_engine(database_url).connect() as connection:
-        strategy, signal_time, fill_time = connection.execute(
+        strategy, signal_time, fill_time, fill_price = connection.execute(
             text(
-                "SELECT s.strategy_name, s.timestamp_utc, f.timestamp_utc "
+                "SELECT s.strategy_name, s.timestamp_utc, f.timestamp_utc, f.price "
                 "FROM signals s JOIN fills f ON f.event_id = s.event_id "
                 "ORDER BY f.timestamp_utc LIMIT 1"
             )
         ).one()
     assert strategy == "patchtst_e3"
+    assert fill_price == pytest.approx(110.01)
+    assert fill_time.startswith("2025-02-03 14:30:00")
     assert fill_time > signal_time
-
-
-def test_facdigger_mock_bundle_runs_one_rebalance_through_unified_chain(
-    tmp_path: Path,
-) -> None:
-    """原始单日 FactorBatch 必须产生预期 top-3 并在下一根 Bar 成交。"""
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    _write_mock_factor_backtest_project(project_root)
-    catalog_path = tmp_path / "catalog"
-    _write_mock_factor_market_data(catalog_path)
-    instruments = load_instruments(project_root / "config" / "instruments.yaml")
-    summary = import_factor_bundle(
-        bundle_dir=(
-            PROJECT_ROOT / "tests" / "fixtures" / "factor_batches" / FACDIGGER_MOCK_DELIVERY_ID
-        ),
-        catalog_path=catalog_path,
-        instruments=instruments,
-        signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
-        execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
-    )
-    assert summary.rows_imported == 10
-    factor_rows = CatalogRepository(catalog_path).catalog.query(FactorScoreData)
-    assert len(factor_rows) == 10
-    database_url = f"sqlite:///{tmp_path}/mock-factor-audit.db"
-
-    process = multiprocessing.get_context("spawn").Process(
-        target=_run_mock_factor_backtest_process,
-        args=(str(project_root), str(catalog_path), database_url),
-    )
-    process.start()
-    process.join(timeout=60)
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=5)
-        raise AssertionError("mock factor backtest process timed out")
-    assert process.exitcode == 0
-
-    with create_engine(database_url).connect() as connection:
-        signal_rows = connection.execute(
-            text(
-                "SELECT instrument_id, target_weight, timestamp_utc "
-                "FROM signals ORDER BY instrument_id"
-            )
-        ).all()
-        fill_rows = connection.execute(
-            text("SELECT instrument_id, timestamp_utc FROM fills ORDER BY instrument_id")
-        ).all()
-    assert [(row.instrument_id, row.target_weight) for row in signal_rows] == [
-        ("AAPL.US", 0.25),
-        ("MSFT.US", 0.25),
-        ("NVDA.US", 0.25),
-    ]
-    assert {row.instrument_id for row in fill_rows} == {
-        "AAPL.US",
-        "MSFT.US",
-        "NVDA.US",
-    }
-    assert min(row.timestamp_utc for row in fill_rows) > max(
-        row.timestamp_utc for row in signal_rows
-    )
 
 
 def test_backtest_preflight_rejects_missing_instrument_and_bars(tmp_path: Path) -> None:
@@ -578,3 +561,14 @@ def test_backtest_rejects_invalid_runtime_window_before_catalog_access(
             evaluation_start=date(2025, 2, 1),
             end=date(2025, 1, 31),
         )
+
+
+@pytest.fixture
+def factor_repository(tmp_path: Path) -> Iterator[TradingRepository]:
+    """隔离每次测试的实际验收记录。"""
+    repository = TradingRepository(f"sqlite:///{tmp_path}/factor-imports.db")
+    repository.create_schema()
+    try:
+        yield repository
+    finally:
+        repository.close()

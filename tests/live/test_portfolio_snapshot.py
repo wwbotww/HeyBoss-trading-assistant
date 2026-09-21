@@ -2,17 +2,117 @@
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 from nautilus_trader.common.component import TestClock, TimeEvent
+from nautilus_trader.model.enums import PositionSide
+from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.position import Position
 
 from trading_assistant.live.portfolio_snapshot import (
     PortfolioSnapshotActor,
     PortfolioSnapshotActorConfig,
+    account_not_ready_reason,
+    account_update,
     position_snapshot_input,
 )
 from trading_assistant.storage.repository import TradingRepository
+
+
+def test_account_freshness_uses_native_account_event_not_snapshot_clock() -> None:
+    from nautilus_trader.accounting.accounts.margin import MarginAccount
+    from nautilus_trader.test_kit.stubs.events import TestEventStubs
+
+    account = MarginAccount(TestEventStubs.margin_account_state(), calculate_account_state=False)
+    assert (
+        account_not_ready_reason(
+            account,
+            now_ns=299_000_000_000,
+            stale_after_seconds=300,
+            broker_connected=True,
+            reconciliation_complete=True,
+        )
+        is None
+    )
+    assert "stale" in str(
+        account_not_ready_reason(
+            account,
+            now_ns=301_000_000_000,
+            stale_after_seconds=300,
+            broker_connected=True,
+            reconciliation_complete=True,
+        )
+    )
+    assert "disconnected" in str(
+        account_not_ready_reason(
+            account,
+            now_ns=1,
+            stale_after_seconds=300,
+            broker_connected=False,
+            reconciliation_complete=True,
+        )
+    )
+    assert "reconciliation" in str(
+        account_not_ready_reason(
+            account,
+            now_ns=1,
+            stale_after_seconds=300,
+            broker_connected=True,
+            reconciliation_complete=False,
+        )
+    )
+
+
+def test_other_currency_update_does_not_refresh_usd_clock_or_cash() -> None:
+    """最新 EUR 回报不能冒充 USD 资金更新, 使用真实 NT 账户累积回报。"""
+    from nautilus_trader.accounting.accounts.margin import MarginAccount
+    from nautilus_trader.core.uuid import UUID4
+    from nautilus_trader.model.enums import AccountType
+    from nautilus_trader.model.events import AccountState
+    from nautilus_trader.model.objects import AccountBalance, Money
+    from nautilus_trader.test_kit.stubs.events import TestEventStubs
+
+    usd = Currency.from_str("USD")
+    eur = Currency.from_str("EUR")
+    source = TestEventStubs.margin_account_state()
+    initial = AccountState(
+        account_id=source.account_id,
+        account_type=AccountType.MARGIN,
+        base_currency=None,
+        reported=True,
+        balances=source.balances,
+        margins=[],
+        info={"TotalCashValue": 10_000.0},
+        event_id=UUID4(),
+        ts_event=0,
+        ts_init=0,
+    )
+    account = MarginAccount(initial, calculate_account_state=False)
+    other = AccountState(
+        account_id=account.id,
+        account_type=AccountType.MARGIN,
+        base_currency=None,
+        reported=True,
+        balances=[AccountBalance(Money(100, eur), Money(0, eur), Money(100, eur))],
+        margins=[],
+        info={"TotalCashValue": 100.0},
+        event_id=UUID4(),
+        ts_event=299_000_000_000,
+        ts_init=299_000_000_000,
+    )
+    account.apply(other)
+    assert account_update(account, usd) == initial
+    assert account_update(account, eur) == other
+    assert "stale" in str(
+        account_not_ready_reason(
+            account,
+            now_ns=301_000_000_000,
+            stale_after_seconds=300,
+            broker_connected=True,
+            reconciliation_complete=True,
+        )
+    )
 
 
 class _Money:
@@ -23,12 +123,19 @@ class _Money:
 class _Position:
     instrument_id = "SPY.ARCA"
     signed_qty = 4
-    side = "LONG"
+    side = PositionSide.LONG
     avg_px_open = 600.25
     realized_pnl = _Money()
 
 
 class _Account:
+    last_event = SimpleNamespace(
+        ts_event=0,
+        info={"TotalCashValue": 2.5},
+        balances=[SimpleNamespace(currency=Currency.from_str("USD"))],
+    )
+    events = (last_event,)
+
     def balance_total(self, _: object) -> _Money:
         return _Money()
 
@@ -94,6 +201,7 @@ def test_converts_nt_position_at_storage_boundary() -> None:
     snapshot = position_snapshot_input(cast(Position, _Position()))
     assert snapshot.instrument_id == "SPY.ARCA"
     assert snapshot.signed_quantity == 4.0
+    assert snapshot.side == "LONG"
     assert snapshot.avg_open_price == 600.25
     assert snapshot.realized_pnl == 3.5
 
@@ -137,6 +245,9 @@ def test_actor_records_from_nt_interfaces_and_stops_cleanly(tmp_path: Path) -> N
     snapshot = repository.latest_portfolio_snapshot(account_id="IB-DU123")
     assert snapshot is not None
     assert snapshot.net_liquidation == 3.5
+    assert snapshot.available_funds == 3.5
+    assert snapshot.total_cash_value == 2.5
+    assert snapshot.broker_connected is None
     assert snapshot.positions[0].signed_quantity == 4.0
     repository.close()
 
@@ -145,3 +256,19 @@ def test_actor_records_from_nt_interfaces_and_stops_cleanly(tmp_path: Path) -> N
     assert actor.test_log.warnings
     actor.on_stop()
     assert actor._repository is None
+
+
+def test_snapshot_waits_for_its_currency_without_fabricating_zero_balance(tmp_path: Path) -> None:
+    actor = _ActorHarness(
+        PortfolioSnapshotActorConfig(
+            account_id="IB-DU123", database_url=f"sqlite:///{tmp_path}/snapshot.db"
+        )
+    )
+    assert actor.test_portfolio.account_value is not None
+    actor.test_portfolio.account_value.events = ()
+    actor.on_start()
+    actor._capture_snapshot(cast(TimeEvent, object()))
+    assert actor._repository is not None
+    assert actor._repository.latest_portfolio_snapshot(account_id="IB-DU123") is None
+    assert "USD" in actor.test_log.warnings[-1]
+    actor.on_stop()

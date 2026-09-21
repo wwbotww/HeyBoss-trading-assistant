@@ -14,6 +14,7 @@ from tests.market_radar.test_economic_events import economic_event, economic_sna
 from tests.market_radar.test_fundamentals import CALCULATED, changed
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
 from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.market_radar.earnings import (
     EarningsCalendarEvent,
@@ -115,8 +116,8 @@ def seed_web_data(tmp_path: Path) -> str:
         account_id="IB-DU123",
         currency="USD",
         net_liquidation=10_000,
-        free_cash=7_000,
-        locked_cash=3_000,
+        available_funds=7_000,
+        total_cash_value=3_000,
         positions=(
             PositionSnapshotInput(
                 instrument_id="AAPL.NASDAQ",
@@ -214,6 +215,7 @@ def seed_web_data(tmp_path: Path) -> str:
     )
     scores = [
         FactorScoreData(
+            calendar_version=CALENDAR_VERSION,
             canonical_id=instrument_id,
             security_id=f"isin:{instrument_id}",
             asof_date="2026-08-12",

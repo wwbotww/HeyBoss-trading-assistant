@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from trading_assistant.application.models import (
     BreadthMetricValidity,
@@ -73,11 +73,16 @@ class PortfolioResponse(ApiSchema):
     account_id: str | None
     currency: str | None
     net_liquidation: float | None
-    free_cash: float | None
-    locked_cash: float | None
+    available_funds: float | None
+    total_cash_value: float | None
     age_seconds: float | None
     is_stale: bool | None
     positions: list[PositionResponse]
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 class AccountHistoryPointResponse(ApiSchema):
@@ -85,8 +90,13 @@ class AccountHistoryPointResponse(ApiSchema):
     account_id: str
     currency: str
     net_liquidation: float
-    free_cash: float
-    locked_cash: float
+    available_funds: float | None
+    total_cash_value: float | None
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 class AccountHistoryPageResponse(ApiSchema):
@@ -110,7 +120,7 @@ class FactorScoreResponse(ApiSchema):
     canonical_id: str
     symbol: str
     security_id: str
-    score: float
+    score: float | None
     eligible: bool
     rank: int | None
     selected: bool
@@ -161,11 +171,26 @@ class WorkflowResponse(ApiSchema):
     risk_summary: str | None
 
 
+class FactorDecisionResponse(ApiSchema):
+    id: int
+    asof_date: str
+    status: str
+    reason: str
+    preserve_positions: list[str]
+    candidate_count: int | None
+    eligible_count: int | None
+    model_release_id: str | None
+    delivery_id: str | None
+    last_seen: datetime
+    recovered_at: datetime | None
+
+
 class WorkflowPageResponse(ApiSchema):
     items: list[WorkflowResponse]
     offset: int
     limit: int
     has_more: bool
+    factor_decisions: list[FactorDecisionResponse] = Field(default_factory=list)
 
 
 class DecisionResponse(ApiSchema):
@@ -217,6 +242,11 @@ class WorkflowDetailResponse(ApiSchema):
     orders: list[OrderEventResponse]
     fills: list[FillResponse]
     timeline: list[TimelineEventResponse]
+    preserve_positions: list[str] = Field(default_factory=list)
+    not_before_utc: datetime | None = None
+    factor_asof_date: str | None = None
+    model_release_id: str | None = None
+    delivery_id: str | None = None
 
 
 class OrderSummaryResponse(ApiSchema):

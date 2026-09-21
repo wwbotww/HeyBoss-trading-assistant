@@ -6,3 +6,5 @@ risk:
   max_instrument_weight: 0.25
   max_daily_new_positions: 3
   max_gross_exposure: 0.80
+  max_factor_unscorable_fraction: 0.20
+  max_factor_preserved_price_age_sessions: 1

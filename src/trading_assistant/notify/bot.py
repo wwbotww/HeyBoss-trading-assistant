@@ -17,6 +17,7 @@ from trading_assistant.live.config import load_live_settings
 from trading_assistant.notify.messages import (
     approval_card,
     decided_card,
+    factor_alert,
     order_notification,
     workflow_alert,
 )
@@ -187,6 +188,18 @@ class ApprovalBot:
             )
             self._repository.mark_telegram_delivered(
                 source_key=workflow_notice.source_key,
+                chat_id=self._chat_id,
+                message_id=str(message.message_id),
+                timestamp_ns=now_ns,
+            )
+        for source_key, decision in self._repository.list_factor_alert_notifications(
+            scope=self._workflow_scope
+        ):
+            message = await application.bot.send_message(
+                chat_id=self._chat_id, text=factor_alert(decision)
+            )
+            self._repository.mark_telegram_delivered(
+                source_key=source_key,
                 chat_id=self._chat_id,
                 message_id=str(message.message_id),
                 timestamp_ns=now_ns,

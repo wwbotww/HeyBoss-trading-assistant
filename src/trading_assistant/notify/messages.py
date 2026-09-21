@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from trading_assistant.storage.repository import OrderNotification, SignalWorkflow
+from datetime import UTC, datetime
+
+from trading_assistant.storage.repository import (
+    FactorDecisionAudit,
+    OrderNotification,
+    SignalWorkflow,
+)
 
 
 def approval_card(workflow: SignalWorkflow) -> str:
@@ -16,14 +22,40 @@ def approval_card(workflow: SignalWorkflow) -> str:
     )
     if not orders:
         orders = "• 无需调仓"
+    factor = workflow.factor_context
+    opening = datetime.fromtimestamp(workflow.not_before_ns / 1e9, tz=UTC).isoformat()
+    extra = (
+        ""
+        if factor is None
+        else (
+            f"因子日期: {factor.asof_date}\n"
+            f"模型发布: {factor.model_release_id}\n"
+            f"保护持仓: {', '.join(workflow.preserve_positions) or '无'}\n"
+            f"最早执行: {opening}\n"
+            "保护标的按执行时数量保持; 未持有则不开仓\n"
+        )
+    )
     return (
-        "📊 双动量调仓审批\n"
-        f"周期: {workflow.rebalance_key}\n"
+        ("📊 因子调仓审批\n" if factor is not None else "📊 双动量调仓审批\n")
+        + extra
+        + f"周期: {workflow.rebalance_key}\n"
         f"信号: {workflow.reason}\n"
         f"计划:\n{orders}\n"
         f"风控: {workflow.risk_summary or '未提供'}\n"
         f"到期: {workflow.expires_at_utc.isoformat()}\n"
         f"事件: {workflow.event_id}"
+    )
+
+
+def factor_alert(decision: FactorDecisionAudit) -> str:
+    """缺分或缺批次也有通知依据, 无需伪造交易信号。"""
+    heading = "✅ 因子输入已恢复" if decision.recovered_at is not None else "⏸ 因子调仓已跳过"
+    release = "未接收到批次" if decision.context is None else decision.context.model_release_id
+    return (
+        f"{heading}\n日期: {decision.asof_date}\n原因: {decision.reason}\n"
+        f"模型发布: {release}\n"
+        f"保护标的: {', '.join(decision.preserve_positions) or '无'}\n"
+        "仅此条状态变化不会产生订单"
     )
 
 

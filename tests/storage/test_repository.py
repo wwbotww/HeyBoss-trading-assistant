@@ -1,20 +1,132 @@
 """SQLite 审计仓储测试。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.storage.models import (
     AccountSnapshotRecord,
     ApprovalRecord,
     BacktestRunRecord,
+    FillRecord,
+    OrderEventRecord,
     SignalRecord,
     SignalWorkflowRecord,
 )
 from trading_assistant.storage.repository import PositionSnapshotInput, TradingRepository
+
+
+def test_auto_claim_commits_plan_and_approval_before_execution(tmp_path: Path) -> None:
+    repository = TradingRepository(f"sqlite:///{tmp_path / 'audit.db'}")
+    repository.create_schema()
+    event = TradeSignalEvent(
+        strategy_name="patchtst_e3",
+        target_weights=(("A.US", 0.25),),
+        rebalance_key="day",
+        reason="auto",
+        ts_event=1_000_000_000,
+        ts_init=1_000_000_000,
+        not_before_ns=2_000_000_000,
+        expires_at_ns=4_000_000_000,
+    )
+    repository.register_signal_workflow(event, scope="paper:test")
+    plan = ({"instrument_id": "A.US", "opens_position": True},)
+    assert not repository.claim_auto_signal(
+        str(event.id), timestamp_ns=1_000_000_000, planned_orders=plan, risk_summary="ok"
+    )
+    with ThreadPoolExecutor(2) as pool:
+        results = list(
+            pool.map(
+                lambda _: repository.claim_auto_signal(
+                    str(event.id),
+                    timestamp_ns=2_000_000_000,
+                    planned_orders=plan,
+                    risk_summary="ok",
+                ),
+                range(2),
+            )
+        )
+    assert sorted(results) == [False, True]
+    assert repository.count(ApprovalRecord) == 1
+    workflow = repository.get_signal_workflow(str(event.id))
+    assert workflow is not None
+    assert workflow.status == "PROCESSING"
+    assert workflow.planned_orders == plan
+    for status in ("CREATED", "SUBMITTED", "ACCEPTED"):
+        repository.record_order_event(
+            signal_event_id=str(event.id),
+            order_event_id=None,
+            timestamp_ns=2_000_000_000,
+            strategy_name="patchtst_e3",
+            instrument_id="A.US",
+            client_order_id="order",
+            status=status,
+            direction="BUY",
+            quantity=1,
+            reason="test",
+        )
+        assert repository.daily_new_position_count(
+            scope="paper:test", timestamp_ns=2_000_000_000
+        ) == (0 if status == "CREATED" else 1)
+    repository.close()
+    restarted = TradingRepository(f"sqlite:///{tmp_path / 'audit.db'}")
+    assert restarted.daily_new_position_count(scope="paper:test", timestamp_ns=2_000_000_000) == 1
+    assert restarted.daily_new_position_count(scope="other", timestamp_ns=2_000_000_000) == 0
+    next_day = 86_402_000_000_000
+    restarted.record_order_event(
+        signal_event_id=str(event.id),
+        order_event_id=None,
+        timestamp_ns=next_day,
+        strategy_name="patchtst_e3",
+        instrument_id="A.US",
+        client_order_id="order",
+        status="ACCEPTED",
+        direction="BUY",
+        quantity=1,
+        reason="replayed next day",
+    )
+    assert restarted.daily_new_position_count(scope="paper:test", timestamp_ns=next_day) == 0
+    restarted.close()
+
+
+def test_fill_replays_are_atomic_and_conflicts_never_overwrite(tmp_path: Path) -> None:
+    repository = TradingRepository(f"sqlite:///{tmp_path / 'audit.db'}")
+    repository.create_schema()
+
+    def save(
+        trade: str = "trade", price: float = 100, status: OrderEventRecord | None = None
+    ) -> bool:
+        return repository.record_fill(
+            run_id=None,
+            signal_event_id="event",
+            trade_id=trade,
+            timestamp_ns=2_000_000_000,
+            strategy_name="patchtst_e3",
+            instrument_id="A.US",
+            client_order_id="order",
+            direction="BUY",
+            quantity=2,
+            price=price,
+            commission=0.1,
+            order_event=status,
+        )
+
+    with ThreadPoolExecutor(2) as pool:
+        assert sorted(pool.map(lambda _: save(), range(2))) == [False, True]
+    with pytest.raises(ValueError, match="Conflicting fill replay"):
+        save(price=101)
+    assert repository.count(FillRecord) == 1
+    # 订单事件约束失败时, 同事务中的新成交也不能留下。
+    invalid = OrderEventRecord(event_id="event", order_event_id="status", status="FILLED")
+    with pytest.raises(IntegrityError):
+        save(trade="second", status=invalid)
+    assert repository.count(FillRecord) == 1
+    assert repository.count(OrderEventRecord) == 0
+    repository.close()
 
 
 def test_records_signal_approval_and_run(tmp_path: Path) -> None:
@@ -111,11 +223,11 @@ def test_signal_workflow_is_idempotent_and_transitions_atomically(tmp_path: Path
         timestamp_ns=14_000_000_000,
     )
 
-    claimed = repository.claim_next_approved(timestamp_ns=15_000_000_000)
+    claimed = repository.claim_next_approved(scope="paper:DU123", timestamp_ns=15_000_000_000)
     assert claimed is not None
     assert claimed.event_id == workflow.event_id
     assert claimed.status == "PROCESSING"
-    assert repository.claim_next_approved(timestamp_ns=15_000_000_001) is None
+    assert repository.claim_next_approved(scope="paper:DU123", timestamp_ns=15_000_000_001) is None
     assert repository.finish_processing(
         workflow.event_id,
         status="ORDERS_SUBMITTED",
@@ -268,8 +380,8 @@ def test_portfolio_snapshot_and_trading_audits_are_readable(tmp_path: Path) -> N
         account_id="IB-DU123",
         currency="USD",
         net_liquidation=10_500.0,
-        free_cash=7_500.0,
-        locked_cash=3_000.0,
+        available_funds=7_500.0,
+        total_cash_value=3_000.0,
         positions=(
             PositionSnapshotInput(
                 instrument_id="SPY.ARCA",
@@ -285,8 +397,8 @@ def test_portfolio_snapshot_and_trading_audits_are_readable(tmp_path: Path) -> N
         account_id="IB-DU123",
         currency="USD",
         net_liquidation=10_000.0,
-        free_cash=8_000.0,
-        locked_cash=2_000.0,
+        available_funds=8_000.0,
+        total_cash_value=2_000.0,
         positions=(),
     )
     repository.record_portfolio_snapshot(
@@ -294,8 +406,8 @@ def test_portfolio_snapshot_and_trading_audits_are_readable(tmp_path: Path) -> N
         account_id="IB-OTHER",
         currency="USD",
         net_liquidation=99_000.0,
-        free_cash=99_000.0,
-        locked_cash=0.0,
+        available_funds=99_000.0,
+        total_cash_value=0.0,
         positions=(),
     )
     event = TradeSignalEvent(
@@ -463,8 +575,8 @@ def test_read_only_repository_rejects_writes(tmp_path: Path) -> None:
             account_id="IB-DU123",
             currency="USD",
             net_liquidation=1.0,
-            free_cash=1.0,
-            locked_cash=0.0,
+            available_funds=1.0,
+            total_cash_value=0.0,
             positions=(),
         )
 
@@ -479,3 +591,44 @@ def test_read_only_repository_does_not_create_a_missing_database(tmp_path: Path)
         reader.healthcheck()
     assert not path.exists()
     reader.close()
+
+
+def test_factor_rearm_preserves_expiry_and_requires_same_day_and_release(tmp_path: Path) -> None:
+    from tests.execution.test_gateway import _factor_setup
+
+    gateway, repository, event = _factor_setup(tmp_path)
+    repository.register_signal_workflow(event, scope="paper:factor")
+    repository.reject_new_signal(
+        str(event.id),
+        status="RISK_REJECTED",
+        timestamp_ns=gateway.clock.timestamp_ns(),
+        risk_summary="price missing",
+    )
+    base = {
+        "reason": "operator verified prices",
+        "timestamp_ns": event.not_before_ns,
+        "expires_at_ns": event.expires_at_ns,
+    }
+    assert not repository.rearm_terminal_signal(str(event.id), **base)
+    assert not repository.rearm_terminal_signal(
+        str(event.id), expected_model_release_id="c" * 64, **base
+    )
+    assert not repository.rearm_terminal_signal(
+        str(event.id),
+        expected_model_release_id="b" * 64,
+        **{**base, "expires_at_ns": event.expires_at_ns + 3600_000_000_000},
+    )
+    with pytest.raises(ValueError, match="later than"):
+        repository.rearm_terminal_signal(
+            str(event.id),
+            expected_model_release_id="b" * 64,
+            **{**base, "timestamp_ns": event.expires_at_ns},
+        )
+    assert repository.rearm_terminal_signal(
+        str(event.id), expected_model_release_id="b" * 64, **base
+    )
+    recovered = repository.get_signal_workflow(str(event.id))
+    assert recovered is not None
+    assert recovered.to_event().preserve_positions == ("S9.US",)
+    assert recovered.to_event().not_before_ns == event.not_before_ns
+    assert recovered.to_event().factor_context == event.factor_context

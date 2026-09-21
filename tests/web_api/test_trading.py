@@ -35,3 +35,29 @@ def test_trading_api_exposes_linked_read_only_audit_views(tmp_path: Path) -> Non
     assert fills.json()["items"][0]["trade_id"] == "T-WEB-1"
     assert client.get("/api/orders/missing").status_code == 404
     assert client.get("/api/workflows/missing").status_code == 404
+
+
+def test_factor_skip_is_visible_without_workflow_and_respects_scope(tmp_path: Path) -> None:
+    from trading_assistant.storage.repository import TradingRepository
+
+    settings = web_settings(tmp_path)
+    repository = TradingRepository(settings.live_database_url)
+    repository.create_schema()
+    for scope in ("paper:DU123", "paper:OTHER"):
+        repository.record_factor_decision(
+            scope=scope,
+            strategy_name="patchtst_e3",
+            asof_date="2025-01-02",
+            status="SKIP",
+            reason="missing_expected_factor_batch",
+            timestamp_ns=1_000_000,
+        )
+    repository.close()
+    client = TestClient(create_app(settings))
+    response = client.get("/api/workflows")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    decisions = response.json()["factor_decisions"]
+    assert len(decisions) == 1
+    assert decisions[0]["candidate_count"] is None
+    assert decisions[0]["reason"] == "missing_expected_factor_batch"

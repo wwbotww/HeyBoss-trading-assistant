@@ -25,6 +25,7 @@ __pycache__/
 /catalog/
 /data/
 /reports/
+/runtime/
 /logs/
 /artifacts2/
 *.db

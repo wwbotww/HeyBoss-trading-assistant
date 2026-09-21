@@ -20,6 +20,30 @@ def test_loads_live_settings(tmp_path: Path) -> None:
     assert settings.catalog_lookback_days == 2200
     assert settings.notification_poll_interval_seconds == 2.5
     assert settings.portfolio_snapshot_interval_seconds == 30
+    assert settings.paper_input_poll_interval_seconds == 60
+    assert settings.paper_input_retry_interval_seconds == 1800
+    assert settings.broker_account_stale_after_seconds == 300
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "factor_check_interval_seconds",
+        "paper_input_poll_interval_seconds",
+        "paper_input_retry_interval_seconds",
+        "broker_account_stale_after_seconds",
+    ],
+)
+def test_paper_input_and_broker_timeouts_must_be_positive(tmp_path: Path, field: str) -> None:
+    path = tmp_path / "live.yaml"
+    config = Path.cwd().joinpath("config", "live.yaml").read_text()
+    import yaml
+
+    content = yaml.safe_load(config)
+    content["live"][field] = 0
+    path.write_text(yaml.safe_dump(content))
+    with pytest.raises(ValueError, match=field):
+        load_live_settings(path)
 
 
 @pytest.mark.parametrize(

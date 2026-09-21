@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from trading_assistant.application.models import (
     DecisionView,
+    FactorDecisionView,
     FillView,
     OrderDetailView,
     OrderEventView,
@@ -23,6 +24,7 @@ from trading_assistant.application.models import (
     WorkflowView,
 )
 from trading_assistant.storage.repository import (
+    ORDER_STATUS_PRIORITY,
     FillAudit,
     OrderAudit,
     SignalWorkflow,
@@ -155,6 +157,31 @@ class TradingActivityQueryService:
             has_more=len(rows) > limit,
         )
 
+    def list_factor_decisions(self) -> tuple[FactorDecisionView, ...]:
+        """在现有活动查询中展示跳过与恢复, 不伪造工作流。"""
+        if self._repository is None or self._scope is None:
+            return ()
+        try:
+            rows = self._repository.list_factor_decisions(scope=self._scope, limit=50)
+        except SQLAlchemyError as exc:
+            raise QuerySourceError("live_database", "因子审计库无法读取") from exc
+        return tuple(
+            FactorDecisionView(
+                row.id,
+                row.asof_date,
+                row.status,
+                row.reason,
+                row.preserve_positions,
+                None if row.context is None else len(row.context.candidate_ids),
+                None if row.context is None else row.context.eligible_count,
+                None if row.context is None else row.context.model_release_id,
+                None if row.context is None else row.context.delivery_id,
+                row.last_seen,
+                row.recovered_at,
+            )
+            for row in rows
+        )
+
     def workflow_detail(self, event_id: str) -> WorkflowDetailView:
         repository, scope = self._required_source()
         try:
@@ -240,6 +267,23 @@ class TradingActivityQueryService:
             orders=order_views,
             fills=fill_views,
             timeline=tuple(timeline),
+            preserve_positions=workflow.preserve_positions,
+            not_before_utc=(
+                None
+                if not workflow.not_before_ns
+                else datetime.fromtimestamp(workflow.not_before_ns / 1e9, tz=UTC)
+            ),
+            factor_asof_date=(
+                None if workflow.factor_context is None else workflow.factor_context.asof_date
+            ),
+            model_release_id=(
+                None
+                if workflow.factor_context is None
+                else workflow.factor_context.model_release_id
+            ),
+            delivery_id=(
+                None if workflow.factor_context is None else workflow.factor_context.delivery_id
+            ),
         )
 
     def list_orders(
@@ -373,7 +417,10 @@ class TradingActivityQueryService:
         summaries: list[OrderSummaryView] = []
         for client_order_id, values in grouped.items():
             ordered = sorted(values, key=lambda item: item.timestamp_utc)
-            latest = ordered[-1]
+            latest = max(
+                values,
+                key=lambda item: (ORDER_STATUS_PRIORITY.get(item.status, 0), item.timestamp_utc),
+            )
             order_fills = fills_by_order.get(client_order_id, [])
             summaries.append(
                 OrderSummaryView(

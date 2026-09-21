@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from nautilus_trader.core.uuid import UUID4
-from sqlalchemy import create_engine, func, select, update
+from sqlalchemy import case, create_engine, func, inspect, or_, select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from trading_assistant.execution.events import TradeSignalEvent
+from trading_assistant.execution.events import FactorContext, TradeSignalEvent
 from trading_assistant.storage.models import (
     AccountSnapshotRecord,
     ApprovalRecord,
     BacktestRunRecord,
     Base,
+    FactorDecisionRecord,
+    FactorImportRecord,
     FillRecord,
     OrderEventRecord,
     PositionSnapshotRecord,
@@ -38,10 +41,27 @@ WorkflowStatus = Literal[
     "ORDERS_SUBMITTED",
 ]
 
+# 券商成交只有秒精度; 更精细或迟到的早期状态不能覆盖成交与终态。
+ORDER_STATUS_PRIORITY = {
+    "FILLED": 3,
+    "CANCELED": 2,
+    "EXPIRED": 2,
+    "REJECTED": 2,
+    "DENIED": 2,
+    "PARTIALLY_FILLED": 1,
+}
+
 
 def utc_datetime_from_ns(timestamp_ns: int) -> datetime:
     """把 Unix 纳秒转换为 UTC datetime。"""
-    return datetime.fromtimestamp(timestamp_ns / 1_000_000_000, tz=UTC)
+    seconds, nanos = divmod(timestamp_ns, 1_000_000_000)
+    return datetime.fromtimestamp(seconds, tz=UTC) + timedelta(microseconds=nanos // 1000)
+
+
+def utc_ns_from_datetime(value: datetime) -> int:
+    """恢复数据库的微秒精度时刻, 避免浮点舍入把过期边界推到未来。"""
+    delta = value.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
 
 @dataclass(frozen=True)
@@ -77,20 +97,53 @@ class SignalWorkflow:
     risk_summary: str | None
     telegram_chat_id: str | None
     telegram_message_id: str | None
+    preserve_positions: tuple[str, ...] = ()
+    not_before_ns: int = 0
+    factor_context: FactorContext | None = None
 
     def to_event(self) -> TradeSignalEvent:
         """恢复 Gateway 可消费的不可变 NT 领域事件。"""
-        ts_event = int(self.signal_timestamp_utc.timestamp() * 1_000_000_000)
+        ts_event = utc_ns_from_datetime(self.signal_timestamp_utc)
         return TradeSignalEvent(
             strategy_name=self.strategy_name,
             target_weights=self.target_weights,
             rebalance_key=self.rebalance_key,
             reason=self.reason,
-            expires_at_ns=int(self.expires_at_utc.timestamp() * 1_000_000_000),
+            expires_at_ns=utc_ns_from_datetime(self.expires_at_utc),
             ts_event=ts_event,
             ts_init=ts_event,
             event_id=UUID4.from_str(self.event_id),
+            preserve_positions=self.preserve_positions,
+            not_before_ns=self.not_before_ns,
+            factor_context=self.factor_context,
         )
+
+
+@dataclass(frozen=True)
+class FactorImportAudit:
+    """不可变的成功验收凭据。"""
+
+    delivery_id: str
+    model_release_id: str
+    calendar_version: str
+    verified_at: datetime
+
+
+@dataclass(frozen=True)
+class FactorDecisionAudit:
+    """可供 Gateway、通知和只读界面使用的因子状态。"""
+
+    id: int
+    scope: str
+    strategy_name: str
+    asof_date: str
+    status: str
+    reason: str
+    preserve_positions: tuple[str, ...]
+    context: FactorContext | None
+    first_seen: datetime
+    last_seen: datetime
+    recovered_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -146,9 +199,14 @@ class PortfolioSnapshot:
     account_id: str
     currency: str
     net_liquidation: float
-    free_cash: float
-    locked_cash: float
+    available_funds: float | None
+    total_cash_value: float | None
     positions: tuple[PositionSnapshot, ...]
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,8 +217,13 @@ class AccountSnapshotAudit:
     account_id: str
     currency: str
     net_liquidation: float
-    free_cash: float
-    locked_cash: float
+    available_funds: float | None
+    total_cash_value: float | None
+    account_updated_at_utc: datetime | None = None
+    broker_connected: bool | None = None
+    reconciliation_complete: bool | None = None
+    broker_stale_after_seconds: int | None = None
+    not_ready_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -203,6 +266,7 @@ class OrderAudit:
     direction: str
     quantity: float
     reason: str
+    venue_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,7 +288,7 @@ class TradingRepository:
             self._ensure_sqlite_parent(database_url)
         connect_args: dict[str, Any] = {}
         if database_url.startswith("sqlite:"):
-            connect_args["timeout"] = 30
+            connect_args["timeout"] = 0.05
         effective_url = self._read_only_url(database_url) if read_only else database_url
         self._engine: Engine = create_engine(effective_url, connect_args=connect_args)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
@@ -253,7 +317,198 @@ class TradingRepository:
 
     def create_schema(self) -> None:
         """幂等创建业务表。"""
+        inspector = inspect(self._engine)
+        if inspector.has_table("signal_workflows"):
+            columns = {column["name"] for column in inspector.get_columns("signal_workflows")}
+            if not {"preserve_positions", "factor_context", "not_before_utc"} <= columns:
+                raise RuntimeError(
+                    "Factor protection migration required; run migrate_factor_protection.py"
+                )
+        for table_name, columns in {
+            "account_snapshots": {
+                "account_updated_at_utc",
+                "total_cash_value",
+                "available_funds",
+                "broker_connected",
+                "reconciliation_complete",
+                "broker_stale_after_seconds",
+                "not_ready_reason",
+            },
+            "order_events": {"venue_order_id"},
+        }.items():
+            if inspector.has_table(table_name) and not columns <= {
+                column["name"] for column in inspector.get_columns(table_name)
+            }:
+                raise RuntimeError(
+                    "Execution audit migration required; run migrate_execution_audit.py"
+                )
         Base.metadata.create_all(self._engine)
+
+    def verify_schema(self) -> None:
+        """交易启动只验证完整运行库; 不在启动时隐式迁移或新建旧库。"""
+        inspector = inspect(self._engine)
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                raise RuntimeError(f"Runtime database is missing table: {table.name}")
+            actual = {column["name"] for column in inspector.get_columns(table.name)}
+            missing = set(table.columns.keys()) - actual
+            if missing:
+                raise RuntimeError(
+                    f"Runtime database migration required: {table.name}: {sorted(missing)}"
+                )
+
+    def get_factor_import(
+        self, *, catalog_path: str, delivery_id: str, mode: str
+    ) -> FactorImportAudit | None:
+        """只读取同一 Catalog、模式和交付的成功验收。"""
+        with Session(self._engine) as session:
+            row = session.scalar(
+                select(FactorImportRecord).where(
+                    FactorImportRecord.catalog_path == catalog_path,
+                    FactorImportRecord.delivery_id == delivery_id,
+                    FactorImportRecord.mode == mode,
+                )
+            )
+            if row is None:
+                return None
+            return FactorImportAudit(
+                row.delivery_id,
+                row.model_release_id,
+                row.calendar_version,
+                self._as_utc(row.verified_at),
+            )
+
+    def record_factor_import(
+        self,
+        *,
+        catalog_path: str,
+        delivery_id: str,
+        mode: str,
+        model_release_id: str,
+        calendar_version: str,
+        source_created_at: datetime,
+        verified_at: datetime,
+    ) -> FactorImportAudit:
+        """幂等保留首次成功验收时刻, 不通过重复导入倒填时间。"""
+        existing = self.get_factor_import(
+            catalog_path=catalog_path, delivery_id=delivery_id, mode=mode
+        )
+        if existing is not None:
+            return existing
+        try:
+            with self._sessions.begin() as session:
+                session.add(
+                    FactorImportRecord(
+                        catalog_path=catalog_path,
+                        delivery_id=delivery_id,
+                        mode=mode,
+                        model_release_id=model_release_id,
+                        calendar_version=calendar_version,
+                        source_created_at=source_created_at,
+                        verified_at=verified_at,
+                    )
+                )
+        except IntegrityError:
+            concurrent = self.get_factor_import(
+                catalog_path=catalog_path, delivery_id=delivery_id, mode=mode
+            )
+            if concurrent is None:
+                raise
+            return concurrent
+        return FactorImportAudit(delivery_id, model_release_id, calendar_version, verified_at)
+
+    def record_factor_decision(
+        self,
+        *,
+        scope: str,
+        strategy_name: str,
+        asof_date: str,
+        status: str,
+        reason: str,
+        timestamp_ns: int,
+        preserve_positions: tuple[str, ...] = (),
+        context: FactorContext | None = None,
+    ) -> None:
+        """按交易日及原因合并重复检查, 恢复时保留原失败审计。"""
+        now = utc_datetime_from_ns(timestamp_ns)
+        with self._sessions.begin() as session:
+            row = session.scalar(
+                select(FactorDecisionRecord).where(
+                    FactorDecisionRecord.scope == scope,
+                    FactorDecisionRecord.strategy_name == strategy_name,
+                    FactorDecisionRecord.asof_date == asof_date,
+                    FactorDecisionRecord.reason == reason,
+                )
+            )
+            if row is None:
+                row = FactorDecisionRecord(
+                    scope=scope,
+                    strategy_name=strategy_name,
+                    asof_date=asof_date,
+                    status=status,
+                    reason=reason,
+                    first_seen=now,
+                    last_seen=now,
+                    preserve_positions=list(preserve_positions),
+                    context=None if context is None else context.to_payload(),
+                )
+                session.add(row)
+            else:
+                row.last_seen = now
+                row.status = status
+                row.preserve_positions = list(preserve_positions)
+                row.context = None if context is None else context.to_payload()
+                row.recovered_at = None
+            if status == "REBALANCE":
+                session.execute(
+                    update(FactorDecisionRecord)
+                    .where(
+                        FactorDecisionRecord.scope == scope,
+                        FactorDecisionRecord.strategy_name == strategy_name,
+                        FactorDecisionRecord.asof_date == asof_date,
+                        FactorDecisionRecord.status == "SKIP",
+                        ~FactorDecisionRecord.reason.like("execution:%"),
+                        FactorDecisionRecord.recovered_at.is_(None),
+                    )
+                    .values(recovered_at=now)
+                )
+
+    def list_factor_decisions(
+        self,
+        *,
+        scope: str,
+        strategy_name: str | None = None,
+        asof_date: str | None = None,
+        limit: int = 200,
+    ) -> tuple[FactorDecisionAudit, ...]:
+        """读取本运行的最近因子状态和恢复信息。"""
+        query = select(FactorDecisionRecord).where(FactorDecisionRecord.scope == scope)
+        if strategy_name is not None:
+            query = query.where(FactorDecisionRecord.strategy_name == strategy_name)
+        if asof_date is not None:
+            query = query.where(FactorDecisionRecord.asof_date == asof_date)
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                query.order_by(
+                    FactorDecisionRecord.last_seen.desc(), FactorDecisionRecord.id.desc()
+                ).limit(limit)
+            )
+            return tuple(
+                FactorDecisionAudit(
+                    row.id,
+                    row.scope,
+                    row.strategy_name,
+                    row.asof_date,
+                    row.status,
+                    row.reason,
+                    tuple(row.preserve_positions),
+                    None if row.context is None else FactorContext.from_payload(row.context),
+                    self._as_utc(row.first_seen),
+                    self._as_utc(row.last_seen),
+                    None if row.recovered_at is None else self._as_utc(row.recovered_at),
+                )
+                for row in rows
+            )
 
     def close(self) -> None:
         """释放数据库连接池。"""
@@ -271,9 +526,14 @@ class TradingRepository:
         account_id: str,
         currency: str,
         net_liquidation: float,
-        free_cash: float,
-        locked_cash: float,
+        available_funds: float | None,
+        total_cash_value: float | None,
         positions: tuple[PositionSnapshotInput, ...],
+        account_updated_at_utc: datetime | None = None,
+        broker_connected: bool | None = None,
+        reconciliation_complete: bool | None = None,
+        broker_stale_after_seconds: int | None = None,
+        not_ready_reason: str | None = None,
     ) -> None:
         """原子记录一次 NT 账户资金与全部开仓仓位。"""
         with self._sessions.begin() as session:
@@ -282,8 +542,13 @@ class TradingRepository:
                 account_id=account_id,
                 currency=currency,
                 net_liquidation=net_liquidation,
-                free_cash=free_cash,
-                locked_cash=locked_cash,
+                available_funds=available_funds,
+                total_cash_value=total_cash_value,
+                account_updated_at_utc=account_updated_at_utc,
+                broker_connected=broker_connected,
+                reconciliation_complete=reconciliation_complete,
+                broker_stale_after_seconds=broker_stale_after_seconds,
+                not_ready_reason=not_ready_reason,
             )
             session.add(account)
             session.flush()
@@ -332,8 +597,17 @@ class TradingRepository:
                 account_id=account.account_id,
                 currency=account.currency,
                 net_liquidation=account.net_liquidation,
-                free_cash=account.free_cash,
-                locked_cash=account.locked_cash,
+                available_funds=account.available_funds,
+                total_cash_value=account.total_cash_value,
+                broker_connected=account.broker_connected,
+                reconciliation_complete=account.reconciliation_complete,
+                broker_stale_after_seconds=account.broker_stale_after_seconds,
+                not_ready_reason=account.not_ready_reason,
+                account_updated_at_utc=(
+                    None
+                    if account.account_updated_at_utc is None
+                    else self._as_utc(account.account_updated_at_utc)
+                ),
                 positions=positions,
             )
 
@@ -362,8 +636,17 @@ class TradingRepository:
                     account_id=row.account_id,
                     currency=row.currency,
                     net_liquidation=row.net_liquidation,
-                    free_cash=row.free_cash,
-                    locked_cash=row.locked_cash,
+                    available_funds=row.available_funds,
+                    total_cash_value=row.total_cash_value,
+                    broker_connected=row.broker_connected,
+                    reconciliation_complete=row.reconciliation_complete,
+                    broker_stale_after_seconds=row.broker_stale_after_seconds,
+                    not_ready_reason=row.not_ready_reason,
+                    account_updated_at_utc=(
+                        None
+                        if row.account_updated_at_utc is None
+                        else self._as_utc(row.account_updated_at_utc)
+                    ),
                 )
                 for row in rows
             )
@@ -533,7 +816,7 @@ class TradingRepository:
         status: str | None = None,
         instrument_id: str | None = None,
     ) -> tuple[OrderAudit, ...]:
-        """每个订单只返回按事件时间判定的最新生命周期状态。"""
+        """按状态推进优先、事件时间次序返回每个订单的当前状态。"""
         ranked = (
             select(
                 OrderEventRecord.id.label("order_event_id"),
@@ -541,6 +824,7 @@ class TradingRepository:
                 .over(
                     partition_by=OrderEventRecord.client_order_id,
                     order_by=(
+                        case(ORDER_STATUS_PRIORITY, value=OrderEventRecord.status, else_=0).desc(),
                         OrderEventRecord.timestamp_utc.desc(),
                         OrderEventRecord.id.desc(),
                     ),
@@ -672,6 +956,11 @@ class TradingRepository:
             ],
             reason=event.reason,
             signal_timestamp_utc=utc_datetime_from_ns(event.ts_event),
+            preserve_positions=list(event.preserve_positions),
+            factor_context=None
+            if event.factor_context is None
+            else event.factor_context.to_payload(),
+            not_before_utc=utc_datetime_from_ns(event.not_before_ns),
             expires_at_utc=utc_datetime_from_ns(event.expires_at_ns),
             status="NEW",
             planned_orders=None,
@@ -759,14 +1048,51 @@ class TradingRepository:
             },
         )
 
-    def claim_auto_signal(self, event_id: str, *, timestamp_ns: int) -> bool:
-        """由 Gateway 独占一个 auto 信号。"""
-        return self._transition(
-            event_id,
-            expected_status="NEW",
-            new_status="PROCESSING",
-            timestamp_ns=timestamp_ns,
-        )
+    def claim_auto_signal(
+        self,
+        event_id: str,
+        *,
+        timestamp_ns: int,
+        planned_orders: tuple[dict[str, object], ...],
+        risk_summary: str,
+    ) -> bool:
+        """在提交前以同一事务独占信号并保存 auto 批准依据。"""
+        now = utc_datetime_from_ns(timestamp_ns)
+        with self._sessions.begin() as session:
+            changed = session.execute(
+                update(SignalWorkflowRecord)
+                .where(
+                    SignalWorkflowRecord.event_id == event_id,
+                    SignalWorkflowRecord.status == "NEW",
+                    SignalWorkflowRecord.expires_at_utc > now,
+                    or_(
+                        SignalWorkflowRecord.not_before_utc.is_(None),
+                        SignalWorkflowRecord.not_before_utc <= now,
+                    ),
+                )
+                .values(
+                    status="PROCESSING",
+                    planned_orders=list(planned_orders),
+                    risk_summary=risk_summary,
+                    decided_at=now,
+                    decision_by="auto",
+                    updated_at=now,
+                )
+                .returning(SignalWorkflowRecord.strategy_name)
+            ).scalar_one_or_none()
+            if changed is None:
+                return False
+            session.add(
+                ApprovalRecord(
+                    event_id=event_id,
+                    timestamp_utc=now,
+                    strategy_name=changed,
+                    approval_mode="auto",
+                    decision="APPROVED",
+                    reason=risk_summary,
+                )
+            )
+        return True
 
     def reject_new_signal(
         self,
@@ -792,6 +1118,7 @@ class TradingRepository:
         reason: str,
         timestamp_ns: int,
         expires_at_ns: int,
+        expected_model_release_id: str | None = None,
     ) -> bool:
         """由操作者原子恢复可重试终态、刷新期限并追加审计记录。"""
         timestamp = utc_datetime_from_ns(timestamp_ns)
@@ -802,6 +1129,27 @@ class TradingRepository:
             row = session.get(SignalWorkflowRecord, event_id)
             if row is None:
                 return False
+            if row.strategy_name == "patchtst_e3":
+                from trading_assistant.data.factor import expected_factor_date
+                from trading_assistant.data.market_calendar import CALENDAR_VERSION
+
+                if row.factor_context is None or row.preserve_positions is None:
+                    return False
+                context = FactorContext.from_payload(row.factor_context)
+                if (
+                    expected_model_release_id != context.model_release_id
+                    or context.calendar_version != CALENDAR_VERSION
+                    or context.asof_date != expected_factor_date(timestamp).isoformat()
+                    or expires_at > self._as_utc(row.expires_at_utc)
+                    or timestamp >= self._as_utc(row.expires_at_utc)
+                    or session.scalar(
+                        select(OrderEventRecord.id)
+                        .where(OrderEventRecord.event_id == event_id)
+                        .limit(1)
+                    )
+                    is not None
+                ):
+                    return False
             statement = (
                 update(SignalWorkflowRecord)
                 .where(
@@ -824,6 +1172,17 @@ class TradingRepository:
             result = cast("CursorResult[Any]", session.execute(statement))
             if result.rowcount != 1:
                 return False
+            if row.strategy_name == "patchtst_e3" and row.factor_context is not None:
+                session.execute(
+                    update(FactorDecisionRecord)
+                    .where(
+                        FactorDecisionRecord.scope == row.scope,
+                        FactorDecisionRecord.strategy_name == row.strategy_name,
+                        FactorDecisionRecord.asof_date == str(row.factor_context["asof_date"]),
+                        FactorDecisionRecord.reason.like("execution:%"),
+                    )
+                    .values(recovered_at=timestamp)
+                )
             session.add(
                 ApprovalRecord(
                     event_id=event_id,
@@ -836,13 +1195,21 @@ class TradingRepository:
             )
             return True
 
-    def claim_next_approved(self, *, timestamp_ns: int) -> SignalWorkflow | None:
+    def claim_next_approved(self, *, timestamp_ns: int, scope: str) -> SignalWorkflow | None:
         """由 Gateway 原子领取最早获批的人工信号。"""
         with Session(self._engine) as session:
             event_ids = tuple(
                 session.scalars(
                     select(SignalWorkflowRecord.event_id)
-                    .where(SignalWorkflowRecord.status == "APPROVED")
+                    .where(
+                        SignalWorkflowRecord.status == "APPROVED",
+                        SignalWorkflowRecord.scope == scope,
+                        or_(
+                            SignalWorkflowRecord.not_before_utc.is_(None),
+                            SignalWorkflowRecord.not_before_utc
+                            <= utc_datetime_from_ns(timestamp_ns),
+                        ),
+                    )
                     .order_by(SignalWorkflowRecord.updated_at, SignalWorkflowRecord.event_id)
                 )
             )
@@ -1027,6 +1394,22 @@ class TradingRepository:
                 )
             return tuple(notifications)
 
+    def list_factor_alert_notifications(
+        self, *, scope: str
+    ) -> tuple[tuple[str, FactorDecisionAudit], ...]:
+        """每个交易日及原因只发一次跳过提醒和一次恢复提醒。"""
+        with Session(self._engine) as session:
+            delivered = set(session.scalars(select(TelegramDeliveryRecord.source_key)))
+        result: list[tuple[str, FactorDecisionAudit]] = []
+        for decision in self.list_factor_decisions(scope=scope):
+            if decision.status != "SKIP":
+                continue
+            phase = "recovered" if decision.recovered_at is not None else "skip"
+            key = f"factor:{decision.id}:{phase}"
+            if key not in delivered:
+                result.append((key, decision))
+        return tuple(result)
+
     def mark_telegram_delivered(
         self,
         *,
@@ -1095,6 +1478,17 @@ class TradingRepository:
             risk_summary=row.risk_summary,
             telegram_chat_id=row.telegram_chat_id,
             telegram_message_id=row.telegram_message_id,
+            preserve_positions=tuple(row.preserve_positions or ()),
+            not_before_ns=(
+                0
+                if row.not_before_utc is None
+                else utc_ns_from_datetime(TradingRepository._as_utc(row.not_before_utc))
+            ),
+            factor_context=(
+                None
+                if row.factor_context is None
+                else FactorContext.from_payload(row.factor_context)
+            ),
         )
 
     @staticmethod
@@ -1108,6 +1502,7 @@ class TradingRepository:
             direction=row.direction,
             quantity=row.quantity,
             reason=row.reason,
+            venue_order_id=row.venue_order_id,
         )
 
     @staticmethod
@@ -1150,11 +1545,13 @@ class TradingRepository:
         direction: str,
         quantity: float,
         reason: str,
+        venue_order_id: str | None = None,
     ) -> None:
         """记录一条订单生命周期事件。"""
         row = OrderEventRecord(
             event_id=signal_event_id,
             order_event_id=order_event_id,
+            venue_order_id=venue_order_id,
             timestamp_utc=utc_datetime_from_ns(timestamp_ns),
             strategy_name=strategy_name,
             instrument_id=instrument_id,
@@ -1165,7 +1562,70 @@ class TradingRepository:
             reason=reason,
         )
         with self._sessions.begin() as session:
-            session.add(row)
+            values = {
+                column.name: getattr(row, column.name)
+                for column in row.__table__.columns
+                if column.name != "id"
+            }
+            session.execute(
+                insert(OrderEventRecord)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[OrderEventRecord.order_event_id])
+            )
+
+    def daily_new_position_count(self, *, scope: str, timestamp_ns: int) -> int:
+        """从已提交订单与批准计划恢复当日开仓计数, 重放及重启均不清零。"""
+        beginning = utc_datetime_from_ns(timestamp_ns).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        with Session(self._engine) as session:
+            rows = session.execute(
+                select(
+                    OrderEventRecord.client_order_id,
+                    OrderEventRecord.instrument_id,
+                    SignalWorkflowRecord.planned_orders,
+                    func.min(OrderEventRecord.timestamp_utc),
+                )
+                .join(
+                    SignalWorkflowRecord, SignalWorkflowRecord.event_id == OrderEventRecord.event_id
+                )
+                .where(
+                    SignalWorkflowRecord.scope == scope,
+                    OrderEventRecord.direction == "BUY",
+                )
+                .group_by(
+                    OrderEventRecord.client_order_id,
+                    OrderEventRecord.instrument_id,
+                    SignalWorkflowRecord.planned_orders,
+                )
+                .having(
+                    func.sum(
+                        case(
+                            (
+                                OrderEventRecord.status.in_(
+                                    ("SUBMITTED", "ACCEPTED", "PARTIALLY_FILLED", "FILLED")
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    )
+                    > 0
+                )
+            )
+            opened: set[str] = set()
+            for client_id, instrument, planned, first_seen in rows:
+                # 旧报告今天重放不能把昨日的订单计为今天的新开仓。
+                if not beginning <= self._as_utc(first_seen) < beginning + timedelta(days=1):
+                    continue
+                item = next(
+                    (item for item in planned or () if item.get("instrument_id") == instrument),
+                    None,
+                )
+                # 历史计划缺少开仓标记时保守计入, 不以缺字段清零限制。
+                if item is None or item.get("opens_position", True):
+                    opened.add(client_id)
+            return len(opened)
 
     def record_fill(
         self,
@@ -1181,24 +1641,45 @@ class TradingRepository:
         quantity: float,
         price: float,
         commission: float,
-    ) -> None:
-        """记录逐笔成交。"""
+        order_event: OrderEventRecord | None = None,
+    ) -> bool:
+        """原子保存成交及对应订单状态; 一致重放无副作用, 内容冲突报错。"""
         audit_trade_id = f"{run_id}:{trade_id}" if run_id is not None else trade_id
-        row = FillRecord(
-            run_id=run_id,
-            event_id=signal_event_id,
-            trade_id=audit_trade_id,
-            timestamp_utc=utc_datetime_from_ns(timestamp_ns),
-            strategy_name=strategy_name,
-            instrument_id=instrument_id,
-            client_order_id=client_order_id,
-            direction=direction,
-            quantity=quantity,
-            price=price,
-            commission=commission,
-        )
+        values = {
+            "run_id": run_id,
+            "event_id": signal_event_id,
+            "trade_id": audit_trade_id,
+            "timestamp_utc": utc_datetime_from_ns(timestamp_ns),
+            "strategy_name": strategy_name,
+            "instrument_id": instrument_id,
+            "client_order_id": client_order_id,
+            "direction": direction,
+            "quantity": quantity,
+            "price": price,
+            "commission": commission,
+        }
         with self._sessions.begin() as session:
-            session.add(row)
+            inserted = session.execute(
+                insert(FillRecord)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[FillRecord.trade_id])
+                .returning(FillRecord.id)
+            ).scalar_one_or_none()
+            if inserted is None:
+                existing = session.scalar(
+                    select(FillRecord).where(FillRecord.trade_id == audit_trade_id)
+                )
+                assert existing is not None
+                for key, value in values.items():
+                    actual = getattr(existing, key)
+                    if isinstance(actual, datetime):
+                        actual = self._as_utc(actual)
+                    if actual != value:
+                        raise ValueError(f"Conflicting fill replay: {audit_trade_id}: {key}")
+                return False
+            if order_event is not None:
+                session.add(order_event)
+        return True
 
     def start_backtest_run(self, run_id: str, started_at: datetime) -> None:
         """记录回测开始。"""

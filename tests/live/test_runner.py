@@ -1,8 +1,8 @@
 """TradingNode paper-only 离线装配测试。"""
 
 import shutil
-import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -12,6 +12,7 @@ from nautilus_trader.model.identifiers import AccountId
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
 from trading_assistant.live import runner
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,10 +30,12 @@ def _patchtst_project(
     values = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
     assert isinstance(values, dict)
     values["active_strategy"] = "patchtst_e3"
+    values["strategies"]["patchtst_e3"]["parameters"]["model_release_id"] = "b" * 64
     strategy_path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
     catalog_path = tmp_path / "catalog"
     if source_kind is not None:
         score = FactorScoreData(
+            calendar_version=CALENDAR_VERSION,
             canonical_id="SPY.US",
             security_id="eodhd:isin:SPY",
             asof_date="2025-01-02",
@@ -41,7 +44,7 @@ def _patchtst_project(
             batch_id="delivery:2025-01-02",
             batch_size=batch_size,
             delivery_id="d" * 64,
-            model_release_id="r" * 64,
+            model_release_id="b" * 64,
             source_kind=source_kind,
             ts_event=1,
             ts_init=1,
@@ -100,33 +103,36 @@ def test_builds_patchtst_actor_only_from_complete_production_factors(
 
 
 @pytest.mark.parametrize(
-    ("source_kind", "batch_size", "message"),
+    ("source_kind", "batch_size"),
     [
-        (None, 1, "no FactorScoreData"),
-        ("evaluation_predictions", 1, "requires signal_inference"),
-        ("signal_inference", 2, "incomplete"),
+        (None, 1),
+        ("evaluation_predictions", 1),
+        ("signal_inference", 2),
     ],
 )
-def test_patchtst_paper_preflight_rejects_unsafe_factor_catalog(
+def test_patchtst_paper_starts_monitoring_even_without_usable_factor_batch(
     tmp_path: Path,
     source_kind: str | None,
     batch_size: int,
-    message: str,
 ) -> None:
     catalog_path = _patchtst_project(
         tmp_path,
         source_kind=source_kind,
         batch_size=batch_size,
     )
-    with pytest.raises(ValueError, match=message):
-        runner.build_trading_node_config(
-            project_root=tmp_path,
-            environ={
-                "TRADING_MODE": "paper",
-                "TWS_ACCOUNT": "DU123",
-                "CATALOG_PATH": str(catalog_path),
-            },
-        )
+    config = runner.build_trading_node_config(
+        project_root=tmp_path,
+        environ={
+            "TRADING_MODE": "paper",
+            "TWS_ACCOUNT": "DU123",
+            "CATALOG_PATH": str(catalog_path),
+        },
+    )
+    actor = config.actors[0].config
+    assert actor["bootstrap_from_catalog"] is True
+    assert actor["allow_evaluation_predictions"] is False
+    assert actor["factor_check_interval_seconds"] == 60
+    assert actor["model_release_id"] == "b" * 64
 
 
 @pytest.mark.parametrize(
@@ -141,47 +147,35 @@ def test_rejects_non_paper_or_missing_account(environ: dict[str, str], message: 
         runner.build_trading_node_config(project_root=Path.cwd(), environ=environ)
 
 
-def test_sync_live_catalog_runs_m1_cli(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+def test_live_runtime_requires_prepared_catalog_and_migrated_database(tmp_path: Path) -> None:
+    from trading_assistant.storage.repository import TradingRepository
 
-    def fake_run(command: list[str], **kwargs: object) -> None:
-        assert command[-1].endswith("scripts/fetch_data.py")
-        calls.append(kwargs)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    runner.sync_live_catalog(
-        project_root=Path("/project"),
-        environ={"CATALOG_PATH": "catalog"},
-    )
-    assert calls == [
-        {
-            "cwd": Path("/project"),
-            "env": {"CATALOG_PATH": "catalog"},
-            "check": True,
-        }
-    ]
-
-
-def test_sync_live_catalog_fails_closed_on_child_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*_: object, **__: object) -> None:
-        raise subprocess.CalledProcessError(1, ["python", "fetch_data.py"])
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="Catalog sync process"):
-        runner.sync_live_catalog(project_root=Path.cwd(), environ={})
+    catalog = tmp_path / "catalog"
+    environ = {
+        "CATALOG_PATH": str(catalog),
+        "LIVE_DATABASE_URL": f"sqlite:///{tmp_path / 'live.db'}",
+    }
+    with pytest.raises(RuntimeError, match="not prepared"):
+        runner.validate_live_runtime(project_root=tmp_path, environ=environ)
+    CatalogRepository(catalog)
+    repository = TradingRepository(environ["LIVE_DATABASE_URL"])
+    repository.create_schema()
+    repository.close()
+    runner.validate_live_runtime(project_root=tmp_path, environ=environ)
 
 
 def test_run_live_builds_runs_and_disposes_node(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
     def fake_sync(**_: object) -> None:
-        calls.append("sync")
+        calls.append("validate")
 
     class FakeNode:
         def __init__(self, config: object) -> None:
             assert config == "config"
+            self.kernel = SimpleNamespace(
+                catalogs={}, trader=SimpleNamespace(actors=lambda: [], strategies=lambda: [])
+            )
 
         def add_exec_client_factory(self, name: str, factory: object) -> None:
             assert name == "IB"
@@ -197,23 +191,24 @@ def test_run_live_builds_runs_and_disposes_node(monkeypatch: pytest.MonkeyPatch)
         def dispose(self) -> None:
             calls.append("dispose")
 
-    monkeypatch.setattr(runner, "sync_live_catalog", fake_sync)
+    monkeypatch.setattr(runner, "validate_live_runtime", fake_sync)
     monkeypatch.setattr(runner, "build_trading_node_config", lambda **_: "config")
     monkeypatch.setattr(runner, "TradingNode", cast(Any, FakeNode))
+    monkeypatch.setitem(runner.IB_CLIENTS, ("127.0.0.1", 4002, 1202), cast(Any, object()))
     runner.run_live(
         project_root=Path.cwd(),
         environ={"TRADING_MODE": "paper", "TWS_ACCOUNT": "DU123"},
     )
-    assert calls == ["sync", "factory", "build", "run", "dispose"]
+    assert calls == ["validate", "factory", "build", "run", "dispose"]
 
 
-def test_run_live_does_not_create_node_when_sync_fails(
+def test_run_live_does_not_create_node_when_runtime_validation_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_sync(**_: object) -> None:
         raise RuntimeError("sync failed")
 
-    monkeypatch.setattr(runner, "sync_live_catalog", fake_sync)
+    monkeypatch.setattr(runner, "validate_live_runtime", fake_sync)
     with pytest.raises(RuntimeError, match="sync failed"):
         runner.run_live(
             project_root=Path.cwd(),
@@ -221,9 +216,46 @@ def test_run_live_does_not_create_node_when_sync_fails(
         )
 
 
-def test_run_live_rejects_live_before_sync() -> None:
+def test_run_live_rejects_live_before_validation() -> None:
     with pytest.raises(ValueError, match="paper"):
         runner.run_live(
             project_root=Path.cwd(),
             environ={"TRADING_MODE": "live", "TWS_ACCOUNT": "U123"},
         )
+
+
+def test_session_invalidates_reconciliation_on_transport_reconnect() -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        received = asyncio.Event()
+
+        async def reconcile(*, timeout_secs: float) -> bool:
+            assert timeout_secs == 30
+            received.set()
+            return True
+
+        client = SimpleNamespace(is_ready=True, _last_disconnection_ns=None)
+        node = SimpleNamespace(
+            kernel=SimpleNamespace(
+                trader=SimpleNamespace(is_running=True),
+                exec_engine=SimpleNamespace(
+                    check_connected=lambda: True, reconcile_execution_state=reconcile
+                ),
+            )
+        )
+        session = runner.BrokerSession(node, client)
+        assert session.status() == (True, True)
+        client.is_ready = False
+        client._last_disconnection_ns = 10
+        assert session.status() == (False, False)
+        client.is_ready = True
+        assert session.status() == (True, False)
+        task = asyncio.create_task(session.monitor())
+        await asyncio.wait_for(received.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert session.status() == (True, True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())

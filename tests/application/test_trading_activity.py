@@ -12,7 +12,9 @@ from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.storage.repository import TradingRepository
 
 
-def _seed(tmp_path: Path) -> tuple[str, str]:
+def _seed(
+    tmp_path: Path, *, final_status: str = "FILLED", filled_quantity: float = 2
+) -> tuple[str, str]:
     database_url = f"sqlite:///{tmp_path}/live.db"
     repository = TradingRepository(database_url)
     repository.create_schema()
@@ -59,24 +61,25 @@ def _seed(tmp_path: Path) -> tuple[str, str]:
         strategy_name="patchtst_e3",
         instrument_id="AAPL.US",
         client_order_id="O-1",
-        status="FILLED",
+        status=final_status,
         direction="BUY",
         quantity=2,
         reason="filled",
     )
-    repository.record_fill(
-        run_id=None,
-        signal_event_id=workflow.event_id,
-        trade_id="T-1",
-        timestamp_ns=14_000_000_000,
-        strategy_name="patchtst_e3",
-        instrument_id="AAPL.US",
-        client_order_id="O-1",
-        direction="BUY",
-        quantity=2,
-        price=100,
-        commission=0.5,
-    )
+    if filled_quantity:
+        repository.record_fill(
+            run_id=None,
+            signal_event_id=workflow.event_id,
+            trade_id="T-1",
+            timestamp_ns=14_000_000_000,
+            strategy_name="patchtst_e3",
+            instrument_id="AAPL.US",
+            client_order_id="O-1",
+            direction="BUY",
+            quantity=filled_quantity,
+            price=100,
+            commission=0.5,
+        )
     repository.close()
     return database_url, workflow.event_id
 
@@ -192,3 +195,47 @@ def test_trading_service_handles_missing_scope_objects_and_corrupt_database(
     with pytest.raises(QuerySourceError, match="交易审计库"):
         broken_service.list_workflows(offset=0, limit=10, status=None)
     broken.close()
+
+
+@pytest.mark.parametrize(
+    ("final_status", "filled_quantity"),
+    [
+        ("FILLED", 2),
+        ("PARTIALLY_FILLED", 1),
+        ("CANCELED", 1),
+        ("EXPIRED", 1),
+        ("REJECTED", 0),
+        ("DENIED", 0),
+    ],
+)
+def test_order_views_do_not_regress_on_later_accepted_timestamp(
+    tmp_path: Path, final_status: str, filled_quantity: float
+) -> None:
+    database_url, event_id = _seed(
+        tmp_path, final_status=final_status, filled_quantity=filled_quantity
+    )
+    repository = TradingRepository(database_url)
+    # 券商成交只有秒精度; 接单本地时钟和迟到回报不能覆盖已确定的状态。
+    repository.record_order_event(
+        signal_event_id=event_id,
+        order_event_id="oe-late-accepted",
+        timestamp_ns=14_650_000_000,
+        strategy_name="patchtst_e3",
+        instrument_id="AAPL.US",
+        client_order_id="O-1",
+        status="ACCEPTED",
+        direction="BUY",
+        quantity=2,
+        reason="accepted report with finer timestamp",
+    )
+    service = TradingActivityQueryService(repository=repository, scope="paper:DU123")
+    for status in (None, final_status):
+        orders = service.list_orders(offset=0, limit=1, status=status, instrument_id=None)
+        assert len(orders.items) == 1
+        assert orders.items[0].status == final_status
+        assert orders.items[0].filled_quantity == filled_quantity
+    assert service.list_orders(offset=0, limit=1, status="ACCEPTED", instrument_id=None).items == ()
+    detail = service.order_detail("O-1")
+    assert detail.summary.status == final_status
+    assert detail.events[-1].status == "ACCEPTED"
+    repository.close()

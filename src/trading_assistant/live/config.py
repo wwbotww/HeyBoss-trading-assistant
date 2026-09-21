@@ -17,6 +17,10 @@ class LiveSettings:
     approval_poll_interval_seconds: int
     notification_poll_interval_seconds: float
     portfolio_snapshot_interval_seconds: int
+    factor_check_interval_seconds: int = 60
+    paper_input_poll_interval_seconds: int = 60
+    paper_input_retry_interval_seconds: int = 1800
+    broker_account_stale_after_seconds: int = 300
 
 
 def load_live_settings(path: Path) -> LiveSettings:
@@ -31,6 +35,16 @@ def load_live_settings(path: Path) -> LiveSettings:
             approval_poll_interval_seconds=int(values["approval_poll_interval_seconds"]),
             notification_poll_interval_seconds=float(values["notification_poll_interval_seconds"]),
             portfolio_snapshot_interval_seconds=int(values["portfolio_snapshot_interval_seconds"]),
+            factor_check_interval_seconds=int(values.get("factor_check_interval_seconds", 60)),
+            paper_input_poll_interval_seconds=int(
+                values.get("paper_input_poll_interval_seconds", 60)
+            ),
+            paper_input_retry_interval_seconds=int(
+                values.get("paper_input_retry_interval_seconds", 1800)
+            ),
+            broker_account_stale_after_seconds=int(
+                values.get("broker_account_stale_after_seconds", 300)
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"live 配置字段无效: {path}: {exc}") from exc
@@ -42,4 +56,13 @@ def load_live_settings(path: Path) -> LiveSettings:
         raise ValueError("notification_poll_interval_seconds 必须大于 0")
     if settings.portfolio_snapshot_interval_seconds < 5:
         raise ValueError("portfolio_snapshot_interval_seconds 必须大于等于 5")
+    if settings.factor_check_interval_seconds < 1:
+        raise ValueError("factor_check_interval_seconds 必须为正数")
+    for name in (
+        "paper_input_poll_interval_seconds",
+        "paper_input_retry_interval_seconds",
+        "broker_account_stale_after_seconds",
+    ):
+        if getattr(settings, name) < 1:
+            raise ValueError(f"{name} 必须为正数")
     return settings

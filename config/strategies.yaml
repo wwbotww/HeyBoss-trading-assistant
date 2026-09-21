@@ -11,7 +11,7 @@ strategies:
       rebalance_frequency: month_end
       fallback_instrument: BIL.US
   patchtst_e3:
-    approval_mode: manual
+    approval_mode: auto
     signal_expiry_hours: 24
     parameters:
       top_n: 3
@@ -19,3 +19,5 @@ strategies:
       rebalance_frequency: daily
       # 仅允许隔离回测使用评估 predictions 转换批次；paper runner 永远覆盖为 false。
       allow_evaluation_predictions: false
+      # 固定 826 发布; 每日 paper 只接受该模型的新 signal_inference。
+      model_release_id: fbd630164624c71fe67c5b7c6637f5be08ef3179bdf93f9c3aa48d208c44d7ef

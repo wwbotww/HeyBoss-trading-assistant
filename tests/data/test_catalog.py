@@ -6,7 +6,8 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
 from tests.data.helpers import make_bar
@@ -147,3 +148,36 @@ def test_catalog_range_replacement_rejects_invalid_boundaries(tmp_path: Path) ->
             start_ns=bar.ts_init + 1,
             end_ns=bar.ts_init + 2,
         )
+
+
+@pytest.mark.parametrize("operation", ["append", "replace_full", "replace_range", "delete"])
+def test_failed_publication_or_rollback_keeps_readers_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """真实底层写入失败或回滚也失败时, 不能释放半成品给后续读者。"""
+    repository = CatalogRepository(tmp_path / "catalog")
+    first = make_bar(date(2026, 7, 13), close=101)
+    second = make_bar(date(2026, 7, 14), close=102)
+    repository.replace_bars([first])
+
+    def fail_write(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk unavailable")
+
+    method = "delete_data_range" if operation == "delete" else "write_data"
+    operations = {
+        "append": lambda: repository.append_new_bars([second]),
+        "replace_full": lambda: repository.replace_bars([second]),
+        "replace_range": lambda: repository.replace_bar_range(
+            [second], start_ns=first.ts_init, end_ns=second.ts_init
+        ),
+        "delete": lambda: repository.catalog.delete_data_range(Bar, identifier=str(first.bar_type)),
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(ParquetDataCatalog, method, fail_write)
+        with pytest.raises(OSError, match="disk unavailable"):
+            operations[operation]()
+    assert (tmp_path / "catalog" / ".catalog-writing").exists()
+    with pytest.raises(RuntimeError, match="publication was interrupted"):
+        repository.read_bars(first.bar_type)
+    with pytest.raises(RuntimeError, match="publication was interrupted"):
+        repository.append_new_bars([second])

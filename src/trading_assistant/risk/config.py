@@ -18,6 +18,8 @@ class RiskLimits:
     max_instrument_weight: float
     max_daily_new_positions: int
     max_gross_exposure: float
+    max_factor_unscorable_fraction: float = 0.0
+    max_factor_preserved_price_age_sessions: int = 0
 
 
 def load_risk_limits(path: Path) -> RiskLimits:
@@ -33,6 +35,10 @@ def load_risk_limits(path: Path) -> RiskLimits:
             max_instrument_weight=float(risk["max_instrument_weight"]),
             max_daily_new_positions=int(risk["max_daily_new_positions"]),
             max_gross_exposure=float(risk["max_gross_exposure"]),
+            max_factor_unscorable_fraction=float(risk.get("max_factor_unscorable_fraction", 0)),
+            max_factor_preserved_price_age_sessions=int(
+                risk.get("max_factor_preserved_price_age_sessions", 0)
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"风控配置字段无效: {path}: {exc}") from exc
@@ -47,4 +53,8 @@ def load_risk_limits(path: Path) -> RiskLimits:
         raise ValueError("max_daily_new_positions 必须大于等于 1")
     if not 0 < limits.max_gross_exposure <= 1:
         raise ValueError("max_gross_exposure 必须在 (0, 1] 范围内")
+    if not 0 <= limits.max_factor_unscorable_fraction <= 1:
+        raise ValueError("max_factor_unscorable_fraction 必须在 [0, 1] 范围内")
+    if limits.max_factor_preserved_price_age_sessions < 0:
+        raise ValueError("max_factor_preserved_price_age_sessions 不得为负")
     return limits

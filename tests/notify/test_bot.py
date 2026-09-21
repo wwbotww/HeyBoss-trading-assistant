@@ -225,3 +225,38 @@ def test_main_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN"):
         main()
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_factor_skip_and_recovery_notify_once_without_trade_signal(tmp_path: Path) -> None:
+    bot = _bot(tmp_path)
+    application = cast(
+        TelegramApplication,
+        SimpleNamespace(
+            bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)))
+        ),
+    )
+    now = time.time_ns()
+    for offset in (0, 1):
+        bot._repository.record_factor_decision(
+            scope="paper:DU123",
+            strategy_name="patchtst_e3",
+            asof_date="2025-01-02",
+            status="SKIP",
+            reason="missing_expected_factor_batch",
+            timestamp_ns=now + offset,
+        )
+        asyncio.run(bot._poll_once(application))
+    assert application.bot.send_message.await_count == 1
+    assert "已跳过" in application.bot.send_message.await_args.kwargs["text"]
+    bot._repository.record_factor_decision(
+        scope="paper:DU123",
+        strategy_name="patchtst_e3",
+        asof_date="2025-01-02",
+        status="REBALANCE",
+        reason="eligible_top_n",
+        timestamp_ns=now + 2,
+    )
+    asyncio.run(bot._poll_once(application))
+    asyncio.run(bot._poll_once(application))
+    assert application.bot.send_message.await_count == 2
+    assert "已恢复" in application.bot.send_message.await_args.kwargs["text"]

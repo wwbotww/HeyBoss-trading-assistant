@@ -1,6 +1,7 @@
 """Telegram 卡片文本测试。"""
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from trading_assistant.notify.messages import (
     approval_card,
@@ -75,3 +76,19 @@ def test_formats_workflow_risk_alert() -> None:
     assert "风控拒绝" in message
     assert "max_order_notional_usd exceeded" in message
     assert "不会下单" in message
+
+
+def test_factor_approval_card_shows_protection_window_and_actual_budget(tmp_path: Path) -> None:
+    from tests.execution.test_gateway import _factor_setup
+
+    gateway, repository, event = _factor_setup(tmp_path)
+    repository.register_signal_workflow(event, scope="paper:factor")
+    gateway._process_signal(event)
+    workflow = repository.get_signal_workflow(str(event.id))
+    assert workflow is not None
+    card = approval_card(workflow)
+    assert "因子调仓审批" in card
+    assert "2025-01-02" in card
+    assert "S9.US" in card
+    assert "14:30:00+00:00" in card
+    assert "normal_budget=50.00%" in card

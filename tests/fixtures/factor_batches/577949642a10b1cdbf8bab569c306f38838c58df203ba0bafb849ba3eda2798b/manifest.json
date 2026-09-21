@@ -15,8 +15,8 @@
     "ratio": 1.0,
     "scored_eligible_rows": 8
   },
-  "created_at": "2026-08-14T06:34:47.822522Z",
-  "delivery_id": "3b9eaacfb408310ed421659b12ffca70c8e84620169a208d6614a7a47e6bbea4",
+  "created_at": "2026-09-16T05:53:00.078888Z",
+  "delivery_id": "577949642a10b1cdbf8bab569c306f38838c58df203ba0bafb849ba3eda2798b",
   "input": {
     "identity_policy": "eodhd_isin_only",
     "snapshot_id": "MOCK-INFERENCE-SNAPSHOT-NOT-FOR-TRADING",
@@ -44,7 +44,7 @@
   "status": "complete",
   "time": {
     "calendar": "US_EQUITIES_REGULAR",
-    "calendar_version": "2026.1",
+    "calendar_version": "exchange_calendars:4.13.2:XNYS",
     "earliest_execution": "next_regular_session_open",
     "maximum_asof_date": "2026-08-12",
     "minimum_asof_date": "2026-08-12",

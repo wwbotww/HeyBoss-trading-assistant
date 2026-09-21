@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+
 from trading_assistant.risk.config import RiskLimits
 
 
@@ -17,17 +20,36 @@ def effective_strategy_equity(
 def apply_weight_limits(
     requested_weights: dict[str, float],
     limits: RiskLimits,
+    *,
+    preserved_weights: Mapping[str, float] | None = None,
 ) -> dict[str, float]:
     """依次应用单标的与总仓位上限并保留现金。不重新放大权重。"""
+    preserved = preserved_weights or {}
+    if any(
+        not math.isfinite(weight) or weight < 0 or weight > limits.max_instrument_weight
+        for weight in preserved.values()
+    ):
+        raise ValueError("preserved position exceeds instrument risk limit")
+    preserved_gross = sum(preserved.values())
+    if preserved_gross > limits.max_gross_exposure:
+        raise ValueError("preserved positions exceed gross risk limit")
+    budget = max(
+        0.0,
+        min(
+            sum(max(weight, 0.0) for weight in requested_weights.values()),
+            limits.max_gross_exposure,
+        )
+        - preserved_gross,
+    )
     capped = {
         instrument_id: min(max(weight, 0.0), limits.max_instrument_weight)
         for instrument_id, weight in requested_weights.items()
-        if weight > 0
+        if weight > 0 and instrument_id not in preserved
     }
     gross = sum(capped.values())
-    if gross <= limits.max_gross_exposure:
+    if gross <= budget:
         return capped
-    scale = limits.max_gross_exposure / gross
+    scale = budget / gross
     return {instrument_id: weight * scale for instrument_id, weight in capped.items()}
 
 

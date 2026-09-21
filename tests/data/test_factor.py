@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -36,9 +36,11 @@ from trading_assistant.data.factor import (
     _string,
     import_factor_bundle,
 )
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
+from trading_assistant.storage.repository import TradingRepository
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FACDIGGER_MOCK_DELIVERY_ID = "3b9eaacfb408310ed421659b12ffca70c8e84620169a208d6614a7a47e6bbea4"
+FACDIGGER_MOCK_DELIVERY_ID = "577949642a10b1cdbf8bab569c306f38838c58df203ba0bafb849ba3eda2798b"
 
 
 def _spec(
@@ -173,7 +175,7 @@ def _write_bundle(
         },
         "time": {
             "calendar": "US_EQUITIES_REGULAR",
-            "calendar_version": "2026.1",
+            "calendar_version": CALENDAR_VERSION,
             "timezone": "America/New_York",
             "minimum_asof_date": dates[0],
             "maximum_asof_date": dates[-1],
@@ -238,7 +240,7 @@ def _scores(catalog_path: Path) -> list[FactorScoreData]:
     "model_type", ["financial_pretrained_patchtst", "finance_patch_transformer"]
 )
 def test_factor_import_resolves_identity_by_asof_date(
-    tmp_path: Path, source_kind: str, model_type: str
+    tmp_path: Path, source_kind: str, model_type: str, factor_repository: TradingRepository
 ) -> None:
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
@@ -264,6 +266,8 @@ def test_factor_import_resolves_identity_by_asof_date(
         )
         for already_imported in (False, True):
             result = import_factor_bundle(
+                mode="historical",
+                repository=factor_repository,
                 bundle_dir=bundle,
                 catalog_path=catalog_path,
                 instruments=(instrument,),
@@ -285,7 +289,11 @@ def test_factor_import_resolves_identity_by_asof_date(
 @pytest.mark.parametrize("include_correct", [False, True])
 @pytest.mark.parametrize("session", [date(2025, 1, 2), date(2025, 1, 3)])
 def test_factor_import_rejects_wrong_date_identity_before_writing(
-    tmp_path: Path, source_kind: str, include_correct: bool, session: date
+    tmp_path: Path,
+    source_kind: str,
+    include_correct: bool,
+    session: date,
+    factor_repository: TradingRepository,
 ) -> None:
     instrument = _dated_spec()
     expected = instrument.factor_security_id_on(session)
@@ -302,6 +310,8 @@ def test_factor_import_rejects_wrong_date_identity_before_writing(
     _write_price_bars(catalog_path)
     with pytest.raises(ValueError, match=r"factor identity.*not valid.*2025-01-0"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
@@ -314,7 +324,7 @@ def test_factor_import_rejects_wrong_date_identity_before_writing(
 @pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
 @pytest.mark.parametrize("missing_date", [date(2025, 1, 2), date(2025, 1, 6)])
 def test_factor_import_rejects_identity_gap_instead_of_evaluation_placeholder(
-    tmp_path: Path, source_kind: str, missing_date: date
+    tmp_path: Path, source_kind: str, missing_date: date, factor_repository: TradingRepository
 ) -> None:
     instrument = replace(
         _dated_spec(), factor_identity_periods=_dated_spec().factor_identity_periods[1:]
@@ -323,6 +333,8 @@ def test_factor_import_rejects_identity_gap_instead_of_evaluation_placeholder(
     bundle = _write_bundle(tmp_path / "bundle", rows=[row], source_kind=source_kind)
     with pytest.raises(ValueError, match=rf"No factor identity.*AAPL\.US.*{missing_date}"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
@@ -334,7 +346,7 @@ def test_factor_import_rejects_identity_gap_instead_of_evaluation_placeholder(
 
 @pytest.mark.parametrize("source_kind", ["signal_inference", "evaluation_predictions"])
 def test_dated_mapping_keeps_existing_missing_prediction_rules(
-    tmp_path: Path, source_kind: str
+    tmp_path: Path, source_kind: str, factor_repository: TradingRepository
 ) -> None:
     rows = [{**_rows()[1], "score": 0.5, "eligible": True}]
     bundle = _write_bundle(tmp_path / "bundle", rows=rows, source_kind=source_kind)
@@ -346,6 +358,8 @@ def test_dated_mapping_keeps_existing_missing_prediction_rules(
         else nullcontext()
     ):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(_dated_spec(), _spec("MSFT", "eodhd:isin:MSFT")),
@@ -364,7 +378,7 @@ def test_dated_mapping_keeps_existing_missing_prediction_rules(
 
 @pytest.mark.parametrize("duplicate_canonical", [False, True])
 def test_factor_import_validates_direct_api_mapping_collisions(
-    tmp_path: Path, duplicate_canonical: bool
+    tmp_path: Path, duplicate_canonical: bool, factor_repository: TradingRepository
 ) -> None:
     bundle = _write_bundle(tmp_path / "bundle")
     other = (
@@ -379,6 +393,8 @@ def test_factor_import_validates_direct_api_mapping_collisions(
     )
     with pytest.raises(ValueError, match=message):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_dated_spec(), other),
@@ -390,7 +406,7 @@ def test_factor_import_validates_direct_api_mapping_collisions(
 
 @pytest.mark.parametrize("identity_gap", [False, True])
 def test_ineligible_row_does_not_bypass_identity_validation(
-    tmp_path: Path, identity_gap: bool
+    tmp_path: Path, identity_gap: bool, factor_repository: TradingRepository
 ) -> None:
     instrument = _dated_spec()
     if identity_gap:
@@ -401,6 +417,8 @@ def test_ineligible_row_does_not_bypass_identity_validation(
     bundle = _write_bundle(tmp_path / "bundle", rows=[row])
     with pytest.raises(ValueError, match="factor identity"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(instrument,),
@@ -410,13 +428,17 @@ def test_ineligible_row_does_not_bypass_identity_validation(
     assert _scores(tmp_path / "catalog") == []
 
 
-def test_later_identity_failure_does_not_partially_write_history(tmp_path: Path) -> None:
+def test_later_identity_failure_does_not_partially_write_history(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     rows = [_rows()[0], {**_rows()[0], "asof_date": date(2025, 1, 3)}]
     bundle = _write_bundle(tmp_path / "bundle", rows=rows, source_kind="evaluation_predictions")
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
     with pytest.raises(ValueError, match=r"factor identity.*not valid.*2025-01-03"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(_dated_spec(),),
@@ -426,7 +448,9 @@ def test_later_identity_failure_does_not_partially_write_history(tmp_path: Path)
     assert _scores(catalog_path) == []
 
 
-def test_identity_checks_ignore_unrelated_and_inactive_instruments(tmp_path: Path) -> None:
+def test_identity_checks_ignore_unrelated_and_inactive_instruments(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     """接收范围外的无 ISIN 股票及尚未活跃的目标不阻止当天交付。"""
     instrument = replace(
         _dated_spec(),
@@ -448,6 +472,8 @@ def test_identity_checks_ignore_unrelated_and_inactive_instruments(tmp_path: Pat
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
     import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=(instrument, _spec("MSFT", "eodhd:isin:MSFT")),
@@ -459,7 +485,9 @@ def test_identity_checks_ignore_unrelated_and_inactive_instruments(tmp_path: Pat
     assert imported[0].batch_size == 1
 
 
-def test_identity_can_change_owner_only_in_nonoverlapping_dates(tmp_path: Path) -> None:
+def test_identity_can_change_owner_only_in_nonoverlapping_dates(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     instrument = _dated_spec()
     second = _spec("MSFT", "eodhd:isin:AAPL", first_trading_date=date(2025, 1, 3))
     rows = [
@@ -470,6 +498,8 @@ def test_identity_can_change_owner_only_in_nonoverlapping_dates(tmp_path: Path) 
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
     import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=(instrument, second),
@@ -486,6 +516,7 @@ def test_nt_catalog_request_routes_factor_scores_to_the_actor_topic(tmp_path: Pa
     """NT Catalog 历史请求不得因 DataType metadata 不一致而静默丢失整批因子。"""
     catalog = CatalogRepository(tmp_path / "catalog")
     score = FactorScoreData(
+        calendar_version=CALENDAR_VERSION,
         canonical_id="AAPL.US",
         security_id="eodhd:isin:US0378331005",
         asof_date="2026-08-12",
@@ -534,7 +565,7 @@ def test_nt_catalog_request_routes_factor_scores_to_the_actor_topic(tmp_path: Pa
 
 
 def test_real_facdigger_mock_bundle_imports_with_project_identity_mapping(
-    tmp_path: Path,
+    tmp_path: Path, factor_repository: TradingRepository
 ) -> None:
     """产消者必须直接验证 FacDigger 产出的原始交付, 而不只验证本地构造的 fixture。"""
     instruments = load_instruments(PROJECT_ROOT / "config" / "instruments.yaml")
@@ -556,6 +587,8 @@ def test_real_facdigger_mock_bundle_imports_with_project_identity_mapping(
     assert catalog.append_new_bars(bars) == 20
 
     summary = import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=(
             PROJECT_ROOT / "tests" / "fixtures" / "factor_batches" / FACDIGGER_MOCK_DELIVERY_ID
         ),
@@ -592,7 +625,7 @@ def test_real_facdigger_mock_bundle_imports_with_project_identity_mapping(
     ["financial_pretrained_patchtst", "finance_patch_transformer", "lightgbm"],
 )
 def test_factor_bundle_imports_nt_custom_data_and_is_idempotent(
-    tmp_path: Path, model_type: str
+    tmp_path: Path, model_type: str, factor_repository: TradingRepository
 ) -> None:
     bundle = _write_bundle(
         tmp_path / "bundles",
@@ -608,6 +641,8 @@ def test_factor_bundle_imports_nt_custom_data_and_is_idempotent(
     )
 
     summary = import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=instruments,
@@ -628,6 +663,8 @@ def test_factor_bundle_imports_nt_custom_data_and_is_idempotent(
     assert ineligible.score == 0.0
 
     repeated = import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=instruments,
@@ -668,10 +705,13 @@ def test_factor_bundle_rejects_invalid_manifest(
     tmp_path: Path,
     mutation: Callable[[dict[str, object]], None],
     message: str,
+    factor_repository: TradingRepository,
 ) -> None:
     bundle = _write_bundle(tmp_path, mutate_manifest=mutation, preserve_delivery_id=True)
     with pytest.raises(ValueError, match=message):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -680,12 +720,16 @@ def test_factor_bundle_rejects_invalid_manifest(
         )
 
 
-def test_factor_bundle_rejects_delivery_directory_mismatch(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_delivery_directory_mismatch(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     bundle = _write_bundle(tmp_path)
     renamed = bundle.with_name("0" * 64)
     bundle.rename(renamed)
     with pytest.raises(ValueError, match="directory name"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=renamed,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -717,10 +761,13 @@ def test_factor_bundle_rejects_delivery_directory_mismatch(tmp_path: Path) -> No
 def test_factor_bundle_semantic_change_requires_new_delivery_id(
     tmp_path: Path,
     mutation: Callable[[dict[str, object]], None],
+    factor_repository: TradingRepository,
 ) -> None:
     bundle = _write_bundle(tmp_path, mutate_manifest=mutation, preserve_delivery_id=True)
     with pytest.raises(ValueError, match="semantic identity"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -729,7 +776,9 @@ def test_factor_bundle_semantic_change_requires_new_delivery_id(
         )
 
 
-def test_factor_bundle_created_at_does_not_change_delivery_identity(tmp_path: Path) -> None:
+def test_factor_bundle_created_at_does_not_change_delivery_identity(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     bundle = _write_bundle(
         tmp_path / "bundles",
         mutate_manifest=lambda manifest: manifest.update(
@@ -740,6 +789,8 @@ def test_factor_bundle_created_at_does_not_change_delivery_identity(tmp_path: Pa
     catalog_path = tmp_path / "catalog"
     _write_price_bars(catalog_path)
     summary = import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=(
@@ -752,7 +803,9 @@ def test_factor_bundle_created_at_does_not_change_delivery_identity(tmp_path: Pa
     assert summary.rows_imported == 2
 
 
-def test_factor_bundle_rejects_multiday_signal_inference(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_multiday_signal_inference(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     rows = [
         {
             "security_id": "eodhd:isin:AAPL",
@@ -766,6 +819,8 @@ def test_factor_bundle_rejects_multiday_signal_inference(tmp_path: Path) -> None
     bundle = _write_bundle(tmp_path, rows=rows)
     with pytest.raises(ValueError, match="exactly one"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -774,7 +829,9 @@ def test_factor_bundle_rejects_multiday_signal_inference(tmp_path: Path) -> None
         )
 
 
-def test_factor_bundle_rejects_ineligible_evaluation_rows(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_ineligible_evaluation_rows(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     bundle = _write_bundle(
         tmp_path,
         rows=[
@@ -790,6 +847,8 @@ def test_factor_bundle_rejects_ineligible_evaluation_rows(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="eligible scored"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -884,10 +943,13 @@ def test_factor_bundle_rejects_contract_semantic_changes(
     tmp_path: Path,
     mutation: Callable[[dict[str, object]], None],
     message: str,
+    factor_repository: TradingRepository,
 ) -> None:
     bundle = _write_bundle(tmp_path, mutate_manifest=mutation, preserve_delivery_id=True)
     with pytest.raises(ValueError, match=message):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -896,10 +958,14 @@ def test_factor_bundle_rejects_contract_semantic_changes(
         )
 
 
-def test_factor_bundle_rejects_unfinalized_or_malformed_delivery(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_unfinalized_or_malformed_delivery(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     missing = tmp_path / "missing"
     with pytest.raises(ValueError, match="finalized"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=missing,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -911,6 +977,8 @@ def test_factor_bundle_rejects_unfinalized_or_malformed_delivery(tmp_path: Path)
     (bundle / "extra.txt").write_text("extra", encoding="utf-8")
     with pytest.raises(ValueError, match="only"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -922,6 +990,8 @@ def test_factor_bundle_rejects_unfinalized_or_malformed_delivery(tmp_path: Path)
     (hidden / ".unexpected").write_text("hidden", encoding="utf-8")
     with pytest.raises(ValueError, match="only"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=hidden,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -933,6 +1003,8 @@ def test_factor_bundle_rejects_unfinalized_or_malformed_delivery(tmp_path: Path)
     (unreadable / "manifest.json").write_text("not-json", encoding="utf-8")
     with pytest.raises(ValueError, match="unreadable"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=unreadable,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -956,12 +1028,16 @@ def test_factor_contract_scalar_validators_fail_closed() -> None:
         _git_commit("abc123", "field")
 
 
-def test_factor_bundle_rejects_artifact_and_universe_tampering(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_artifact_and_universe_tampering(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     artifact = _write_bundle(tmp_path / "artifact")
     with (artifact / "factors.parquet").open("ab") as handle:
         handle.write(b"tampered")
     with pytest.raises(ValueError, match="factors hash"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=artifact,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -977,6 +1053,8 @@ def test_factor_bundle_rejects_artifact_and_universe_tampering(tmp_path: Path) -
     )
     with pytest.raises(ValueError, match="universe hash"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=universe,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -985,10 +1063,14 @@ def test_factor_bundle_rejects_artifact_and_universe_tampering(tmp_path: Path) -
         )
 
 
-def test_factor_bundle_rejects_noncanonical_parquet_schema(tmp_path: Path) -> None:
+def test_factor_bundle_rejects_noncanonical_parquet_schema(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     bundle = _write_bundle(tmp_path, score_dtype="float32")
     with pytest.raises(ValueError, match="schema mismatch"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -1093,11 +1175,14 @@ def test_factor_bundle_rejects_invalid_rows(
     tmp_path: Path,
     rows: list[dict[str, object]],
     message: str,
+    factor_repository: TradingRepository,
 ) -> None:
     bundle = _write_bundle(tmp_path, rows=rows)
     _write_price_bars(tmp_path / "catalog")
     with pytest.raises(ValueError, match=message):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -1107,7 +1192,7 @@ def test_factor_bundle_rejects_invalid_rows(
 
 
 def test_factor_import_requires_prices_and_complete_production_cross_section(
-    tmp_path: Path,
+    tmp_path: Path, factor_repository: TradingRepository
 ) -> None:
     missing_row = [row for row in _rows() if row["security_id"] != "eodhd:isin:MSFT"]
     bundle = _write_bundle(tmp_path / "production", rows=missing_row)
@@ -1119,6 +1204,8 @@ def test_factor_import_requires_prices_and_complete_production_cross_section(
     )
     with pytest.raises(ValueError, match="complete factor cross-section"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=instruments,
@@ -1133,6 +1220,8 @@ def test_factor_import_requires_prices_and_complete_production_cross_section(
     )
     _write_price_bars(tmp_path / "evaluation-catalog")
     summary = import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=evaluation,
         catalog_path=tmp_path / "evaluation-catalog",
         instruments=(_spec("MSFT", "eodhd:isin:MSFT"),),
@@ -1143,10 +1232,14 @@ def test_factor_import_requires_prices_and_complete_production_cross_section(
     assert all(not score.eligible for score in _scores(tmp_path / "evaluation-catalog"))
 
 
-def test_factor_import_rejects_missing_prices_for_eligible_row(tmp_path: Path) -> None:
+def test_factor_import_rejects_missing_prices_for_eligible_row(
+    tmp_path: Path, factor_repository: TradingRepository
+) -> None:
     bundle = _write_bundle(tmp_path / "bundles")
     with pytest.raises(ValueError, match="no signal bar"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=tmp_path / "catalog",
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -1167,6 +1260,8 @@ def test_factor_import_rejects_missing_prices_for_eligible_row(tmp_path: Path) -
     )
     with pytest.raises(ValueError, match="no execution bar"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(_spec("AAPL", "eodhd:isin:AAPL"),),
@@ -1176,8 +1271,7 @@ def test_factor_import_rejects_missing_prices_for_eligible_row(tmp_path: Path) -
 
 
 def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, factor_repository: TradingRepository
 ) -> None:
     bundle = _write_bundle(tmp_path / "bundles")
     catalog_path = tmp_path / "catalog"
@@ -1186,6 +1280,8 @@ def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
     without_mapping = replace(without_mapping, factor_security_id=None)
     with pytest.raises(ValueError, match="No instruments"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(without_mapping,),
@@ -1200,6 +1296,8 @@ def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
     )
     with pytest.raises(ValueError, match="no rows mapped"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=(inactive,),
@@ -1212,6 +1310,8 @@ def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
         _spec("MSFT", "eodhd:isin:MSFT"),
     )
     import_factor_bundle(
+        mode="historical",
+        repository=factor_repository,
         bundle_dir=bundle,
         catalog_path=catalog_path,
         instruments=instruments,
@@ -1220,6 +1320,7 @@ def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
     )
     changed = _scores(catalog_path)[0]
     replacement = FactorScoreData(
+        calendar_version=CALENDAR_VERSION,
         canonical_id=changed.canonical_id,
         security_id=changed.security_id,
         asof_date=changed.asof_date,
@@ -1239,9 +1340,149 @@ def test_factor_import_rejects_missing_mapping_lifecycle_and_conflicts(
     )
     with pytest.raises(ValueError, match="conflicting rows"):
         import_factor_bundle(
+            mode="historical",
+            repository=factor_repository,
             bundle_dir=bundle,
             catalog_path=catalog_path,
             instruments=instruments,
             signal_bar_type_suffix="1-DAY-LAST-INTERNAL",
             execution_bar_type_suffix="1-DAY-LAST-EXTERNAL",
         )
+
+
+@pytest.fixture
+def factor_repository(tmp_path: Path) -> Iterator[TradingRepository]:
+    """隔离每次测试的实际验收记录。"""
+    repository = TradingRepository(f"sqlite:///{tmp_path}/factor-imports.db")
+    repository.create_schema()
+    try:
+        yield repository
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize(
+    ("at", "accepted"),
+    [
+        (datetime(2025, 1, 3, 14, 29, 59, 999999, tzinfo=UTC), True),
+        (datetime(2025, 1, 3, 14, 30, tzinfo=UTC), False),
+        (datetime(2025, 1, 3, 15, tzinfo=UTC), False),
+        (datetime(2025, 1, 6, 10, tzinfo=UTC), False),
+    ],
+)
+def test_paper_import_receipt_uses_completion_clock_and_strict_cutoff(
+    tmp_path: Path,
+    factor_repository: TradingRepository,
+    at: datetime,
+    accepted: bool,
+) -> None:
+    bundle = _write_bundle(
+        tmp_path / "bundles",
+        mutate_manifest=lambda m: m.update({"created_at": "2025-01-03T00:00:00+00:00"}),
+    )
+    catalog = tmp_path / "catalog"
+    _write_price_bars(catalog)
+    kwargs = {
+        "bundle_dir": bundle,
+        "catalog_path": catalog,
+        "instruments": (_spec("AAPL", "eodhd:isin:AAPL"), _spec("MSFT", "eodhd:isin:MSFT")),
+        "signal_bar_type_suffix": "1-DAY-LAST-INTERNAL",
+        "execution_bar_type_suffix": "1-DAY-LAST-EXTERNAL",
+        "mode": "paper",
+        "expected_release_id": "2" * 64,
+        "repository": factor_repository,
+        "clock": lambda: at,
+    }
+    if accepted:
+        summary = import_factor_bundle(**kwargs)
+        receipt = factor_repository.get_factor_import(
+            catalog_path=str(catalog.resolve()), delivery_id=summary.delivery_id, mode="paper"
+        )
+        assert receipt is not None
+        assert receipt.verified_at == at
+        kwargs["clock"] = lambda: datetime(2025, 1, 4, tzinfo=UTC)
+        assert import_factor_bundle(**kwargs).already_imported
+        assert (
+            factor_repository.get_factor_import(
+                catalog_path=str(catalog.resolve()), delivery_id=summary.delivery_id, mode="paper"
+            )
+            == receipt
+        )
+    else:
+        with pytest.raises(ValueError, match=r"cutoff|expected date"):
+            import_factor_bundle(**kwargs)
+        assert (
+            factor_repository.get_factor_import(
+                catalog_path=str(catalog.resolve()), delivery_id=bundle.name, mode="paper"
+            )
+            is None
+        )
+        # Catalog 写入存在不等于接纳成功, 重试不能倒填此前的时间。
+        with pytest.raises(ValueError, match=r"cutoff|expected date"):
+            import_factor_bundle(**kwargs)
+
+
+def test_historical_receipt_cannot_authorize_late_paper_import(
+    tmp_path: Path,
+    factor_repository: TradingRepository,
+) -> None:
+    bundle = _write_bundle(tmp_path / "bundles")
+    catalog = tmp_path / "catalog"
+    _write_price_bars(catalog)
+    kwargs = {
+        "bundle_dir": bundle,
+        "catalog_path": catalog,
+        "instruments": (_spec("AAPL", "eodhd:isin:AAPL"), _spec("MSFT", "eodhd:isin:MSFT")),
+        "signal_bar_type_suffix": "1-DAY-LAST-INTERNAL",
+        "execution_bar_type_suffix": "1-DAY-LAST-EXTERNAL",
+        "repository": factor_repository,
+        "clock": lambda: datetime(2026, 9, 16, tzinfo=UTC),
+    }
+    result = import_factor_bundle(mode="historical", **kwargs)
+    assert result.rows_imported == 2
+    with pytest.raises(ValueError, match=r"expected date|cutoff"):
+        import_factor_bundle(mode="paper", expected_release_id="2" * 64, **kwargs)
+    assert (
+        factor_repository.get_factor_import(
+            catalog_path=str(catalog.resolve()), delivery_id=result.delivery_id, mode="paper"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("clock", "expected"),
+    [
+        ("2026-11-27T17:59:59+00:00", date(2026, 11, 25)),
+        ("2026-11-27T18:00:00+00:00", date(2026, 11, 27)),
+        ("2026-03-09T19:59:59+00:00", date(2026, 3, 6)),
+        ("2026-03-09T20:00:00+00:00", date(2026, 3, 9)),
+        ("2026-03-08T12:00:00+00:00", date(2026, 3, 6)),
+    ],
+)
+def test_expected_factor_day_tracks_actual_close(clock: str, expected: date) -> None:
+    from trading_assistant.data.factor import expected_factor_date
+
+    assert expected_factor_date(datetime.fromisoformat(clock)) == expected
+
+
+@pytest.mark.parametrize(
+    ("day", "hours", "opening", "expiry"),
+    [
+        (date(2026, 11, 25), 24, "2026-11-27T14:30:00+00:00", "2026-11-27T18:00:00+00:00"),
+        (date(2026, 11, 25), 1, "2026-11-27T14:30:00+00:00", "2026-11-27T15:30:00+00:00"),
+        (date(2026, 3, 6), 24, "2026-03-09T13:30:00+00:00", "2026-03-09T20:00:00+00:00"),
+    ],
+)
+def test_factor_execution_window_ends_at_actual_close_or_ttl(
+    day: date,
+    hours: int,
+    opening: str,
+    expiry: str,
+) -> None:
+    from trading_assistant.data.factor import factor_execution_window
+
+    assert factor_execution_window(day, hours) == (
+        datetime.fromisoformat(opening),
+        datetime.fromisoformat(expiry),
+    )

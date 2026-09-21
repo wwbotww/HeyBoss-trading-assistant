@@ -137,11 +137,27 @@ function changeHistoryOffset(offset: number): void {
                 formatAge(portfolioData.age_seconds)
               }}</span
             >
-            <span>{{ formatDateTime(portfolioData.snapshot_at_utc) }}</span>
+            <span>本地采样 {{ formatDateTime(portfolioData.snapshot_at_utc) }}</span>
           </div>
         </div>
         <div class="account-rule" aria-hidden="true"></div>
         <div class="account-secondary">
+          <div>
+            <span>券商连接</span>
+            <strong>{{
+              portfolioData.broker_connected === true
+                ? '已连接'
+                : portfolioData.broker_connected === false
+                  ? '已断开'
+                  : '状态未知'
+            }}</strong>
+          </div>
+          <div>
+            <span>订单与持仓核对</span>
+            <strong>{{
+              portfolioData.reconciliation_complete === true ? '已完成' : '未确认'
+            }}</strong>
+          </div>
           <div>
             <span>账户币种</span>
             <strong>{{ portfolioData.currency || '—' }}</strong>
@@ -166,27 +182,20 @@ function changeHistoryOffset(offset: number): void {
 
       <section class="metric-grid" aria-label="现金摘要">
         <MetricCard
-          label="可用现金"
-          :value="formatCurrency(portfolioData.free_cash, portfolioData.currency)"
-          helper="账户快照中的 free cash"
+          label="可用资金"
+          :value="formatCurrency(portfolioData.available_funds, portfolioData.currency)"
+          helper="券商 FullAvailableFunds"
           accent
         />
         <MetricCard
-          label="锁定现金"
-          :value="formatCurrency(portfolioData.locked_cash, portfolioData.currency)"
-          helper="账户快照中的 locked cash"
+          label="现金余额"
+          :value="formatCurrency(portfolioData.total_cash_value, portfolioData.currency)"
+          helper="券商 TotalCashValue"
         />
         <MetricCard
-          label="现金合计"
-          :value="
-            formatCurrency(
-              portfolioData.free_cash === null || portfolioData.locked_cash === null
-                ? null
-                : portfolioData.free_cash + portfolioData.locked_cash,
-              portfolioData.currency,
-            )
-          "
-          helper="仅为两项现金字段之和"
+          label="券商最近更新"
+          :value="formatDateTime(portfolioData.account_updated_at_utc ?? null)"
+          :helper="portfolioData.not_ready_reason || '账户来源正常'"
         />
       </section>
 
@@ -315,8 +324,8 @@ function changeHistoryOffset(offset: number): void {
                   <th>快照时间</th>
                   <th>账户</th>
                   <th class="align-right">净清算价值</th>
-                  <th class="align-right">可用现金</th>
-                  <th class="align-right">锁定现金</th>
+                  <th class="align-right">可用资金</th>
+                  <th class="align-right">现金余额</th>
                 </tr>
               </thead>
               <tbody>
@@ -327,10 +336,10 @@ function changeHistoryOffset(offset: number): void {
                     {{ formatCurrency(point.net_liquidation, point.currency) }}
                   </td>
                   <td class="align-right tabular">
-                    {{ formatCurrency(point.free_cash, point.currency) }}
+                    {{ formatCurrency(point.available_funds, point.currency) }}
                   </td>
                   <td class="align-right tabular">
-                    {{ formatCurrency(point.locked_cash, point.currency) }}
+                    {{ formatCurrency(point.total_cash_value, point.currency) }}
                   </td>
                 </tr>
               </tbody>

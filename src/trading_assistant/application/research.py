@@ -175,12 +175,14 @@ class ResearchQueryService:
             configured = load_active_strategy(strategy_path)
             settings = configured.settings
             if isinstance(settings, PatchTSTFactorSettings):
-                eligible = {item.canonical_id: item.score for item in latest if item.eligible}
-                weights = calculate_factor_weights(
-                    eligible,
+                risk = load_risk_limits(self._project_root / "config" / "risk.yaml")
+                decision = calculate_factor_weights(
+                    {item.canonical_id: item.score if item.eligible else None for item in latest},
                     top_n=settings.top_n,
                     target_gross_exposure=settings.target_gross_exposure,
+                    max_unscorable_fraction=risk.max_factor_unscorable_fraction,
                 )
+                weights = dict(decision.target_weights)
             else:
                 weights = {}
         except (OSError, ValueError):
@@ -203,7 +205,7 @@ class ResearchQueryService:
                 canonical_id=item.canonical_id,
                 symbol=symbols.get(item.canonical_id, item.canonical_id.split(".", 1)[0]),
                 security_id=item.security_id,
-                score=item.score,
+                score=item.score if item.eligible else None,
                 eligible=item.eligible,
                 rank=ranks.get(item.canonical_id),
                 selected=item.canonical_id in weights,

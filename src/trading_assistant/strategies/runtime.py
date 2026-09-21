@@ -27,6 +27,9 @@ class StrategyRuntimeContext:
     publish_after_ns: int
     factor_data_client_id: str = "FACTOR"
     allow_evaluation_predictions: bool = False
+    catalog_path: str = ""
+    max_factor_unscorable_fraction: float = 0.0
+    factor_check_interval_seconds: int = 1800
 
 
 def build_strategy_actor(
@@ -36,7 +39,13 @@ def build_strategy_actor(
     """为本次唯一活动策略构建 NT 原生可导入 Actor 配置。"""
     settings = strategy.settings
     if strategy.name == "patchtst_e3" and isinstance(settings, PatchTSTFactorSettings):
+        if settings.model_release_id is None:
+            raise ValueError("factor strategy requires a fixed model_release_id")
         actor_config: dict[str, object] = {
+            "model_release_id": settings.model_release_id,
+            "catalog_path": context.catalog_path,
+            "max_unscorable_fraction": context.max_factor_unscorable_fraction,
+            "factor_check_interval_seconds": context.factor_check_interval_seconds,
             "instrument_ids": list(context.instrument_ids),
             "top_n": settings.top_n,
             "target_gross_exposure": settings.target_gross_exposure,

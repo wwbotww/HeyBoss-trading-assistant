@@ -36,6 +36,8 @@ def _context() -> StrategyRuntimeContext:
 def test_builds_configured_patchtst_factor_actor() -> None:
     strategy = load_active_strategy(PROJECT_ROOT / "config" / "strategies.yaml")
 
+    assert isinstance(strategy.settings, PatchTSTFactorSettings)
+    strategy = replace(strategy, settings=replace(strategy.settings, model_release_id="b" * 64))
     actor = build_strategy_actor(strategy, _context())
 
     assert actor.actor_path.endswith(":PatchTSTFactorActor")
@@ -100,6 +102,7 @@ def test_loads_and_builds_patchtst_factor_actor(tmp_path: Path) -> None:
                             "target_gross_exposure": 0.75,
                             "rebalance_frequency": "daily",
                             "allow_evaluation_predictions": True,
+                            "model_release_id": "b" * 64,
                         },
                     }
                 },
@@ -143,6 +146,7 @@ def test_rejects_invalid_patchtst_strategy(
         "target_gross_exposure": 0.75,
         "rebalance_frequency": "daily",
         "allow_evaluation_predictions": False,
+        "model_release_id": "b" * 64,
     }
     parameters.update(override)
     path = tmp_path / "strategies.yaml"

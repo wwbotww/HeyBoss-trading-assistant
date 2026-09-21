@@ -375,125 +375,128 @@ class HistoricalDataPipeline:
                 *(self._fetch(context, semaphore) for context in contexts)
             )
             for result in results:
-                context = result.context
-                spec = context.spec
-                if result.error is not None:
-                    issues.append(
-                        QualityIssue(
-                            code="fetch_failed",
-                            severity="error",
-                            instrument_id=spec.instrument_id,
-                            timestamp_ns=None,
-                            message=f"Historical data request failed: {result.error}",
-                        ),
-                    )
-                    continue
-
-                if result.actions is None:
-                    raise AssertionError("successful fetch must include corporate actions")
-                actions = result.actions
-                bar_types = context.bar_types
-                fetched = list(result.bars)
-                fetched = [
-                    bar
-                    for bar in _deduplicate_bars(fetched)
-                    if bar.bar_type in bar_types and bar.ts_init <= now_ns
-                ]
-                bars_fetched += len(fetched)
-
-                coverage_limit_ns = int(
-                    (context.coverage_start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp()
-                    * 1_000_000_000,
-                )
-                must_verify_start = not incremental_fetch or not context.has_start_coverage
-                first_by_type = {
-                    bar_type: next(
-                        (bar for bar in fetched if bar.bar_type == bar_type),
-                        None,
-                    )
-                    for bar_type in bar_types
-                }
-                if (
-                    require_start_coverage
-                    and must_verify_start
-                    and any(
-                        first is None or first.ts_event > coverage_limit_ns
-                        for first in first_by_type.values()
-                    )
-                ):
-                    issues.append(
-                        QualityIssue(
-                            code="start_coverage_missing",
-                            severity="error",
-                            instrument_id=spec.instrument_id,
-                            timestamp_ns=min(
-                                (
-                                    first.ts_init
-                                    for first in first_by_type.values()
-                                    if first is not None
-                                ),
-                                default=None,
+                with self._catalog.write_lock():
+                    context = result.context
+                    spec = context.spec
+                    if result.error is not None:
+                        issues.append(
+                            QualityIssue(
+                                code="fetch_failed",
+                                severity="error",
+                                instrument_id=spec.instrument_id,
+                                timestamp_ns=None,
+                                message=f"Historical data request failed: {result.error}",
                             ),
-                            message="Provider history does not cover the configured start date.",
-                        ),
-                    )
-                    continue
+                        )
+                        continue
 
-                range_start = datetime.combine(
-                    context.fetch_start.date(),
-                    time.min,
-                    tzinfo=UTC,
-                )
-                start_ns = int(range_start.timestamp() * 1_000_000_000)
-                instrument_reports: list[DataQualityReport] = []
-                for bar_type in bar_types:
-                    typed_bars = [bar for bar in fetched if bar.bar_type == bar_type]
-                    existing = self._catalog.read_bars(bar_type, start_ns=start_ns)
-                    issues.extend(
-                        detect_historical_revisions(
-                            spec.instrument_id,
-                            existing,
-                            typed_bars,
-                        )
+                    if result.actions is None:
+                        raise AssertionError("successful fetch must include corporate actions")
+                    actions = result.actions
+                    bar_types = context.bar_types
+                    fetched = list(result.bars)
+                    fetched = [
+                        bar
+                        for bar in _deduplicate_bars(fetched)
+                        if bar.bar_type in bar_types and bar.ts_init <= now_ns
+                    ]
+                    bars_fetched += len(fetched)
+
+                    coverage_limit_ns = int(
+                        (context.coverage_start.replace(tzinfo=UTC) + timedelta(days=7)).timestamp()
+                        * 1_000_000_000,
                     )
-                    instrument_reports.append(
-                        validate_daily_bars(
-                            spec.instrument_id,
-                            typed_bars,
-                            bar_type,
-                            self._config.quality,
-                            as_of_ns=self._quality_as_of_ns(spec, now_ns),
+                    must_verify_start = not incremental_fetch or not context.has_start_coverage
+                    first_by_type = {
+                        bar_type: next(
+                            (bar for bar in fetched if bar.bar_type == bar_type),
+                            None,
                         )
-                    )
-                reports.extend(instrument_reports)
-                if any(report.has_errors for report in instrument_reports):
-                    continue
-                if resolved_write_mode == "replace_full":
-                    bars_written += self._catalog.replace_bars(fetched)
-                elif resolved_write_mode == "replace_range":
-                    range_end_exclusive = datetime.combine(
-                        context.fetch_end.date() + timedelta(days=1),
+                        for bar_type in bar_types
+                    }
+                    if (
+                        require_start_coverage
+                        and must_verify_start
+                        and any(
+                            first is None or first.ts_event > coverage_limit_ns
+                            for first in first_by_type.values()
+                        )
+                    ):
+                        issues.append(
+                            QualityIssue(
+                                code="start_coverage_missing",
+                                severity="error",
+                                instrument_id=spec.instrument_id,
+                                timestamp_ns=min(
+                                    (
+                                        first.ts_init
+                                        for first in first_by_type.values()
+                                        if first is not None
+                                    ),
+                                    default=None,
+                                ),
+                                message=(
+                                    "Provider history does not cover the configured start date."
+                                ),
+                            ),
+                        )
+                        continue
+
+                    range_start = datetime.combine(
+                        context.fetch_start.date(),
                         time.min,
                         tzinfo=UTC,
                     )
-                    end_ns = int(range_end_exclusive.timestamp() * 1_000_000_000) - 1
-                    bars_written += self._catalog.replace_bar_range(
-                        fetched,
-                        start_ns=start_ns,
-                        end_ns=end_ns,
-                    )
-                else:
-                    bars_written += self._catalog.append_new_bars(fetched)
-                if self._corporate_actions is not None:
-                    if resolved_write_mode == "replace_range":
-                        changed = self._corporate_actions.replace_range(
-                            actions,
-                            start=context.fetch_start.date(),
-                            end=context.fetch_end.date(),
+                    start_ns = int(range_start.timestamp() * 1_000_000_000)
+                    instrument_reports: list[DataQualityReport] = []
+                    for bar_type in bar_types:
+                        typed_bars = [bar for bar in fetched if bar.bar_type == bar_type]
+                        existing = self._catalog.read_bars(bar_type, start_ns=start_ns)
+                        issues.extend(
+                            detect_historical_revisions(
+                                spec.instrument_id,
+                                existing,
+                                typed_bars,
+                            )
+                        )
+                        instrument_reports.append(
+                            validate_daily_bars(
+                                spec.instrument_id,
+                                typed_bars,
+                                bar_type,
+                                self._config.quality,
+                                as_of_ns=self._quality_as_of_ns(spec, now_ns),
+                            )
+                        )
+                    reports.extend(instrument_reports)
+                    if any(report.has_errors for report in instrument_reports):
+                        continue
+                    if resolved_write_mode == "replace_full":
+                        bars_written += self._catalog.replace_bars(fetched)
+                    elif resolved_write_mode == "replace_range":
+                        range_end_exclusive = datetime.combine(
+                            context.fetch_end.date() + timedelta(days=1),
+                            time.min,
+                            tzinfo=UTC,
+                        )
+                        end_ns = int(range_end_exclusive.timestamp() * 1_000_000_000) - 1
+                        bars_written += self._catalog.replace_bar_range(
+                            fetched,
+                            start_ns=start_ns,
+                            end_ns=end_ns,
                         )
                     else:
-                        changed = self._corporate_actions.write(actions)
-                    corporate_actions_written += int(changed)
+                        bars_written += self._catalog.append_new_bars(fetched)
+                    if self._corporate_actions is not None:
+                        if resolved_write_mode == "replace_range":
+                            changed = self._corporate_actions.replace_range(
+                                actions,
+                                start=context.fetch_start.date(),
+                                end=context.fetch_end.date(),
+                            )
+                        else:
+                            changed = self._corporate_actions.write(actions)
+                        corporate_actions_written += int(changed)
         finally:
             await self._source.close()
 

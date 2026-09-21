@@ -24,6 +24,7 @@ def _date(value: str) -> date:
 def parse_args() -> argparse.Namespace:
     """解析路径覆盖参数。"""
     parser = argparse.ArgumentParser(description="Run the configured strategy backtest")
+    parser.add_argument("--project-root", type=Path, default=PROJECT_ROOT)
     parser.add_argument(
         "--catalog-path",
         type=Path,
@@ -49,7 +50,7 @@ def main() -> None:
     """执行回测并打印机器可读摘要。"""
     args = parse_args()
     report = run_backtest(
-        project_root=PROJECT_ROOT,
+        project_root=args.project_root,
         catalog_path=args.catalog_path,
         database_url=str(args.database_url),
         selected_ids=tuple(args.instrument),

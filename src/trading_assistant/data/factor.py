@@ -4,10 +4,11 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 from nautilus_trader.core.data import Data
@@ -17,6 +18,15 @@ from nautilus_trader.model.data import BarType, CustomData, DataType
 
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import InstrumentSpec, validate_factor_identity_mappings
+from trading_assistant.data.market_calendar import (
+    CALENDAR_VERSION,
+    MARKET_TIMEZONE,
+    next_regular_session,
+    previous_regular_session,
+    regular_session,
+    regular_sessions,
+)
+from trading_assistant.storage.repository import TradingRepository
 
 FACTOR_CONTRACT = "facdigger.factor_batch"
 FACTOR_COLUMNS = ("security_id", "symbol", "asof_date", "score", "eligible")
@@ -42,6 +52,7 @@ class FactorScoreData(Data):  # type: ignore[misc]
     delivery_id: str
     model_release_id: str
     source_kind: str
+    calendar_version: str
 
 
 register_custom_data_class(FactorScoreData)
@@ -63,7 +74,7 @@ class FactorImportSummary:
 
 
 @dataclass(frozen=True)
-class _ExternalFactorRow:
+class ExternalFactorRow:
     security_id: str
     symbol: str
     asof_date: date
@@ -72,18 +83,46 @@ class _ExternalFactorRow:
 
 
 @dataclass(frozen=True)
-class _BundleMetadata:
+class FactorBundleMetadata:
     delivery_id: str
     source_kind: str
     model_release_id: str
     minimum_asof_date: date
     maximum_asof_date: date
+    calendar_version: str
+    created_at: datetime
+
+
+def expected_factor_date(now: datetime) -> date:
+    """消费者使用最近已收盘交易日, 与生产者的待产日分离。"""
+    if now.tzinfo is None:
+        raise ValueError("factor clock must be timezone-aware")
+    today = now.astimezone(MARKET_TIMEZONE).date()
+    session = regular_session(today)
+    if session is not None and now >= session.close_utc:
+        return today
+    return previous_regular_session(today)
+
+
+def factor_execution_window(asof_date: date, expiry_hours: int) -> tuple[datetime, datetime]:
+    """次日常规交易时段内执行, 含半日市和跨休市日。"""
+    if regular_session(asof_date) is None or expiry_hours < 1:
+        raise ValueError("invalid factor date or expiry")
+    execution = regular_session(next_regular_session(asof_date))
+    assert execution is not None
+    return execution.open_utc, min(
+        execution.close_utc, execution.open_utc + timedelta(hours=expiry_hours)
+    )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
-class _ValidatedBundle:
-    metadata: _BundleMetadata
-    rows: tuple[_ExternalFactorRow, ...]
+class ValidatedFactorBundle:
+    metadata: FactorBundleMetadata
+    rows: tuple[ExternalFactorRow, ...]
 
 
 def _expect_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
@@ -181,7 +220,7 @@ def _semantic_delivery_id(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
+def _load_manifest(bundle_dir: Path, factor_path: Path) -> FactorBundleMetadata:
     manifest_path = bundle_dir / "manifest.json"
     try:
         decoded = cast(object, json.loads(manifest_path.read_text(encoding="utf-8")))
@@ -208,7 +247,7 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
         raise ValueError(f"manifest.contract must be {FACTOR_CONTRACT!r}")
     if manifest["status"] != "complete":
         raise ValueError("manifest.status must be 'complete'")
-    _utc_datetime(manifest["created_at"], "manifest.created_at")
+    created_at = _utc_datetime(manifest["created_at"], "manifest.created_at")
 
     delivery_id = _sha256(manifest["delivery_id"], "manifest.delivery_id")
     if bundle_dir.name != delivery_id:
@@ -303,7 +342,7 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
     )
     if time_metadata["calendar"] != "US_EQUITIES_REGULAR":
         raise ValueError("manifest.time.calendar must be US_EQUITIES_REGULAR")
-    _string(time_metadata["calendar_version"], "manifest.time.calendar_version")
+    calendar_version = _string(time_metadata["calendar_version"], "manifest.time.calendar_version")
     if time_metadata["timezone"] != "America/New_York":
         raise ValueError("manifest.time.timezone must be America/New_York")
     minimum_asof_date = _iso_date(
@@ -383,21 +422,25 @@ def _load_manifest(bundle_dir: Path, factor_path: Path) -> _BundleMetadata:
         raise ValueError("manifest row counts disagree")
     if delivery_id != _semantic_delivery_id(manifest):
         raise ValueError("FactorBatch semantic identity does not match delivery_id")
+    if calendar_version != CALENDAR_VERSION:
+        raise ValueError("manifest.time.calendar_version does not match local calendar")
 
-    return _BundleMetadata(
+    return FactorBundleMetadata(
         delivery_id=delivery_id,
         source_kind=source_kind,
         model_release_id=model_release_id,
         minimum_asof_date=minimum_asof_date,
         maximum_asof_date=maximum_asof_date,
+        calendar_version=calendar_version,
+        created_at=created_at,
     )
 
 
 def _load_rows(
     factor_path: Path,
-    metadata: _BundleMetadata,
+    metadata: FactorBundleMetadata,
     manifest_path: Path,
-) -> tuple[_ExternalFactorRow, ...]:
+) -> tuple[ExternalFactorRow, ...]:
     try:
         frame = pd.read_parquet(factor_path, dtype_backend="pyarrow")
     except Exception as exc:
@@ -423,7 +466,7 @@ def _load_rows(
         )
     if frame.empty:
         raise ValueError("factors.parquet must not be empty")
-    rows: list[_ExternalFactorRow] = []
+    rows: list[ExternalFactorRow] = []
     keys: list[tuple[date, str]] = []
     for index, values in enumerate(frame.itertuples(index=False, name=None)):
         security_id, symbol, asof_value, score_value, eligible_value = values
@@ -449,7 +492,7 @@ def _load_rows(
             raise ValueError(f"{row_label}.score must be null when eligible is false")
         keys.append((asof_value, security))
         rows.append(
-            _ExternalFactorRow(
+            ExternalFactorRow(
                 security_id=security,
                 symbol=display_symbol,
                 asof_date=asof_value,
@@ -467,6 +510,8 @@ def _load_rows(
     coverage = cast(dict[str, Any], manifest["coverage"])
     input_metadata = cast(dict[str, Any], manifest["input"])
     unique_dates = {row.asof_date for row in rows}
+    if not unique_dates <= set(regular_sessions(min(unique_dates), max(unique_dates))):
+        raise ValueError("factor asof_date must be a regular trading session")
     if len(rows) != int(artifact["row_count"]) or len(rows) != int(coverage["actual_rows"]):
         raise ValueError("manifest row count does not match factors.parquet")
     if len(unique_dates) != int(artifact["date_count"]):
@@ -497,7 +542,8 @@ def _load_rows(
     return tuple(rows)
 
 
-def _validate_bundle(bundle_dir: Path) -> _ValidatedBundle:
+def validate_factor_bundle(bundle_dir: Path) -> ValidatedFactorBundle:
+    """完整校验不可变交付; CLI 与每日数据进程共用同一规则。"""
     resolved = bundle_dir.expanduser().resolve()
     if not resolved.is_dir() or resolved.name.startswith("."):
         raise ValueError("FactorBatch must be a finalized directory")
@@ -509,7 +555,7 @@ def _validate_bundle(bundle_dir: Path) -> _ValidatedBundle:
     factor_path = resolved / "factors.parquet"
     manifest_path = resolved / "manifest.json"
     metadata = _load_manifest(resolved, factor_path)
-    return _ValidatedBundle(
+    return ValidatedFactorBundle(
         metadata=metadata,
         rows=_load_rows(factor_path, metadata, manifest_path),
     )
@@ -552,6 +598,7 @@ def _score_signature(value: FactorScoreData) -> tuple[object, ...]:
         value.delivery_id,
         value.model_release_id,
         value.source_kind,
+        value.calendar_version,
         value.ts_event,
         value.ts_init,
     )
@@ -568,16 +615,10 @@ def _catalog_factor_scores(catalog: CatalogRepository) -> tuple[FactorScoreData,
     return tuple(result)
 
 
-def import_factor_bundle(
-    *,
-    bundle_dir: Path,
-    catalog_path: Path,
-    instruments: tuple[InstrumentSpec, ...],
-    signal_bar_type_suffix: str,
-    execution_bar_type_suffix: str,
-) -> FactorImportSummary:
-    """完整校验一个 FactorBatch 并原子地写入规范 NT Catalog。"""
-    bundle = _validate_bundle(bundle_dir)
+def resolve_factor_rows(
+    bundle: ValidatedFactorBundle, instruments: tuple[InstrumentSpec, ...]
+) -> dict[date, list[tuple[InstrumentSpec, ExternalFactorRow]]]:
+    """复用逐日身份与候选覆盖校验, 在采集之前明确本次生产目标。"""
     validate_factor_identity_mappings(instruments)
     mapped = [spec for spec in instruments if spec.factor_identity_intervals]
     if not mapped:
@@ -586,11 +627,11 @@ def import_factor_bundle(
     for spec in mapped:
         for security_id, _, _ in spec.factor_identity_intervals:
             identity_owners.setdefault(security_id, set()).add(spec.canonical_id)
-    rows_by_date: dict[date, dict[str, _ExternalFactorRow]] = {}
+    rows_by_date: dict[date, dict[str, ExternalFactorRow]] = {}
     for external_row in bundle.rows:
         rows_by_date.setdefault(external_row.asof_date, {})[external_row.security_id] = external_row
 
-    selected_by_date: dict[date, list[tuple[InstrumentSpec, _ExternalFactorRow]]] = {}
+    selected_by_date: dict[date, list[tuple[InstrumentSpec, ExternalFactorRow]]] = {}
     for asof_date, daily_rows in sorted(rows_by_date.items()):
         resolved = [
             (spec, identity)
@@ -608,7 +649,7 @@ def import_factor_bundle(
                 and identity not in valid_identities
             ):
                 raise ValueError(f"factor identity {identity} is not valid on {asof_date}")
-        selected: list[tuple[InstrumentSpec, _ExternalFactorRow]] = []
+        selected: list[tuple[InstrumentSpec, ExternalFactorRow]] = []
         for spec, security_id in resolved:
             row = daily_rows.get(security_id)
             if row is None:
@@ -616,7 +657,7 @@ def import_factor_bundle(
                     raise ValueError(
                         f"complete factor cross-section is missing {security_id} on {asof_date}"
                     )
-                row = _ExternalFactorRow(
+                row = ExternalFactorRow(
                     security_id=security_id,
                     symbol=spec.symbol,
                     asof_date=asof_date,
@@ -628,95 +669,167 @@ def import_factor_bundle(
     if not selected_by_date:
         raise ValueError("FactorBatch has no rows mapped to active configured instruments")
 
+    return selected_by_date
+
+
+def import_factor_bundle(
+    *,
+    bundle_dir: Path,
+    catalog_path: Path,
+    instruments: tuple[InstrumentSpec, ...],
+    signal_bar_type_suffix: str,
+    execution_bar_type_suffix: str,
+    mode: Literal["historical", "paper"],
+    repository: TradingRepository,
+    expected_release_id: str | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+) -> FactorImportSummary:
+    """完整校验一个 FactorBatch 并原子地写入规范 NT Catalog。"""
+    bundle = validate_factor_bundle(bundle_dir)
+    if mode not in {"historical", "paper"}:
+        raise ValueError("factor import mode must be historical or paper")
+    if expected_release_id is not None and bundle.metadata.model_release_id != expected_release_id:
+        raise ValueError("factor model release does not match configured release")
+    if mode == "paper" and (
+        expected_release_id is None or bundle.metadata.source_kind != "signal_inference"
+    ):
+        raise ValueError("paper requires signal_inference and an explicit model release")
+    repository.create_schema()
+    selected_by_date = resolve_factor_rows(bundle, instruments)
+    mapped = [spec for spec in instruments if spec.factor_identity_intervals]
+
     # 整个交付的日期身份与覆盖率先通过, 再读取价格并构造待写入批次。
     catalog = CatalogRepository(catalog_path)
-    signal_availability = {
-        spec.canonical_id: _bar_availability_by_date(
-            catalog,
-            spec,
-            signal_bar_type_suffix,
-            bundle.metadata.minimum_asof_date,
-            bundle.metadata.maximum_asof_date,
-        )
-        for spec in mapped
-    }
-    execution_availability = {
-        spec.canonical_id: _bar_availability_by_date(
-            catalog,
-            spec,
-            execution_bar_type_suffix,
-            bundle.metadata.minimum_asof_date,
-            bundle.metadata.maximum_asof_date,
-        )
-        for spec in mapped
-    }
+    with catalog.write_lock():
+        signal_availability = {
+            spec.canonical_id: _bar_availability_by_date(
+                catalog,
+                spec,
+                signal_bar_type_suffix,
+                bundle.metadata.minimum_asof_date,
+                bundle.metadata.maximum_asof_date,
+            )
+            for spec in mapped
+        }
+        execution_availability = {
+            spec.canonical_id: _bar_availability_by_date(
+                catalog,
+                spec,
+                execution_bar_type_suffix,
+                bundle.metadata.minimum_asof_date,
+                bundle.metadata.maximum_asof_date,
+            )
+            for spec in mapped
+        }
 
-    scores: list[FactorScoreData] = []
-    for asof_date, selected in selected_by_date.items():
-        signal_available_times = [
-            signal_availability[spec.canonical_id][asof_date]
-            for spec, _ in selected
-            if asof_date in signal_availability[spec.canonical_id]
+        scores: list[FactorScoreData] = []
+        for asof_date, selected in selected_by_date.items():
+            signal_available_times = [
+                signal_availability[spec.canonical_id][asof_date]
+                for spec, _ in selected
+                if asof_date in signal_availability[spec.canonical_id]
+            ]
+            if not signal_available_times:
+                raise ValueError(f"Catalog has no signal bar for factor date {asof_date}")
+            for spec, row in selected:
+                if row.eligible and asof_date not in signal_availability[spec.canonical_id]:
+                    raise ValueError(
+                        f"Catalog has no signal bar for eligible {spec.canonical_id} on {asof_date}"
+                    )
+                if row.eligible and asof_date not in execution_availability[spec.canonical_id]:
+                    raise ValueError(
+                        f"Catalog has no execution bar for eligible "
+                        f"{spec.canonical_id} on {asof_date}"
+                    )
+            session = regular_session(asof_date)
+            assert session is not None
+            available_at_ns = max(*signal_available_times, int(session.close_utc.timestamp() * 1e9))
+            batch_id = f"{bundle.metadata.delivery_id}:{asof_date.isoformat()}"
+            for spec, row in selected:
+                scores.append(
+                    FactorScoreData(
+                        canonical_id=spec.canonical_id,
+                        security_id=row.security_id,
+                        asof_date=asof_date.isoformat(),
+                        score=0.0 if row.score is None else row.score,
+                        eligible=row.eligible,
+                        batch_id=batch_id,
+                        batch_size=len(selected),
+                        delivery_id=bundle.metadata.delivery_id,
+                        model_release_id=bundle.metadata.model_release_id,
+                        source_kind=bundle.metadata.source_kind,
+                        calendar_version=bundle.metadata.calendar_version,
+                        ts_event=available_at_ns,
+                        ts_init=available_at_ns,
+                    )
+                )
+        scores.sort(key=lambda value: (value.ts_init, value.canonical_id))
+
+        existing = _catalog_factor_scores(catalog)
+        existing_by_key = {(value.asof_date, value.canonical_id): value for value in existing}
+        overlapping = [
+            value for value in scores if (value.asof_date, value.canonical_id) in existing_by_key
         ]
-        if not signal_available_times:
-            raise ValueError(f"Catalog has no signal bar for factor date {asof_date}")
-        for spec, row in selected:
-            if row.eligible and asof_date not in signal_availability[spec.canonical_id]:
-                raise ValueError(
-                    f"Catalog has no signal bar for eligible {spec.canonical_id} on {asof_date}"
-                )
-            if row.eligible and asof_date not in execution_availability[spec.canonical_id]:
-                raise ValueError(
-                    f"Catalog has no execution bar for eligible {spec.canonical_id} on {asof_date}"
-                )
-        available_at_ns = max(signal_available_times)
-        batch_id = f"{bundle.metadata.delivery_id}:{asof_date.isoformat()}"
-        for spec, row in selected:
-            scores.append(
-                FactorScoreData(
-                    canonical_id=spec.canonical_id,
-                    security_id=row.security_id,
-                    asof_date=asof_date.isoformat(),
-                    score=0.0 if row.score is None else row.score,
-                    eligible=row.eligible,
-                    batch_id=batch_id,
-                    batch_size=len(selected),
+        if overlapping:
+            if len(overlapping) == len(scores) and all(
+                _score_signature(value)
+                == _score_signature(existing_by_key[(value.asof_date, value.canonical_id)])
+                for value in scores
+            ):
+                _record_bundle_acceptance(bundle, catalog_path, mode, repository, clock)
+                return FactorImportSummary(
                     delivery_id=bundle.metadata.delivery_id,
-                    model_release_id=bundle.metadata.model_release_id,
-                    source_kind=bundle.metadata.source_kind,
-                    ts_event=available_at_ns,
-                    ts_init=available_at_ns,
+                    rows_received=len(bundle.rows),
+                    rows_imported=0,
+                    dates_imported=0,
+                    instruments_imported=0,
+                    already_imported=True,
                 )
-            )
-    scores.sort(key=lambda value: (value.ts_init, value.canonical_id))
+            raise ValueError("Factor Catalog already contains conflicting rows for this date range")
 
-    existing = _catalog_factor_scores(catalog)
-    existing_by_key = {(value.asof_date, value.canonical_id): value for value in existing}
-    overlapping = [
-        value for value in scores if (value.asof_date, value.canonical_id) in existing_by_key
-    ]
-    if overlapping:
-        if len(overlapping) == len(scores) and all(
-            _score_signature(value)
-            == _score_signature(existing_by_key[(value.asof_date, value.canonical_id)])
-            for value in scores
-        ):
-            return FactorImportSummary(
-                delivery_id=bundle.metadata.delivery_id,
-                rows_received=len(bundle.rows),
-                rows_imported=0,
-                dates_imported=0,
-                instruments_imported=0,
-                already_imported=True,
-            )
-        raise ValueError("Factor Catalog already contains conflicting rows for this date range")
+        catalog.catalog.write_data([CustomData(FACTOR_DATA_TYPE, value) for value in scores])
+        _record_bundle_acceptance(bundle, catalog_path, mode, repository, clock)
+        return FactorImportSummary(
+            delivery_id=bundle.metadata.delivery_id,
+            rows_received=len(bundle.rows),
+            rows_imported=len(scores),
+            dates_imported=len({value.asof_date for value in scores}),
+            instruments_imported=len({value.canonical_id for value in scores}),
+            already_imported=False,
+        )
 
-    catalog.catalog.write_data([CustomData(FACTOR_DATA_TYPE, value) for value in scores])
-    return FactorImportSummary(
-        delivery_id=bundle.metadata.delivery_id,
-        rows_received=len(bundle.rows),
-        rows_imported=len(scores),
-        dates_imported=len({value.asof_date for value in scores}),
-        instruments_imported=len({value.canonical_id for value in scores}),
-        already_imported=False,
+
+def _record_bundle_acceptance(
+    bundle: ValidatedFactorBundle,
+    catalog_path: Path,
+    mode: str,
+    repository: TradingRepository,
+    clock: Callable[[], datetime],
+) -> None:
+    """写入后取时钟; 没有验收记录的数据不能进入 paper 执行。"""
+    metadata = bundle.metadata
+    normalized_path = str(catalog_path.expanduser().resolve())
+    existing = repository.get_factor_import(
+        catalog_path=normalized_path, delivery_id=metadata.delivery_id, mode=mode
+    )
+    if existing is not None:
+        return
+    now = clock()
+    if now.tzinfo is None:
+        raise ValueError("factor import clock must be timezone-aware")
+    now = now.astimezone(UTC)
+    if mode == "paper":
+        cutoff, _ = factor_execution_window(metadata.maximum_asof_date, 24)
+        if metadata.maximum_asof_date != expected_factor_date(now) or now >= cutoff:
+            raise ValueError("factor batch is not the expected date or arrived after cutoff")
+        if metadata.created_at > now:
+            raise ValueError("factor source creation time is after verification")
+    repository.record_factor_import(
+        catalog_path=normalized_path,
+        delivery_id=metadata.delivery_id,
+        mode=mode,
+        model_release_id=metadata.model_release_id,
+        calendar_version=metadata.calendar_version,
+        source_created_at=metadata.created_at,
+        verified_at=now,
     )

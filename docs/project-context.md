@@ -23,7 +23,9 @@
 
 本节记录代码能力；历史数据初始化、部署和浏览器验收见 [归档目录](archive/README.md)，当次运行状态以实际观测为准。
 
-当前不支持真实账户、盘中实时行情、常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、盈利预期历史曲线与个股修正、基本面历史 PIT 回放、新闻采集或大语言模型分析。
+当前不支持真实账户、盘中实时行情、通用常驻调度、多策略混合、宏观数据的历史 vintage/PIT 回放、盈利预期历史曲线与个股修正、基本面历史 PIT 回放、新闻采集或大语言模型分析。
+
+826 每日自动交易已完成首次 IBKR paper 执行：固定 release/auto、独立数据消费者、共享 Catalog 锁、跨日参考价刷新、账户语义与券商新鲜度、提交前批准、成交幂等及订单恢复已落地。文件清单与边界见 [每日自动交易方案](826-ibkr-paper-daily-implementation-plan.md)，验证结果及生产待办见 [实施验收记录](826-ibkr-paper-daily-acceptance.md)。真实 D=2026-09-18 批次接纳、NT 消费、runtime 迁移和实际网页验证已完成；2026-09-21 已核对 FacDigger 修复镜像与通过测试的源码一致，FD-04 恢复及部署阻断解除。当日 14:22 UTC 首次自动批准后提交的三笔 paper 订单全部成交，独立券商回报与正式数据库一致；14:44 UTC 受控重启后恢复核对通过，没有重复下单。订单状态时间精度及持仓方向显示问题已修复并部署，详见 [联合验收记录](826-facdigger-heyboss-joint-acceptance.md)。数据消费者与 TradingNode auto 当前运行，Bot 保持停止；连续五个常规交易日的生产时效及执行结果仍待观察，不将首次成功视为长期验收完成。FacDigger 缺口由对应项目处理，记录在 [交接缺口记录](facdigger-826-paper-production-gaps.md)，本项目不跨仓代改代码或部署。
 
 ## 技术事实
 
@@ -32,6 +34,7 @@
 | 语言与依赖 | Python 3.12+、uv |
 | 交易引擎 | NautilusTrader 1.230.0 与 IB 适配器 |
 | 历史数据 | EODHD EOD API；IBKR 备用适配器 |
+| 交易日历 | 两仓各自最小函数模块，exchange_calendars 4.13.2 / XNYS；共享固定样例与整段一致性验收 |
 | 跨项目因子 | FacDigger FactorBatch；导入后为 NT `FactorScoreData` |
 | 行情存储 | NT ParquetDataCatalog |
 | 业务存储 | SQLAlchemy 2.x + SQLite；live/backtest 数据库分离 |
@@ -69,7 +72,7 @@
 - EODHD 同一响应生成 `1-DAY-LAST-INTERNAL` 总回报信号价和 `1-DAY-LAST-EXTERNAL` 拆股调整执行价；
 - 信号价不能用于撮合，执行价不能替代信号价；
 - splits/dividends 保存到固定 JSON sidecar，不维护 manifest、版本号或内容哈希；
-- EODHD 完整响应通过质量校验后替换规范序列；Catalog 与 sidecar 写入必须串行；
+- EODHD 完整响应通过质量校验后替换规范序列；Catalog、sidecar、NT 原生查询和网页读取共用文件锁，锁等待上限 50ms；进程被终止留下写入标记时停止消费，需停写核对后从来源重建；
 - IBKR 与 EODHD Catalog 不得混写。
 - 市场监测池与交易资格分离，Catalog 中存在 Instrument 不代表允许交易；当前成员来源与行业分类来源各自保留覆盖和缺失语义；
 - 市场指标由后端计算，Web 只读取已发布快照；查询不连接供应商、不触发采集、不扫描全市场 Catalog，也不建库或迁移；
@@ -82,17 +85,24 @@
 - 因子 `model_type` 仅为来源元数据，E3 与 Finance Transformer 共用五列契约和同一导入器；固定 `factor_security_id` 与 `factor_identity_periods` 互斥，统一按因子 `asof_date` 解析到 canonical ID。日期区间需要明确首尾日期及依据，不以 ticker 或当前 ISIN 推断历史；
 - 因子身份区间不得产生同日歧义，生命周期内活跃目标的身份缺口、过期和已知错期身份在 evaluation/signal 中均失败；只有身份有效但 evaluation 无预测时才沿用不合格占位。身份区间不能缩小目标池，范围外或未活跃标的仍过滤；完整交付先校验后写入，不迁移既有 Catalog，不修改 Actor 或执行路由；
 - `evaluation_predictions` 只能在显式开启的隔离回测中使用，paper 只接受完整的 `signal_inference` 横截面。
+- 因子策略固定 `model_release_id`；缺分行保留在完整候选集中，`eligible=false` 对外显示为 null 分数，不能成为卖出依据。持有则保持执行时数量，未持有则不开仓。
+- 缺分最多 20%、有效数至少 top_n；保护仓位估值最多比 D 旧一个交易日。保护敞口计入同一权益基数和风险上限，先扣除后分配正常目标；无法安全估值、超限、缺 D 或来源不符时整批 SKIP。
+- 导入必须明确 historical/paper；paper 成功验收在写 Catalog 后按本地时钟记录，必须早于下一开盘。历史接纳不能充当 paper 接纳证明，`calendar_version` 必须严格匹配并保留在 NT 数据与审批上下文。
+- `factor_imports` 保存本地验收证据，`factor_decisions` 按 scope、策略、D、原因记录 SKIP/恢复；SKIP 不发布可执行空权重事件。旧审批库必须先显式迁移备份，旧 Catalog 从原始交付重建。
 
 ## 回测和 paper 约束
 
 - 回测使用一个 `US-001` USD CASH 账户，不允许借入现金；
 - 回测必须区分 `data_start`、`evaluation_start` 和 `end`，预热期不计入绩效；
-- 完整日线在当日结束后才可用，订单必须延迟到下一根可成交 Bar，禁止同日开盘前视；
+- 完整日线在当日结束后才可用，双动量订单延迟到下一根可成交 Bar；因子 D 的订单窗口为下一交易日 N 的常规开盘至 min(N 收盘，开盘加 TTL)，禁止使用 D 开盘或 N 收盘前视；
+- 因子日线回测由装配层将 EXTERNAL 日线的 open 转成 N 开盘 QuoteTick，关闭完整 Bar 撮合，全部开盘数据入缓存后执行同一个 Gateway。不再附加一天延迟；固定充足流动性、零价差加既有滑点属于回测假设，不是精确开盘成交保证；
 - 费用、滑点、分红、账户和持仓变化必须通过 NT 官方扩展点及 NT 状态计算；
 - paper 只使用 IBKR 执行客户端，不订阅付费实时行情；
 - paper 启动时由执行网关通过 NT DataEngine 从同一 Catalog 预热全部 EXTERNAL Bar；预热完成前信号保持 `NEW`，不得提前规划订单；
 - manual 审批前后各执行一次账户、报价、仓位和应用风控检查；
-- 提交边界失败时工作流保持失败关闭，不自动重放订单。
+- 提交边界失败时工作流保持失败关闭，不自动重放订单；
+- 因子 manual/auto 均在执行前复查固定 release、预期 D、接纳证据、保护状态和时间窗；卖单全部终态后按实际持仓重算买单，尚未提交的计划不计入每日新开仓数。旧本策略挂单需核对或撤销，撤单失败停止补买；
+- paper 每 60 秒以及预期执行窗口的开盘、失效时刻通过 NT 请求检查因子，缺批次时继续监测并审计告警；它不调用 FacDigger 或负责文件传输。审批领取受当前 scope 与 not_before 约束。
 
 ## 质量与完成标准
 
@@ -105,3 +115,13 @@
 - 任何修改不得产生第二条订单提交路径。
 
 具体实现、数据处理、状态机和目录说明见 [技术设计参考](technical-reference.md)。用户安装与运行方式见项目根目录 [README](../README.md)。
+
+## 826 paper 运行边界（2026-09-21）
+
+- `paper-data-sync` 每 60 秒发现固定 release 的完整当日批次，失败间隔 1800 秒；只有它执行每日行情准备和 paper 导入，不接收 IBKR/Telegram 凭据。交易节点不再启动供应商采集。
+- 当前正式策略为 `patchtst_e3` / auto，release 固定为 `fbd630164624c71fe67c5b7c6637f5be08ef3179bdf93f9c3aa48d208c44d7ef`，evaluation 来源禁止进入 paper；Bot 只属于 manual profile。
+- auto 领取、计划、风险摘要和批准记录在提交订单前同一事务完成；不会领取遗留 manual APPROVED。跨日参考价请求未完成、账户未就绪时保持不提交，过期信号终止。
+- IBKR 的 `balance_total` 已是 NetLiquidation；CASH 回测仍按现金加持仓市值计算。账户快照分别保存 `available_funds`、`total_cash_value` 和真实 `account_updated_at_utc`，不以本地采样刷新券商事实。券商更新时间阈值为 300 秒，断连或未完成重连核对均阻止新订单。
+- 订单以持久化 client_order_id 与 venue_order_id 关联。仅原始券商成交进入 paper 审计，NT 推断成交不冒充真实成交；一致重放无副作用，内容冲突停止执行。部分成交、撤单、过期与全部成交分别保留，已提交新开仓计数可恢复。
+- 不能解释的持仓数量、已知跨日拆股和未知提交状态均需核对；没有券商报告不能证明旧订单从未提交。DAY 市价单仍以 D 参考价估算风险，不承诺跳空后实际成交金额硬上限。
+- Compose 统一指向 `runtime/{catalog,data,reports}`，业务文件不进 Git。运行切换及原 live/backtest 库的显式迁移仍属于部署步骤；现有 826 回测、原始数据和市场业务保留。

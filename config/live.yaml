@@ -3,3 +3,7 @@ live:
   approval_poll_interval_seconds: 5
   notification_poll_interval_seconds: 5
   portfolio_snapshot_interval_seconds: 30
+  factor_check_interval_seconds: 60
+  paper_input_poll_interval_seconds: 60
+  paper_input_retry_interval_seconds: 1800
+  broker_account_stale_after_seconds: 300

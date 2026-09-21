@@ -47,11 +47,14 @@ def main() -> int:
             return 1
         now_ns = time.time_ns()
         expires_at_ns = now_ns + strategy.settings.signal_expiry_hours * 3_600_000_000_000
+        if workflow.factor_context is not None:
+            expires_at_ns = min(expires_at_ns, int(workflow.expires_at_utc.timestamp() * 1e9))
         if not repository.rearm_terminal_signal(
             workflow.event_id,
             reason=str(args.reason),
             timestamp_ns=now_ns,
             expires_at_ns=expires_at_ns,
+            expected_model_release_id=getattr(strategy.settings, "model_release_id", None),
         ):
             print("Signal rearm failed: workflow is not RISK_REJECTED or EXPIRED")
             return 1

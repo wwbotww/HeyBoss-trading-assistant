@@ -72,6 +72,21 @@ class PortfolioQueryService:
             return self._empty("empty", now)
 
         age_seconds = max((now - snapshot.timestamp_utc).total_seconds(), 0.0)
+        reason = snapshot.not_ready_reason
+        if age_seconds > self._stale_after_seconds:
+            reason = "local snapshot stale"
+        elif snapshot.broker_connected is not True:
+            reason = "broker disconnected or connection unknown"
+        elif snapshot.reconciliation_complete is not True:
+            reason = "broker reconciliation incomplete"
+        elif snapshot.account_updated_at_utc is None or snapshot.broker_stale_after_seconds is None:
+            reason = "broker account update unavailable"
+        elif (
+            not 0
+            <= (now - snapshot.account_updated_at_utc).total_seconds()
+            <= snapshot.broker_stale_after_seconds
+        ):
+            reason = "broker account update stale or future"
         by_source_id = {spec.resolved_live_instrument_id: spec for spec in self._instruments} | {
             spec.canonical_id: spec for spec in self._instruments
         }
@@ -111,10 +126,15 @@ class PortfolioQueryService:
             account_id=mask_account_id(snapshot.account_id),
             currency=snapshot.currency,
             net_liquidation=snapshot.net_liquidation,
-            free_cash=snapshot.free_cash,
-            locked_cash=snapshot.locked_cash,
+            available_funds=snapshot.available_funds,
+            total_cash_value=snapshot.total_cash_value,
             age_seconds=age_seconds,
-            is_stale=age_seconds > self._stale_after_seconds,
+            is_stale=reason is not None,
+            account_updated_at_utc=snapshot.account_updated_at_utc,
+            broker_connected=snapshot.broker_connected,
+            reconciliation_complete=snapshot.reconciliation_complete,
+            broker_stale_after_seconds=snapshot.broker_stale_after_seconds,
+            not_ready_reason=reason,
             positions=tuple(positions),
         )
 
@@ -136,8 +156,13 @@ class PortfolioQueryService:
                 account_id=mask_account_id(row.account_id),
                 currency=row.currency,
                 net_liquidation=row.net_liquidation,
-                free_cash=row.free_cash,
-                locked_cash=row.locked_cash,
+                available_funds=row.available_funds,
+                total_cash_value=row.total_cash_value,
+                account_updated_at_utc=row.account_updated_at_utc,
+                broker_connected=row.broker_connected,
+                reconciliation_complete=row.reconciliation_complete,
+                broker_stale_after_seconds=row.broker_stale_after_seconds,
+                not_ready_reason=row.not_ready_reason,
             )
             for row in rows[:limit]
         )
@@ -175,8 +200,8 @@ class PortfolioQueryService:
             account_id=None,
             currency=None,
             net_liquidation=None,
-            free_cash=None,
-            locked_cash=None,
+            available_funds=None,
+            total_cash_value=None,
             age_seconds=None,
             is_stale=None,
             positions=(),

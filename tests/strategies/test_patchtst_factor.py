@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from nautilus_trader.core.uuid import UUID4
 from sqlalchemy import create_engine, func, select
 
 from trading_assistant.data.factor import FactorScoreData
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
 from trading_assistant.execution.events import TradeSignalEvent
 from trading_assistant.storage.models import SignalRecord
 from trading_assistant.storage.repository import TradingRepository
@@ -23,7 +25,10 @@ class _ActorHarness(PatchTSTFactorActor):
     def __init__(self, config: PatchTSTFactorActorConfig) -> None:
         super().__init__(config)
         self.test_clock = TestClock()
+        self.test_clock.set_time(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1e9))
         self.published: list[tuple[FactorScoreData, ...]] = []
+        self._repository = TradingRepository(config.database_url)
+        self._repository.create_schema()
 
     @property
     def clock(self) -> TestClock:
@@ -37,6 +42,7 @@ class _PublishingActor(PatchTSTFactorActor):
     def __init__(self, config: PatchTSTFactorActorConfig) -> None:
         super().__init__(config)
         self.test_clock = TestClock()
+        self.test_clock.set_time(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1e9))
         self.events: list[TradeSignalEvent] = []
 
     @property
@@ -66,6 +72,8 @@ def _actor(
 ) -> _ActorHarness:
     return _ActorHarness(
         PatchTSTFactorActorConfig(
+            model_release_id="b" * 64,
+            max_unscorable_fraction=0.2,
             instrument_ids=instrument_ids,
             top_n=1,
             target_gross_exposure=0.25,
@@ -89,6 +97,7 @@ def _row(
     timestamp_ns: int = 10,
 ) -> FactorScoreData:
     return FactorScoreData(
+        calendar_version=CALENDAR_VERSION,
         canonical_id=canonical_id,
         security_id=security_id or f"isin:{canonical_id}",
         asof_date=asof_date,
@@ -97,7 +106,7 @@ def _row(
         batch_id=batch_id,
         batch_size=batch_size,
         delivery_id="d" * 64,
-        model_release_id="r" * 64,
+        model_release_id="b" * 64,
         source_kind=source_kind,
         ts_event=timestamp_ns,
         ts_init=timestamp_ns,
@@ -174,6 +183,8 @@ def test_actor_publishes_audited_signal_and_deduplicates_workflow(tmp_path: Path
     database_url = f"sqlite:///{tmp_path}/publish.db"
     actor = _PublishingActor(
         PatchTSTFactorActorConfig(
+            model_release_id="b" * 64,
+            max_unscorable_fraction=0.2,
             instrument_ids=("AAPL.US", "MSFT.US"),
             top_n=1,
             target_gross_exposure=0.25,
@@ -182,7 +193,7 @@ def test_actor_publishes_audited_signal_and_deduplicates_workflow(tmp_path: Path
             stream_data=False,
         )
     )
-    actor.test_clock.set_time(20)
+    actor.test_clock.set_time(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1e9))
     actor._repository = TradingRepository(database_url)
     actor._repository.create_schema()
     batch = (_row("AAPL.US", score=2.0), _row("MSFT.US", score=1.0))
@@ -209,6 +220,8 @@ def test_actor_keeps_canonical_targets_across_identity_change(
     database_url = f"sqlite:///{tmp_path}/identity-change.db"
     actor = _PublishingActor(
         PatchTSTFactorActorConfig(
+            model_release_id="b" * 64,
+            max_unscorable_fraction=0.2,
             instrument_ids=("AAPL.US",),
             top_n=1,
             target_gross_exposure=0.25,
@@ -220,10 +233,13 @@ def test_actor_keeps_canonical_targets_across_identity_change(
     )
     actor._repository = TradingRepository(database_url)
     actor._repository.create_schema()
-    for index, (session, identity) in enumerate(
+    for _index, (session, identity) in enumerate(
         (("2025-01-02", "example:old"), ("2025-01-03", "example:new")), start=1
     ):
-        timestamp_ns = index * 86_400_000_000_000
+        timestamp_ns = int(
+            (datetime.fromisoformat(session).replace(tzinfo=UTC) + timedelta(days=1)).timestamp()
+            * 1e9
+        )
         actor.test_clock.set_time(timestamp_ns + 1)
         row = _row(
             "AAPL.US",
@@ -256,3 +272,94 @@ def test_actor_reset_and_empty_catalog_callback_are_safe(tmp_path: Path) -> None
     assert actor._pending_batches == {}
     assert actor._batch_sizes == {}
     assert actor._completed_batches == {}
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_status"), [(0, "REBALANCE"), (1, "REBALANCE"), (3, "SKIP"), (10, "SKIP")]
+)
+def test_full_candidate_batch_protects_or_skips_without_empty_sell_signal(
+    tmp_path: Path,
+    missing: int,
+    expected_status: str,
+) -> None:
+    ids = tuple(f"S{i}.US" for i in range(10))
+    actor = _PublishingActor(
+        PatchTSTFactorActorConfig(
+            instrument_ids=ids,
+            top_n=3,
+            target_gross_exposure=0.75,
+            signal_expiry_hours=24,
+            database_url=f"sqlite:///{tmp_path}/actor.db",
+            model_release_id="b" * 64,
+            max_unscorable_fraction=0.2,
+            stream_data=False,
+        )
+    )
+    repository = TradingRepository(actor._settings.database_url)
+    repository.create_schema()
+    actor._repository = repository
+    for index, key in enumerate(ids):
+        actor.on_data(
+            FactorScoreData(
+                calendar_version=CALENDAR_VERSION,
+                canonical_id=key,
+                security_id=f"isin:{key}",
+                asof_date="2025-01-02",
+                score=float(index),
+                eligible=index >= missing,
+                batch_id="delivery:2025-01-02",
+                batch_size=10,
+                delivery_id="d" * 64,
+                model_release_id="b" * 64,
+                source_kind="signal_inference",
+                ts_event=actor.clock.timestamp_ns(),
+                ts_init=actor.clock.timestamp_ns(),
+            )
+        )
+    states = repository.list_factor_decisions(scope="default")
+    assert len(states) == 1
+    assert states[0].status == expected_status
+    assert states[0].context is not None
+    assert len(states[0].context.candidate_ids) == 10
+    assert states[0].context.eligible_count == 10 - missing
+    if expected_status == "SKIP":
+        assert actor.events == []
+        assert repository.count(SignalRecord) == 0
+    else:
+        assert len(actor.events) == 1
+        assert actor.events[0].preserve_positions == ids[:missing]
+        assert len(actor.events[0].target_weights) == 3
+
+
+def test_periodic_missing_batch_records_skip_without_executable_signal(tmp_path: Path) -> None:
+    actor = _PublishingActor(
+        PatchTSTFactorActorConfig(
+            instrument_ids=("AAPL.US",),
+            top_n=1,
+            target_gross_exposure=0.25,
+            signal_expiry_hours=24,
+            database_url=f"sqlite:///{tmp_path}/missing.db",
+            model_release_id="b" * 64,
+            stream_data=False,
+        )
+    )
+    repository = TradingRepository(actor._settings.database_url)
+    repository.create_schema()
+    actor._repository = repository
+    actor._check_factors(None)
+    actor._check_factors(None)
+    assert actor.events == []
+    records = repository.list_factor_decisions(scope="default")
+    assert len(records) == 1
+    assert records[0].reason == "missing_expected_factor_batch"
+    assert "factor-boundary-open-2025-01-02" in actor.clock.timer_names
+    assert "factor-boundary-expiry-2025-01-02" in actor.clock.timer_names
+    # 稀疏行情回放先把提醒移入执行队列;此时轮询不能把同一个开盘提醒重新排队。
+    handlers = actor.clock.advance_time(
+        int(datetime(2025, 1, 3, 15, tzinfo=UTC).timestamp() * 1e9), set_time=False
+    )
+    assert len(handlers) == 1
+    actor._check_factors(None)
+    assert actor.clock.timer_names == ["factor-boundary-expiry-2025-01-02"]
+    actor.on_stop()
+    assert actor.clock.timer_names == []

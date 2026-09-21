@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -33,6 +34,7 @@ class PatchTSTFactorSettings:
     target_gross_exposure: float
     rebalance_frequency: str
     allow_evaluation_predictions: bool
+    model_release_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ def _load_patchtst_factor(
             target_gross_exposure=float(parameters["target_gross_exposure"]),
             rebalance_frequency=str(parameters["rebalance_frequency"]),
             allow_evaluation_predictions=allow_evaluation_predictions,
+            model_release_id=parameters.get("model_release_id"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"PatchTST 因子策略配置字段无效: {exc}") from exc
@@ -106,6 +109,11 @@ def _load_patchtst_factor(
         raise ValueError("target_gross_exposure 必须在 (0, 1] 范围内")
     if settings.rebalance_frequency != "daily":
         raise ValueError("PatchTST 因子策略只支持 rebalance_frequency=daily")
+    if settings.model_release_id is not None and (
+        not isinstance(settings.model_release_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", settings.model_release_id) is None
+    ):
+        raise ValueError("model_release_id 必须是固定发布的 SHA-256 标识")
     return settings
 
 

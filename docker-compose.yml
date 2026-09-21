@@ -3,16 +3,19 @@ name: trading-assistant
 x-app-service: &app-service
   build:
     context: .
-  env_file:
-    - path: .env
-      required: false
-  environment:
+  environment: &paper-environment
     IB_HOST: ${IB_DOCKER_HOST:-ib-gateway}
     IB_PORT: ${IB_DOCKER_PORT:-4004}
+    IB_EXEC_CLIENT_ID: ${IB_EXEC_CLIENT_ID:-1202}
+    TWS_ACCOUNT: ${TWS_ACCOUNT:-}
+    TRADING_MODE: paper
+    LIVE_DATABASE_URL: sqlite:////app/data/live.db
+    CATALOG_PATH: /app/catalog/eodhd
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
   volumes:
-    - ./catalog:/app/catalog
-    - ./data:/app/data
-    - ./reports:/app/reports
+    - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog:ro
+    - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data
+    - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports
 
 x-ib-app-service: &ib-app-service
   <<: *app-service
@@ -51,12 +54,36 @@ services:
   trading-node:
     <<: *ib-app-service
     command: ["python", "scripts/run_live.py"]
-    # 启动同步或执行边界异常时失败关闭，禁止自动重放。
+    # 执行边界异常时失败关闭，禁止通过自动重启重放订单。
     restart: "no"
 
   approval-bot:
     <<: *app-service
     command: ["python", "-m", "trading_assistant.notify.bot"]
+    environment:
+      <<: *paper-environment
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    profiles: [manual]
+
+  paper-data-sync:
+    build:
+      context: .
+    command: ["python", "scripts/sync_paper_daily.py", "--serve"]
+    environment:
+      EODHD_API_TOKEN: ${EODHD_API_TOKEN:-}
+      CATALOG_PATH: /app/catalog/eodhd
+      LIVE_DATABASE_URL: sqlite:////app/data/live.db
+      DATA_QUALITY_REPORT_ROOT: /app/reports/data-quality
+      FACTOR_BATCH_PATH: /app/incoming/factors
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports
+      - ${FACDIGGER_FACTOR_BATCH_ROOT:-./runtime/incoming/factors}:/app/incoming/factors:ro
+    profiles: [application]
+    restart: unless-stopped
 
   market-radar-sync:
     build:
@@ -66,15 +93,15 @@ services:
     environment:
       EODHD_API_TOKEN: ${EODHD_API_TOKEN:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
-      CATALOG_PATH: ${CATALOG_PATH:-./catalog/eodhd}
-      MARKET_RADAR_DATABASE_URL: ${MARKET_RADAR_DATABASE_URL:-sqlite:///./data/market-radar.db}
-      MARKET_RADAR_REPORT_ROOT: ${MARKET_RADAR_REPORT_ROOT:-./reports/market-radar}
+      CATALOG_PATH: /app/catalog/eodhd
+      MARKET_RADAR_DATABASE_URL: sqlite:////app/data/market-radar.db
+      MARKET_RADAR_REPORT_ROOT: /app/reports/market-radar
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     # 目录级写权限; CLI 只写市场库, 所有共享 Catalog 写入必须串行。
     volumes:
-      - ./catalog:/app/catalog
-      - ./data:/app/data
-      - ./reports:/app/reports
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports
     profiles: [market-radar-sync]
 
   web-api:
@@ -88,18 +115,18 @@ services:
       - --port
       - "8000"
     environment:
-      BACKTEST_DATABASE_URL: ${BACKTEST_DATABASE_URL:-sqlite:///./data/backtest.db}
-      CATALOG_PATH: ${CATALOG_PATH:-./catalog/eodhd}
-      DATA_QUALITY_REPORT_ROOT: ${DATA_QUALITY_REPORT_ROOT:-./reports/data-quality}
-      LIVE_DATABASE_URL: ${LIVE_DATABASE_URL:-sqlite:///./data/live.db}
-      MARKET_RADAR_DATABASE_URL: ${MARKET_RADAR_DATABASE_URL:-sqlite:///./data/market-radar.db}
+      BACKTEST_DATABASE_URL: sqlite:////app/data/backtest.db
+      CATALOG_PATH: /app/catalog/eodhd
+      DATA_QUALITY_REPORT_ROOT: /app/reports/data-quality
+      LIVE_DATABASE_URL: sqlite:////app/data/live.db
+      MARKET_RADAR_DATABASE_URL: sqlite:////app/data/market-radar.db
       PORTFOLIO_SNAPSHOT_STALE_SECONDS: ${PORTFOLIO_SNAPSHOT_STALE_SECONDS:-90}
-      REPORT_ROOT: ${REPORT_ROOT:-./reports/backtests}
+      REPORT_ROOT: /app/reports/backtests
       TWS_ACCOUNT: ${TWS_ACCOUNT:-}
     volumes:
-      - ./catalog:/app/catalog:ro
-      - ./data:/app/data:ro
-      - ./reports:/app/reports:ro
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog:ro
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data:ro
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports:ro
     expose:
       - "8000"
     healthcheck:

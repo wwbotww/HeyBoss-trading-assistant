@@ -15,6 +15,7 @@ from trading_assistant.application.models import QuerySourceError, ResourceNotFo
 from trading_assistant.application.research import ResearchQueryService
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
+from trading_assistant.data.market_calendar import CALENDAR_VERSION
 from trading_assistant.storage.repository import TradingRepository
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,17 +31,19 @@ def _factor(
     canonical_id: str,
     score: float,
     *,
+    eligible: bool = True,
     batch_id: str = "delivery:2026-08-12",
     batch_size: int = 3,
     asof_date: str = "2026-08-12",
     ts_event: int = 10,
 ) -> FactorScoreData:
     return FactorScoreData(
+        calendar_version=CALENDAR_VERSION,
         canonical_id=canonical_id,
         security_id=f"isin:{canonical_id}",
         asof_date=asof_date,
         score=score,
-        eligible=True,
+        eligible=eligible,
         batch_id=batch_id,
         batch_size=batch_size,
         delivery_id="d" * 64,
@@ -177,7 +180,7 @@ def test_strategy_factor_catalog_and_quality_views(tmp_path: Path) -> None:
     strategy = service.active_strategy()
     assert strategy.source_state == "available"
     assert strategy.name == "patchtst_e3"
-    assert strategy.approval_mode == "manual"
+    assert strategy.approval_mode == "auto"
     assert strategy.parameters["top_n"] == 3
     assert strategy.risk_limits["strategy_capital_usd"] == 10_000
 
@@ -307,3 +310,22 @@ def test_research_missing_and_invalid_states(tmp_path: Path) -> None:
     with pytest.raises(QuerySourceError, match="回测审计库"):
         broken_service.list_backtests(offset=0, limit=10)
     broken.close()
+
+
+def test_unscorable_factor_is_null_and_has_no_preview_buy_weight(tmp_path: Path) -> None:
+    service, reader = _service(tmp_path)
+    catalog = CatalogRepository(tmp_path / "catalog")
+    rows = [
+        _factor("AAPL.US", 1, batch_id="new", asof_date="2026-08-14", ts_event=30),
+        _factor("MSFT.US", 0, eligible=False, batch_id="new", asof_date="2026-08-14", ts_event=30),
+        _factor("NVDA.US", -1, batch_id="new", asof_date="2026-08-14", ts_event=30),
+    ]
+    catalog.catalog.write_data([CustomData(FACTOR_DATA_TYPE, row) for row in rows])
+    result = service.latest_factor()
+    missing = next(row for row in result.scores if row.canonical_id == "MSFT.US")
+    assert missing.score is None
+    assert missing.rank is None
+    assert missing.selected is False
+    assert missing.target_weight == 0
+    assert all(row.target_weight == 0 for row in result.scores)
+    reader.close()

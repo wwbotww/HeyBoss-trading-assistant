@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.15"
 license = { text = "Proprietary" }
 authors = [{ name = "Trading Assistant Maintainers" }]
 dependencies = [
+  "exchange_calendars==4.13.2",
   "fastapi>=0.116,<1",
   "nautilus_trader[docker,ib]==1.230.0",
   "openpyxl>=3.1,<4",
@@ -90,7 +91,7 @@ mypy_path = "src"
 # NautilusTrader、pandas 与 openpyxl 未为全部运行时模块提供 .pyi；
 # 只忽略这些第三方模块缺失的类型文件，项目自身仍保持 strict。
 [[tool.mypy.overrides]]
-module = ["nautilus_trader.*", "openpyxl", "openpyxl.*", "pandas", "pandas.*"]
+module = ["exchange_calendars", "exchange_calendars.*", "nautilus_trader.*", "openpyxl", "openpyxl.*", "pandas", "pandas.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
