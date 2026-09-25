@@ -11,6 +11,7 @@ from nautilus_trader.config import ActorConfig
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.identifiers import ClientId
 
+from trading_assistant.data.catalog import CatalogRequestOutcome
 from trading_assistant.data.factor import (
     FACTOR_DATA_TYPE,
     FactorScoreData,
@@ -59,6 +60,8 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
         self._completed_batches: dict[str, tuple[FactorScoreData, ...]] = {}
         self._request_started_ns: int | None = None
         self._request_generation = 0
+        self._request_outcome: CatalogRequestOutcome | None = None
+        self._request_rows: dict[str, set[str]] = {}
         self._scheduled_check_date: date | None = None
         self._repository: TradingRepository | None = None
 
@@ -88,6 +91,8 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
     def on_historical_data(self, data: object) -> None:
         """处理 TradingNode 从同一 Catalog 请求的历史 FactorScoreData。"""
         if isinstance(data, FactorScoreData):
+            if self._request_started_ns is not None:
+                self._request_rows.setdefault(data.batch_id, set()).add(data.canonical_id)
             self._ingest_factor(data, publish=False)
 
     def _ingest_factor(self, data: FactorScoreData, *, publish: bool) -> None:
@@ -282,6 +287,13 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
             and now_ns - self._request_started_ns < 60_000_000_000
         ):
             return
+        if self._request_outcome is not None:
+            self._request_outcome.status = "cancelled"
+        outcome = CatalogRequestOutcome()
+        self._request_outcome = outcome
+        self._request_rows.clear()
+        self._pending_batches.clear()
+        self._batch_sizes.clear()
         self._request_started_ns = now_ns
         self._request_generation += 1
         end = self.clock.utc_now()
@@ -293,18 +305,33 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
                 start=start,
                 end=end,
                 callback=partial(
-                    self._catalog_request_completed, generation=self._request_generation
+                    self._catalog_request_completed,
+                    generation=self._request_generation,
+                    outcome=outcome,
                 ),
+                params={"catalog_outcome": outcome},
             )
         except Exception as exc:
+            outcome.status = "cancelled"
             self._request_started_ns = None
             self._request_generation += 1
             self.log.error(f"Factor history request failed: {type(exc).__name__}")
 
-    def _catalog_request_completed(self, _: UUID4, *, generation: int | None = None) -> None:
-        if generation is not None and generation != self._request_generation:
+    def _catalog_request_completed(
+        self,
+        _: UUID4,
+        *,
+        generation: int | None = None,
+        outcome: CatalogRequestOutcome | None = None,
+    ) -> None:
+        if generation is not None and (
+            generation != self._request_generation or self._request_started_ns is None
+        ):
             return
         self._request_started_ns = None
+        if self._settings.bootstrap_from_catalog and (outcome is None or outcome.status != "ok"):
+            self.log.warning("Factor history is unavailable; waiting for the next check")
+            return
         now_ns = self.clock.timestamp_ns()
         now = datetime.fromtimestamp(now_ns / 1_000_000_000, tz=UTC)
         expected = expected_factor_date(now)
@@ -313,6 +340,10 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
             for batch in self._completed_batches.values()
             if batch[0].asof_date == expected.isoformat()
             and batch[0].model_release_id == self._settings.model_release_id
+            and (
+                not self._settings.bootstrap_from_catalog
+                or self._request_rows.get(batch[0].batch_id) == {row.canonical_id for row in batch}
+            )
         ]
         if batches:
             self._publish_signal(max(batches, key=lambda batch: batch[0].ts_init))
@@ -327,9 +358,15 @@ class PatchTSTFactorActor(Actor):  # type: ignore[misc]
         self._scheduled_check_date = None
         self._request_started_ns = None
         self._request_generation += 1
+        self._request_rows.clear()
+        if self._request_outcome is not None:
+            self._request_outcome.status = "cancelled"
 
     def on_stop(self) -> None:
         """取消订阅并关闭审计仓储。"""
+        self._request_generation += 1
+        if self._request_outcome is not None:
+            self._request_outcome.status = "cancelled"
         for name in self.clock.timer_names:
             if name == "factor-check" or name.startswith("factor-boundary-"):
                 self.clock.cancel_timer(name)

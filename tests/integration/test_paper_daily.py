@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -25,6 +26,7 @@ from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.factor import FACTOR_DATA_TYPE, FactorScoreData
 from trading_assistant.data.market_calendar import CALENDAR_VERSION
 from trading_assistant.execution.events import TRADE_SIGNAL_TOPIC, TradeSignalEvent
+from trading_assistant.execution.gateway import ExecutionGatewayConfig, ExecutionGatewayStrategy
 from trading_assistant.storage.repository import TradingRepository
 from trading_assistant.strategies.patchtst_factor import (
     PatchTSTFactorActor,
@@ -146,51 +148,151 @@ def test_native_data_engine_reads_new_daily_prices_after_publication(tmp_path: P
 
 
 @pytest.mark.parametrize("clock_offset_ns", [0, 928])
-def test_gateway_refreshes_native_cache_after_timeout_and_next_session(
-    tmp_path: Path, clock_offset_ns: int
+def test_gateway_refreshes_after_close_startup_and_later_factor_publication(
+    tmp_path: Path, clock_offset_ns: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from trading_assistant.execution.gateway import ExecutionGatewayConfig, ExecutionGatewayStrategy
+    from nautilus_trader.accounting.accounts.margin import MarginAccount
+    from nautilus_trader.model.identifiers import AccountId
+    from nautilus_trader.test_kit.stubs.events import TestEventStubs
+
+    from trading_assistant.execution.events import FactorContext
+    from trading_assistant.execution.gateway import _PlannedOrder
 
     catalog = CatalogRepository(tmp_path / "catalog")
     clock = TestClock()
-    first = int(datetime(2025, 1, 3, 13, tzinfo=UTC).timestamp() * 1e9) + clock_offset_ns
+    first = int(datetime(2025, 1, 3, 22, tzinfo=UTC).timestamp() * 1e9) + clock_offset_ns
     clock.set_time(first)
-    cache = Cache()
-    trader_id = TraderId("TESTER-003")
-    msgbus = MessageBus(trader_id=trader_id, clock=clock)
-    engine = DataEngine(msgbus=msgbus, cache=cache, clock=clock)
-    engine.register_catalog(catalog.catalog)
-    portfolio = Portfolio(msgbus=msgbus, cache=cache, clock=clock)
-    gateway = ExecutionGatewayStrategy(
-        ExecutionGatewayConfig(
-            instrument_routes={"AAPL.US": "AAPL.NASDAQ"},
-            execution_bar_types={"AAPL.US": "AAPL.US-1-DAY-LAST-EXTERNAL"},
-            approval_mode="auto",
-            database_url=f"sqlite:///{tmp_path / 'live.db'}",
-            account_id="IB-DU123",
-            strategy_capital_usd=10000,
-            max_order_notional_usd=10000,
-            max_instrument_weight=0.25,
-            max_daily_new_positions=3,
-            max_gross_exposure=0.8,
-            bootstrap_from_catalog=True,
-        )
-    )
-    gateway.register(trader_id, portfolio, msgbus, cache, clock)
-    catalog.replace_bars([make_bar(date(2025, 1, 2), instrument_id="AAPL.US")])
-    with _publisher(tmp_path / "catalog"):
-        gateway.on_start()
-        assert not gateway._execution_prices_ready
-    clock.set_time(first + 61_000_000_000)
-    gateway._poll_approved_signal(None)
-    assert gateway._execution_prices_ready
-    assert gateway._execution_price_date == date(2025, 1, 2)
-    catalog.append_new_bars([make_bar(date(2025, 1, 3), instrument_id="AAPL.US", close=102)])
-    clock.set_time(int(datetime(2025, 1, 6, 13, tzinfo=UTC).timestamp() * 1e9) + clock_offset_ns)
-    gateway._request_execution_bar_history()
-    assert gateway._execution_price_date == date(2025, 1, 3)
-    assert cache.bar(BarType.from_str("AAPL.US-1-DAY-LAST-EXTERNAL")).close.as_double() == 102
-    gateway.on_stop()
+    from tests.live.test_catalog_client import _native_engine
+
+    async def run() -> None:
+        async with _native_engine(tmp_path / "catalog") as native:
+            cache = native.cache
+            cache.add_account(
+                MarginAccount(
+                    TestEventStubs.margin_account_state(AccountId("IB-DU123")),
+                    calculate_account_state=False,
+                )
+            )
+            trader_id = TraderId("TESTER-ASYNC")
+            msgbus = native.bus
+            portfolio = Portfolio(msgbus=msgbus, cache=cache, clock=clock)
+            gateway = ExecutionGatewayStrategy(
+                ExecutionGatewayConfig(
+                    instrument_routes={"AAPL.US": "AAPL.NASDAQ"},
+                    execution_bar_types={"AAPL.US": "AAPL.US-1-DAY-LAST-EXTERNAL"},
+                    approval_mode="auto",
+                    database_url=f"sqlite:///{tmp_path / 'live.db'}",
+                    account_id="IB-DU123",
+                    strategy_capital_usd=10000,
+                    max_order_notional_usd=10000,
+                    max_instrument_weight=0.25,
+                    max_daily_new_positions=3,
+                    max_gross_exposure=0.8,
+                    bootstrap_from_catalog=True,
+                    model_release_id="b" * 64,
+                )
+            )
+            gateway.register(trader_id, portfolio, msgbus, cache, clock)
+            catalog.replace_bars([make_bar(date(2025, 1, 2), instrument_id="AAPL.US")])
+            with _publisher(tmp_path / "catalog"):
+                gateway.on_start()
+                async with asyncio.timeout(2):
+                    while gateway._execution_bar_requests:  # noqa: ASYNC110 -- NT 未暴露完成事件, 有界观察其原生状态。
+                        await asyncio.sleep(0.01)
+                assert not gateway._execution_prices_ready
+            clock.set_time(first + 61_000_000_000)
+            gateway._poll_approved_signal(None)
+            async with asyncio.timeout(2):
+                while gateway._execution_bar_requests:  # noqa: ASYNC110 -- NT 未暴露完成事件, 有界观察其原生状态。
+                    await asyncio.sleep(0.01)
+            assert gateway._execution_prices_ready
+            assert gateway._execution_price_date is None
+            catalog.append_new_bars(
+                [make_bar(date(2025, 1, 3), instrument_id="AAPL.US", close=102)]
+            )
+            clock.set_time(
+                int(datetime(2025, 1, 6, 13, tzinfo=UTC).timestamp() * 1e9) + clock_offset_ns
+            )
+            context = FactorContext(
+                "2025-01-03",
+                "d" * 64,
+                "b" * 64,
+                "signal_inference",
+                CALENDAR_VERSION,
+                ("AAPL.US",),
+                1,
+                str(tmp_path / "catalog"),
+            )
+            repository = gateway._require_repository()
+            repository.record_factor_import(
+                catalog_path=context.catalog_path,
+                delivery_id=context.delivery_id,
+                mode="paper",
+                model_release_id=context.model_release_id,
+                calendar_version=CALENDAR_VERSION,
+                source_created_at=datetime(2025, 1, 6, 12, tzinfo=UTC),
+                verified_at=datetime(2025, 1, 6, 13, tzinfo=UTC),
+            )
+            opening_ns = int(datetime(2025, 1, 6, 14, 30, tzinfo=UTC).timestamp() * 1e9)
+            event = TradeSignalEvent(
+                strategy_name="patchtst_e3",
+                target_weights=(("AAPL.US", 0.25),),
+                rebalance_key="after-close",
+                reason="later publication",
+                factor_context=context,
+                not_before_ns=opening_ns,
+                expires_at_ns=int(datetime(2025, 1, 6, 21, tzinfo=UTC).timestamp() * 1e9),
+                ts_event=clock.timestamp_ns(),
+                ts_init=clock.timestamp_ns(),
+            )
+            repository.register_signal_workflow(event, scope="default")
+            executed: list[tuple[_PlannedOrder, ...]] = []
+
+            def execute(
+                self: ExecutionGatewayStrategy,
+                signal: TradeSignalEvent,
+                plan: tuple[_PlannedOrder, ...],
+            ) -> None:
+                del self
+                assert signal.id == event.id
+                executed.append(plan)
+
+            monkeypatch.setattr(ExecutionGatewayStrategy, "_execute_plan", execute)
+            # 新信号自身必须触发刷新; 发布持锁时保持 NEW, 不直接调用刷新函数。
+            with _publisher(tmp_path / "catalog"):
+                gateway._handle_signal(event)
+                async with asyncio.timeout(2):
+                    while gateway._execution_bar_requests:  # noqa: ASYNC110 -- 原生数据请求无完成事件。
+                        await asyncio.sleep(0.01)
+                assert not gateway._execution_prices_ready
+                workflow = repository.get_signal_workflow(str(event.id))
+                assert workflow is not None
+                assert workflow.status == "NEW"
+                assert not executed
+            gateway._poll_approved_signal(None)
+            async with asyncio.timeout(2):
+                while gateway._execution_bar_requests:  # noqa: ASYNC110 -- NT 未暴露完成事件, 有界观察其原生状态。
+                    await asyncio.sleep(0.01)
+            assert gateway._execution_price_date == date(2025, 1, 3)
+            assert (
+                cache.bar(BarType.from_str("AAPL.US-1-DAY-LAST-EXTERNAL")).close.as_double() == 102
+            )
+            workflow = repository.get_signal_workflow(str(event.id))
+            assert workflow is not None
+            assert workflow.status == "NEW"
+            assert not executed
+            clock.set_time(opening_ns)
+            gateway._poll_approved_signal(None)
+            gateway._poll_approved_signal(None)
+            assert len(executed) == 1
+            assert executed[0][0].price == 102
+            assert executed[0][0].quantity == 24
+            workflow = repository.get_signal_workflow(str(event.id))
+            assert workflow is not None
+            assert workflow.status == "ORDERS_SUBMITTED"
+            gateway.on_stop()
+
+    asyncio.run(run())
 
 
 def test_native_factor_history_keeps_nanosecond_clock_boundary(tmp_path: Path) -> None:
@@ -212,6 +314,7 @@ def test_native_factor_history_keeps_nanosecond_clock_boundary(tmp_path: Path) -
         ts_init=timestamp_ns,
     )
     catalog.catalog.write_data([CustomData(FACTOR_DATA_TYPE, row)])
+    catalog.replace_bars([make_bar(date(2025, 1, 2), instrument_id="AAPL.US")])
     database_url = f"sqlite:///{tmp_path / 'live.db'}"
     repository = TradingRepository(database_url)
     repository.create_schema()
@@ -228,32 +331,99 @@ def test_native_factor_history_keeps_nanosecond_clock_boundary(tmp_path: Path) -
     clock = TestClock()
     # 928ns 经浮点秒转 datetime 会向未来舍入; 原生历史请求必须保留原边界。
     clock.set_time(timestamp_ns + 13 * 3600 * 1_000_000_000 + 928)
-    cache = Cache()
-    msgbus = MessageBus(trader_id=TraderId("TESTER-004"), clock=clock)
-    engine = DataEngine(msgbus=msgbus, cache=cache, clock=clock)
-    engine.register_catalog(catalog.catalog)
-    portfolio = Portfolio(msgbus=msgbus, cache=cache, clock=clock)
-    actor = PatchTSTFactorActor(
-        PatchTSTFactorActorConfig(
-            instrument_ids=("AAPL.US",),
-            top_n=1,
-            target_gross_exposure=0.25,
-            signal_expiry_hours=24,
-            database_url=database_url,
-            stream_data=False,
-            bootstrap_from_catalog=True,
-            model_release_id=row.model_release_id,
-            catalog_path=str(tmp_path / "catalog"),
-        )
-    )
-    actor.register_base(portfolio, msgbus, cache, clock)
-    events: list[TradeSignalEvent] = []
-    msgbus.subscribe(TRADE_SIGNAL_TOPIC, events.append)
-    actor.start()
-    try:
-        assert len(events) == 1
-        assert events[0].target_weights == (("AAPL.US", 0.25),)
-        assert events[0].factor_context is not None
-        assert events[0].factor_context.delivery_id == row.delivery_id
-    finally:
-        actor.stop()
+    from tests.live.test_catalog_client import _native_engine
+
+    async def run() -> None:
+        async with _native_engine(tmp_path / "catalog") as native:
+            cache = native.cache
+            msgbus = native.bus
+            portfolio = Portfolio(msgbus=msgbus, cache=cache, clock=clock)
+            actor = PatchTSTFactorActor(
+                PatchTSTFactorActorConfig(
+                    instrument_ids=("AAPL.US",),
+                    top_n=1,
+                    target_gross_exposure=0.25,
+                    signal_expiry_hours=24,
+                    database_url=database_url,
+                    stream_data=False,
+                    bootstrap_from_catalog=True,
+                    model_release_id=row.model_release_id,
+                    catalog_path=str(tmp_path / "catalog"),
+                )
+            )
+            actor.register_base(portfolio, msgbus, cache, clock)
+            gateway = ExecutionGatewayStrategy(
+                ExecutionGatewayConfig(
+                    instrument_routes={"AAPL.US": "AAPL.NASDAQ"},
+                    execution_bar_types={"AAPL.US": "AAPL.US-1-DAY-LAST-EXTERNAL"},
+                    approval_mode="auto",
+                    database_url=database_url,
+                    account_id="IB-DU123",
+                    strategy_capital_usd=10000,
+                    max_order_notional_usd=10000,
+                    max_instrument_weight=0.25,
+                    max_daily_new_positions=3,
+                    max_gross_exposure=0.8,
+                    bootstrap_from_catalog=True,
+                    broker_account_stale_after_seconds=300,
+                )
+            )
+            gateway.register(TraderId("TESTER-ASYNC"), portfolio, msgbus, cache, clock)
+            gateway.bind_broker_status(lambda: (True, False), invalidate=lambda _: None)
+            events: list[TradeSignalEvent] = []
+            msgbus.subscribe(TRADE_SIGNAL_TOPIC, events.append)
+            try:
+                with _publisher(tmp_path / "catalog"):
+                    gateway.on_start()
+                    actor.start()
+                    async with asyncio.timeout(2):
+                        while actor.has_pending_requests() or gateway._execution_bar_requests:  # noqa: ASYNC110 -- 同时观察两个 NT 原生请求。
+                            await asyncio.sleep(0.01)
+                    assert events == []
+                    assert not gateway._execution_prices_ready
+                    assert native.engine.is_running
+                actor._request_catalog_history()
+                gateway._poll_approved_signal(None)
+                async with asyncio.timeout(2):
+                    while actor.has_pending_requests() or gateway._execution_bar_requests:  # noqa: ASYNC110 -- 同时观察两个 NT 原生请求。
+                        await asyncio.sleep(0.01)
+                assert len(events) == 1
+                assert events[0].target_weights == (("AAPL.US", 0.25),)
+                assert events[0].factor_context is not None
+                assert events[0].factor_context.delivery_id == row.delivery_id
+                assert not actor.has_pending_requests()
+                assert gateway._execution_prices_ready
+                assert gateway._execution_price_date == date(2025, 1, 2)
+                workflow = gateway._require_repository().get_signal_workflow(str(events[0].id))
+                assert workflow is not None
+                assert workflow.status == "NEW"
+                assert cache.orders() == []
+                actor._catalog_request_completed(
+                    UUID4(),
+                    generation=actor._request_generation,
+                    outcome=actor._request_outcome,
+                )
+                assert len(events) == 1
+                # 成功的空读取不能重新发布已缓存横截面。
+                catalog.catalog.delete_data_range(FactorScoreData, identifier="")
+                actor._request_catalog_history()
+                async with asyncio.timeout(2):
+                    while actor.has_pending_requests():  # noqa: ASYNC110 -- NT 原生状态。
+                        await asyncio.sleep(0.01)
+                assert len(events) == 1
+                assert actor._request_outcome is not None
+                assert actor._request_outcome.status == "ok"
+                assert actor._request_outcome.rows_received == 0
+                # 重复获取完整横截面保持原始工作流身份。
+                catalog.catalog.write_data([CustomData(FACTOR_DATA_TYPE, row)])
+                actor._request_catalog_history()
+                async with asyncio.timeout(2):
+                    while actor.has_pending_requests():  # noqa: ASYNC110 -- NT 原生状态。
+                        await asyncio.sleep(0.01)
+                assert len(events) == 2
+                assert events[0].id == events[1].id
+            finally:
+                actor.stop()
+                gateway.on_stop()
+
+    asyncio.run(run())

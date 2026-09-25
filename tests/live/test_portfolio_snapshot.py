@@ -272,3 +272,29 @@ def test_snapshot_waits_for_its_currency_without_fabricating_zero_balance(tmp_pa
     assert actor._repository.latest_portfolio_snapshot(account_id="IB-DU123") is None
     assert "USD" in actor.test_log.warnings[-1]
     actor.on_stop()
+
+
+def test_stop_immediately_invalidates_snapshot_without_refreshing_broker_time(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path}/stopped.db"
+    actor = _ActorHarness(
+        PortfolioSnapshotActorConfig(account_id="IB-DU123", database_url=database_url)
+    )
+    actor.bind_broker_status(lambda: (True, True))
+    actor.on_start()
+    actor._capture_snapshot(cast(TimeEvent, object()))
+    actor.test_clock.set_time(1_000_000_000)
+    actor.on_stop()
+    repository = TradingRepository(database_url)
+    try:
+        latest = repository.latest_portfolio_snapshot(account_id="IB-DU123")
+        assert latest is not None
+        assert latest.reconciliation_complete is False
+        assert latest.not_ready_reason == "trading node stopped"
+        assert latest.timestamp_utc.timestamp() == 1
+        assert latest.account_updated_at_utc is not None
+        assert latest.account_updated_at_utc.timestamp() == 0
+        assert latest.positions[0].signed_quantity == 4
+    finally:
+        repository.close()

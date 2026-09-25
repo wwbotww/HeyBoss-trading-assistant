@@ -6,6 +6,41 @@ import { installApiMock, portfolioFixture } from './fixtures'
 import { mountPage } from './helpers'
 
 describe('账户与持仓', () => {
+  it.each([
+    { is_stale: true },
+    { broker_connected: false },
+    { reconciliation_complete: false },
+    { account_updated_at_utc: null },
+    { source_state: 'missing' },
+  ])('不将未确认空列表展示为无持仓：%j', async (quality) => {
+    installApiMock({ '/api/portfolio': { ...portfolioFixture, positions: [], ...quality } })
+    const { wrapper } = await mountPage(PortfolioPage, '/portfolio')
+    await flushPromises()
+    expect(wrapper.text()).toContain('持仓尚未确认')
+    expect(wrapper.text()).toContain('待确认')
+    expect(wrapper.text()).toContain('快照时券商连接')
+    expect(wrapper.text()).not.toContain('当前没有持仓')
+  })
+
+  it('完整新鲜核对后的空列表可以确认空仓', async () => {
+    installApiMock({ '/api/portfolio': { ...portfolioFixture, positions: [] } })
+    const { wrapper } = await mountPage(PortfolioPage, '/portfolio')
+    await flushPromises()
+    expect(wrapper.text()).toContain('当前没有持仓')
+    expect(wrapper.text()).not.toContain('持仓尚未确认')
+    expect(wrapper.text()).not.toContain('快照时券商连接')
+  })
+
+  it('过期非空仓位标记历史来源并保留记录', async () => {
+    installApiMock({ '/api/portfolio': { ...portfolioFixture, is_stale: true } })
+    const { wrapper } = await mountPage(PortfolioPage, '/portfolio')
+    await flushPromises()
+    expect(wrapper.text()).toContain('以下为历史持仓快照')
+    expect(wrapper.text()).toContain('采样于')
+    expect(wrapper.text()).toContain('当前持仓尚未确认')
+    expect(wrapper.text()).toContain('AAPL.US')
+  })
+
   it('区分持仓 EOD 估值与账户资金历史', async () => {
     installApiMock()
     const { wrapper, router } = await mountPage(PortfolioPage, '/portfolio')

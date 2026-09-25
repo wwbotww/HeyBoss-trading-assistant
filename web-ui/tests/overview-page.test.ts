@@ -6,6 +6,25 @@ import { installApiMock, overviewFixture } from './fixtures'
 import { mountPage } from './helpers'
 
 describe('操作总览', () => {
+  it.each([false, true])('未核对的持仓数量显示待确认，过期=%s', async (is_stale) => {
+    installApiMock({
+      '/api/overview': {
+        ...overviewFixture,
+        portfolio: {
+          ...overviewFixture.portfolio,
+          positions: [],
+          reconciliation_complete: false,
+          is_stale,
+        },
+      },
+    })
+    const { wrapper } = await mountPage(OverviewPage)
+    await flushPromises()
+    const metric = wrapper.findAll('.metric-card').find((item) => item.text().includes('当前持仓'))
+    expect(metric?.text()).toContain('待确认')
+    expect(metric?.text()).toContain('历史快照')
+  })
+
   it('展示账户、工作流与策略事实', async () => {
     installApiMock()
     const { wrapper } = await mountPage(OverviewPage)

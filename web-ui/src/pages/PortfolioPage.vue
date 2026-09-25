@@ -73,8 +73,24 @@ const activeTab = computed({
   },
 })
 
+const positionsConfirmed = computed(() => {
+  const snapshot = portfolioData.value
+  return (
+    snapshot?.source_state === 'available' &&
+    !snapshot.is_stale &&
+    snapshot.broker_connected === true &&
+    snapshot.reconciliation_complete === true &&
+    Boolean(snapshot.account_updated_at_utc) &&
+    !snapshot.not_ready_reason
+  )
+})
+
 const tabs = computed(() => [
-  { value: 'positions', label: '当前持仓', count: portfolioData.value?.positions.length ?? 0 },
+  {
+    value: 'positions',
+    label: positionsConfirmed.value ? '当前持仓' : '持仓快照',
+    ...(positionsConfirmed.value ? { count: portfolioData.value?.positions.length ?? 0 } : {}),
+  },
   { value: 'history', label: '资金快照', count: historyData.value?.items.length ?? 0 },
 ])
 
@@ -101,9 +117,7 @@ function changeHistoryOffset(offset: number): void {
       <StatusPill
         v-if="portfolioData"
         :status="portfolioData.is_stale ? 'new' : portfolioData.source_state"
-        :label="
-          portfolioData.is_stale ? '账户快照已过期' : formatSourceState(portfolioData.source_state)
-        "
+        :label="positionsConfirmed ? formatSourceState(portfolioData.source_state) : '账户未就绪'"
       />
     </div>
 
@@ -143,7 +157,7 @@ function changeHistoryOffset(offset: number): void {
         <div class="account-rule" aria-hidden="true"></div>
         <div class="account-secondary">
           <div>
-            <span>券商连接</span>
+            <span>{{ positionsConfirmed ? '券商连接' : '快照时券商连接' }}</span>
             <strong>{{
               portfolioData.broker_connected === true
                 ? '已连接'
@@ -153,7 +167,7 @@ function changeHistoryOffset(offset: number): void {
             }}</strong>
           </div>
           <div>
-            <span>订单与持仓核对</span>
+            <span>{{ positionsConfirmed ? '订单与持仓核对' : '快照时订单与持仓核对' }}</span>
             <strong>{{
               portfolioData.reconciliation_complete === true ? '已完成' : '未确认'
             }}</strong>
@@ -164,7 +178,7 @@ function changeHistoryOffset(offset: number): void {
           </div>
           <div>
             <span>持仓数量</span>
-            <strong>{{ portfolioData.positions.length }}</strong>
+            <strong>{{ positionsConfirmed ? portfolioData.positions.length : '待确认' }}</strong>
           </div>
           <div>
             <span>价格语义</span>
@@ -209,13 +223,25 @@ function changeHistoryOffset(offset: number): void {
         </div>
 
         <template v-if="activeTab === 'positions'">
+          <p v-if="!positionsConfirmed && portfolioData.positions.length > 0" role="status">
+            以下为历史持仓快照，记录 {{ portfolioData.positions.length }} 项； 采样于
+            {{ formatDateTime(portfolioData.snapshot_at_utc) }}。当前持仓尚未确认。
+          </p>
           <DataState
             v-if="portfolioData.positions.length === 0"
             state="empty"
-            title="当前没有持仓"
-            detail="账户快照有效，但没有开放持仓。"
+            :title="positionsConfirmed ? '当前没有持仓' : '持仓尚未确认'"
+            :detail="
+              positionsConfirmed
+                ? '账户快照有效，券商已确认没有开放持仓。'
+                : '账户来源或订单与持仓核对尚未就绪，空列表不能确认账户无持仓。'
+            "
           />
-          <DataTable v-else caption="当前持仓明细" min-width="980px">
+          <DataTable
+            v-else
+            :caption="positionsConfirmed ? '当前持仓明细' : '历史持仓快照'"
+            min-width="980px"
+          >
             <thead>
               <tr>
                 <th>标的</th>

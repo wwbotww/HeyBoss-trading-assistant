@@ -64,6 +64,11 @@ def test_builds_paper_trading_node_from_native_components(tmp_path: Path) -> Non
         },
     )
     assert tuple(config.exec_clients) == ("IB",)
+    assert tuple(config.data_clients) == ("CATALOG",)
+    assert not config.catalogs
+    assert config.exec_clients["IB"].request_timeout_secs == 30
+    assert config.timeout_reconciliation == 120
+    assert config.exec_engine.reconciliation is False
     assert len(config.actors) == 2
     assert config.actors[0].config["strategy_name"] == "patchtst_e3"
     assert config.actors[0].config["bootstrap_from_catalog"] is True
@@ -71,6 +76,8 @@ def test_builds_paper_trading_node_from_native_components(tmp_path: Path) -> Non
     assert config.actors[1].config["account_id"] == "IB-DU123"
     assert config.actors[1].config["snapshot_interval_seconds"] == 30
     assert config.strategies[0].config["account_id"] == "IB-DU123"
+    assert config.strategies[0].config["oms_type"] == "HEDGING"
+    assert "external_order_claims" not in config.strategies[0].config
     assert config.strategies[0].config["signal_scope"] == "paper:DU123"
     assert config.strategies[0].config["bootstrap_from_catalog"] is True
     assert config.strategies[0].config["catalog_lookback_days"] == 2200
@@ -174,12 +181,18 @@ def test_run_live_builds_runs_and_disposes_node(monkeypatch: pytest.MonkeyPatch)
         def __init__(self, config: object) -> None:
             assert config == "config"
             self.kernel = SimpleNamespace(
-                catalogs={}, trader=SimpleNamespace(actors=lambda: [], strategies=lambda: [])
+                catalogs={},
+                trader=SimpleNamespace(actors=lambda: [], strategies=lambda: []),
+                msgbus=SimpleNamespace(subscribe=lambda *_: None, unsubscribe=lambda *_: None),
             )
 
         def add_exec_client_factory(self, name: str, factory: object) -> None:
             assert name == "IB"
             calls.append("factory")
+
+        def add_data_client_factory(self, name: str, factory: object) -> None:
+            assert name == "CATALOG"
+            assert factory is runner.CatalogDataClientFactory
 
         def build(self) -> None:
             calls.append("build")
@@ -224,38 +237,26 @@ def test_run_live_rejects_live_before_validation() -> None:
         )
 
 
-def test_session_invalidates_reconciliation_on_transport_reconnect() -> None:
-    import asyncio
+def test_running_trader_and_connection_do_not_imply_reconciliation() -> None:
+    from trading_assistant.live.config import load_live_settings
 
-    async def scenario() -> None:
-        received = asyncio.Event()
-
-        async def reconcile(*, timeout_secs: float) -> bool:
-            assert timeout_secs == 30
-            received.set()
-            return True
-
-        client = SimpleNamespace(is_ready=True, _last_disconnection_ns=None)
-        node = SimpleNamespace(
-            kernel=SimpleNamespace(
-                trader=SimpleNamespace(is_running=True),
-                exec_engine=SimpleNamespace(
-                    check_connected=lambda: True, reconcile_execution_state=reconcile
-                ),
-            )
+    client = SimpleNamespace(is_ready=True, _last_disconnection_ns=None)
+    node = SimpleNamespace(
+        kernel=SimpleNamespace(
+            trader=SimpleNamespace(is_running=True),
+            msgbus=SimpleNamespace(subscribe=lambda *_: None),
+            exec_engine=SimpleNamespace(check_connected=lambda: True),
         )
-        session = runner.BrokerSession(node, client)
-        assert session.status() == (True, True)
-        client.is_ready = False
-        client._last_disconnection_ns = 10
-        assert session.status() == (False, False)
-        client.is_ready = True
-        assert session.status() == (True, False)
-        task = asyncio.create_task(session.monitor())
-        await asyncio.wait_for(received.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert session.status() == (True, True)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-    asyncio.run(scenario())
+    )
+    session = runner.BrokerSession(
+        node,
+        client,
+        account_id=AccountId("IB-DUTEST"),
+        settings=load_live_settings(PROJECT_ROOT / "config/live.yaml"),
+    )
+    assert session.status() == (True, False)
+    client.is_ready = False
+    client._last_disconnection_ns = 10
+    assert session.status() == (False, False)
+    client.is_ready = True
+    assert session.status() == (True, False)

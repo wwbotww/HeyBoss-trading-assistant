@@ -1,8 +1,10 @@
 826 每日生产：FacDigger 与 HeyBoss 联合验收
 
-验收日期：2026-09-20 初验，2026-09-21 复验。本文时间均为 UTC。
+验收日期：2026-09-20 初验，2026-09-21 复验，2026-09-24 新真实批次、故障修复与隔离复验，2026-09-25 运行检查。本文时间均为 UTC。
 
-最新结论：FD-04 修复已在实际 FacDigger 容器生效，源码、恢复及部署核对通过。2026-09-21 14:22 首次自动批准后提交的三笔 IBKR paper 订单全部成交，独立券商回报、正式数据库和网页一致；14:44 受控重启后恢复核对通过，没有重复下单。常驻数据消费者和 TradingNode auto 已启用，Bot 保持停止。连续五个常规交易日的生产与执行仍待观察；首次执行及恢复验收不等于连续运行验收完成。最新详情见第十节。
+最新结论：2026-09-25 按用户指令恢复会话并检查全通路。13:30:49 paper Gateway 重启恢复，原节点自动核对后于 13:31:10 自然批准并提交 D24 卖单；但恢复持仓未绑定 position_id，JNJ 已成交却未冲减本地 Position，全通路验收失败。13:33:31 已保护性停止交易节点。券商确认 JNJ 九股和 XOM 十五股均已卖出，实际只剩 JPM 七股、全部客户端零挂单，AMZN/NVDA 买单未提交。Gateway 保持在线，实盘和 Bot 关闭；XOM 在停止后一秒成交，正式审计尚待通过原生回报补齐。第十八节记录事实，新增代码修复方案见实施方案 14.8，尚未编码。
+
+2026-09-24 启动结论：已完成 R1 Catalog 异步读取、R2 首次及重连核对、R3 持仓就绪展示的代码修复与隔离验收。D=2026-09-23 真实批次的十个目标、日期映射、重复导入、共同日历和模拟调仓通过。18:35 完成获授权的 Gateway 恢复，19:36 完成 HeyBoss 修复部署。随后按用户“启动 HeyBoss 模拟盘自动交易”的明确指令启动并验收。首次启动发现收盘后预热错误标记日期的边界，停止节点后在已确认 R1 范围修复；1075 项 Python 与最终 Linux 原生 35 项回归通过。21:31 用最终镜像恢复正式 paper auto，当时会话核对、四轮连续快照及网页通过。第十五节保留首次启动过程，修复后的启动状态见第十六节。
 
 第一至八节保留 2026-09-20 的原始结果及故障证据，第九节保留 2026-09-21 上午的复验结果；其中的运行状态只代表对应时刻。
 
@@ -127,3 +129,199 @@ HeyBoss 最终镜像为 `sha256:93570701d5262769675b7846bd7c00060685b5f08533a518
 14:55 最终运行状态：FacDigger、IB Gateway、Web API/UI 健康，HeyBoss 数据消费者及 TradingNode auto 运行，Bot 停止；Gateway 与节点均为 paper。后续每日生产、接纳和交易由这些服务执行。FD-04 的恢复缺陷与部署阻断已关闭，其连续运行部分及 FD-02 的时效观察仍待五个常规交易日证据。下一份真实 D 的自动生产和接纳须等待自然日程，不能以重复消费旧 D、持续 SKIP 或改变时钟替代。
 
 本轮证据位于 `runtime/reports/paper/826/activation-20260921/`：`deployment-preflight.json`、`ibkr-preflight.json`、`heyboss-preflight.json`、`first-execution.json`、`broker-native-verified.json`、`heyboss-final-checks.json`、`controlled-restart.json`、`broker-after-restart.json`、`web-api.json`、`browser-validation.json` 和 `final-runtime.json`。交易前及重启前的一致数据库副本、原始私有日志权限为 600，目录为 700；全部业务证据留在 runtime，不进入 Git。
+
+十一、2026-09-24 新真实批次与退出故障复验
+
+本轮按 FacDigger 工作区的 `docs/826每日生产运行交接.md` 检查交付。FacDigger 当前运行镜像为 `sha256:a939b4d6a785d31b8fefbbe317b20ecc1217fc0cbaf6bf1b7466b13a279f3d1b`，服务健康；未改动该项目代码、数据或部署。HeyBoss 受验镜像仍为第十节的 `93570701…`，产品代码未修改。
+
+先排查退出，再验证交付。TradingNode 在 11:44:21.197166375 的 RequestData 队列处理过程中抛出 `TimeoutError('Catalog is busy; retry the complete operation')`。原生调用经 `LiveDataEngine._run_req_queue` 进入 `CoordinatedParquetDataCatalog.query`，共享读锁超过 50ms 后失败；NT 默认异常处理调用 `os._exit(1)`。Docker 记录 11:44:21.372833208 结束，退出码 1，OOMKilled=false；Compose 的 restart="no" 使其保持退出。原因是 HeyBoss 正常发布与异步消费之间的故障处理缺口，不是本批次分数无效。
+
+Actor 在 `request_data` 外层的 try/except 只能处理同步异常。生产引擎先把请求入队并返回，再由事件循环读取 Catalog，因此外层捕获不到后续异常。原有并发集成测试使用同步 DataEngine，虽验证了锁和失败关闭，却没有覆盖 LiveDataEngine 的进程退出。新增本地诊断脚本在禁网临时容器和隔离 Catalog 中复现：无锁对照正常消费并返回 0；另一进程持有写锁时，Actor.start 已返回，RequestData 队列随后捕获同一 TimeoutError 并按 NT 原处理器退出 1。探针仅在委托原处理器前记录异常，以免立即退出丢失异步日志；未修改 NT 的队列、读取逻辑或退出策略。
+
+新交付为 `16d5b6a85797264c36e64cab71e7f74a5c163c81c03175f1b967b812649caa71`，位于 FacDigger 的 `artifacts/factor_batches/production_826/`，固定 826 release 和 signal_inference 来源正确。manifest、Parquet 的 SHA-256 与交接一致。HeyBoss 现有校验器解析十行，按 D 的有效身份映射后十个目标全部 eligible 且分数有限；与正式 Catalog 的十行逐项一致，全部二十根 signal/execution 最新 Bar 都属于 D=2026-09-23。正式 Catalog 合计二十行因子，保留原 D=2026-09-18 批次。
+
+FacDigger 创建时刻为 11:43:29.846510；已经运行的数据消费者自然完成本次导入，正式 paper verified_at 为 11:44:38.464886，比开盘早 6321.535114 秒。本轮没有再次触发生产采集或改写接纳记录。另在隔离 Catalog 和数据库，以明确的 TestClock 11:45:38.464886 验证 paper 导入：第一次十行，第二次零行且 already_imported=true，仅保留一份数据。
+
+D=2026-09-23 正确映射到 N=2026-09-24，执行窗口为 13:30:00 至 20:00:00。接纳时刻、开盘时刻、收盘前一微秒均要求 D23，收盘时刻切换为 D24。两侧分别使用实际容器的虚拟环境运行现有共同探针，2000—2027 年 10,227 个日期、7,041 个交易时段的日期集合、开收盘及前后交易日全部相同，共同 fixture 也一致。exchange_calendars 均为 4.13.2/XNYS；FacDigger 的 pandas/numpy/tzdata 为 3.0.5/2.4.6/2026.4，HeyBoss 为 2.3.3/2.5.1/2026.3，记录实际环境而未假定依赖完全相同。
+
+原生 Actor 从正式只读 Catalog 和隔离数据库副本消费新批次，产生 AMZN、MSFT、NVDA 各 25% 的目标，缺分保护集合为空；重复请求保持同一事件 ID 和一个工作流。另使用正式 `run_backtest` 入口和 BacktestNode 演练换仓，仍经 TradeSignalEvent、执行网关、原风控、auto 审批及 NT 模拟执行客户端。输入包含真实 D18、D23 因子和截至 D23 的真实日线。D18 回放建立 JNJ 9 股、JPM 7 股、XOM 15 股，与正式成交账本数量一致；本轮未向券商重新查询当前持仓。
+
+本次是流程情景测试：只在隔离目录假设 N24 开盘价等于 D23 EXTERNAL 收盘价、报价流动性充足，并采用原有一跳滑点及每股 0.005 USD 费用；虚拟现金 20,000 USD，策略资金上限仍由原 risk.yaml 限制为 10,000 USD。模拟在 N24 13:30:00.000001 先完成三笔卖单，再买 AMZN 10 股、MSFT 4 股、NVDA 11 股；一共六笔新批次模拟成交，全部关联同一调仓事件，没有开盘前成交或重复调仓。隔离报告不代表当日真实成交或模型收益验收，也没有接入正式业务回测库。
+
+相关现有回归 175 项通过，覆盖因子、日历、Actor、Gateway、每日消费者、节点装配、回测和联合集成；本轮没有重跑全量覆盖率验收。该结果与异步故障复现同时保留，不能用同步回归通过掩盖运行时缺陷。
+
+14:30 最终只读核对：网页实际 API 的 D23、delivery、十行分数、身份和目标权重与 Catalog 一致，六个相关接口返回 200；本轮未做浏览器视觉验收。正式数据库仍为两个工作流、十二条订单事件、三笔历史成交，没有 D23 正式工作流，接纳记录未变化。页面上的 D23 missing_expected_factor_batch 是 11:43:21 的历史 SKIP，节点退出后未能消费新批次并恢复该记录，不能据此认定 FacDigger 当前没有交付。
+
+仍需处理的另一问题是券商执行核对：保留的 9 月 23 日 12:30 至 9 月 24 日退出前日志包含 12,573 行 mass-status 失败记录，这不是本次退出的直接异常。最近本地账户快照停在 11:43:51，reconciliation_complete=false、持仓行数为零，API 已标记陈旧；不能将该零行快照当作已确认空仓，也不能将快照中的 connected=true 当作当前连接事实。
+
+后续修复先解决 Catalog 忙碌在原生异步请求边界的可恢复处理，同时覆盖因子与执行参考价请求，保留写入中断或数据损坏时的失败关闭；不能仅延长阻塞等待、清除写入标记或增加自动重启来宣称修复。真实 LiveDataEngine 的写锁、锁释放、连续重试、跨日参考价刷新和请求超时清理须进入正式回归，并确认重试期间不采用旧 D、不开盘前交易、不重复工作流或订单。随后独立修复并验收 IBKR 重连核对及持仓恢复，再决定恢复常驻交易；具体编码里程碑仍按项目约束提交文件清单、关键接口及验收方式后确认。
+
+最终 TradingNode 仍为原退出状态，数据消费者继续运行，FacDigger、Gateway、Web API/UI 健康。本轮没有重启任何生产服务，没有建立新的 IBKR 会话或提交 paper/live 订单。证据位于 `runtime/reports/paper/826/joint-20260924/`：`exit-diagnosis.json`、`async-catalog-reproduction.json`、`delivery-validation.json`、`calendar-consistency.json`、`rebalance-simulation.json`、`web-api-verification.json`、`production-data-after.json`、`containers-before.json`、`containers-after.json` 及 `regression.log`。私有日志和数据库副本只留本地隔离目录，不进入 Git。
+
+十二、2026-09-24 R1—R3 实施与隔离验收
+
+用户确认第十四节方案后完成本轮修改；实施中补充确认“首次启动和重连统一由 BrokerSession 管理核对”。没有修改 FacDigger、第三方 NT 包或依赖锁，没有增加订单入口、插件、持仓账本、数据库字段或 API 字段。下述成功结果均为源代码、隔离镜像或只读验证，不代表正式节点已经恢复。
+
+R1 的代码入口为 `data/catalog.py`、新增 `live/catalog_client.py`、`live/runner.py`，并修改现有 Factor Actor、DualMomentum Actor 和 Gateway 请求及完成回调。保留共享锁和中断标记；新增 `CatalogBusyError` 及 `CatalogRequestOutcome(status, rows_received, reason)`，状态经 NT request.params 的同一对象传递。单个物理线程处理读取，30 秒期限覆盖排队和读取；非成功状态通过空响应正常释放 NT 请求关联，不能当作成功空查询。Actor 只接受本轮实际取得的完整批次，Gateway 要求本轮各执行价请求成功后才完成预热。迟到线程结果和旧代次回调不推进状态。
+
+真实 LiveDataEngine 回归覆盖另一进程持写锁时因子与执行 Bar 同时请求、写者正常释放与强制终止、单线程超时后仍未完成、停止前尚未调度的请求、成功空结果、跨日、重复回调及原生纳秒日期边界。写锁期间事件循环仍可推进，节点不退出、信号不误放行；释放后读取新数据，账户未核对时工作流继续保持 NEW。没有延长 50ms 锁等待、删除中断标记或修改 NT 默认崩溃处理器。
+
+R2 的主要修改集中在现有 BrokerSession。用 NT 原生 Requests/Future 和结束回调复现外层 wait_for 取消污染：取消后 Future 仍在请求表中，下一次相同请求继续收到 CancelledError。现在监测器拥有单轮任务，周期等待及 120 秒完整期限不会取消原生 IB 请求；30 秒原生请求超时负责正常收尾，失败后按 30 秒间隔重试，旧连接代次或超期结果不标记就绪。close 等待本轮收尾，只有退出过程超出完整期限才取消残留任务。
+
+NT Kernel 原来的首次核对失败会在 Trader.start 前直接返回，因此按补充确认关闭其独立首次步骤；Trader 以未就绪门禁启动后，首次与重连均由 BrokerSession 调用原生执行核对。就绪必须包含当前连接的有效账户来源时间、完整原始回报、对应原生报告以及与 Cache 相同的持仓数量。额外回报检查仍复用唯一 IB 客户端，用于发现 NT 报告生成器吞掉转换异常后留下的部分列表；不会从本地旧快照补仓。
+
+原生 IB 执行客户端、LiveExecutionEngine、报告和 Cache 的无网络回归已覆盖首次失败自动恢复、真实结束回调确认空仓、非空仓位恢复、报告不完整、未知合约、数量变化、陈旧账户、再次断连、旧代次迟到及停机。真实 Kernel/Trader 生命周期使用相同异步组件的 SANDBOX 环境，避免与其他回测重复初始化 NT 全局日志。恢复前 Gateway 零提交且工作流 NEW；恢复后 Cache、快照与网关读取同一 9 股合成持仓，计划只补足目标数量，重复轮询不重复提交。该 9 股是隔离回调夹具，不是当前实际账户持仓；NT 推断成交未写入真实成交审计。原有部分卖出、未决提交、成交重放、归属、过期和 manual 风控回归全部保留并通过。
+
+R3 修改 `PortfolioPage.vue`、`OverviewPage.vue` 及其测试；API 查询测试固定原有质量字段的透传。实际构建页面连接隔离 FastAPI/数据库，浏览器验证四种状态：未核对空列表显示“持仓尚未确认”与“待确认”；健康空列表才显示“当前没有持仓”；陈旧非空列表显示历史快照及来源时刻；恢复后持仓表和总览数量一致。正式 Web 容器没有替换，这些页面效果仍待部署。
+
+最终验证结果：Python 1075 项通过，覆盖率 90.48%；Ruff、188 个文件格式检查、103 个源文件 strict mypy、git diff --check 通过。前端 17 个文件共 137 项、类型检查、ESLint、Prettier 和生产构建通过。最终 Linux/amd64 禁网镜像的原生 Catalog、节点装配及 Broker 恢复定向组 35 项全部通过。未放宽现有 90% 覆盖率要求，也没有将模拟回调替换成简单布尔就绪后宣称核对成功。
+
+最终独立镜像为 `heyboss-runtime-repair:20260924`，镜像标识 `sha256:2aba8719059c49f2ec9fcd3c54b1644e8ae71f046cc2f2aa8eb868880286845e`，架构 linux/amd64，与生产一致。临时测试派生镜像只增加 uv.lock 中已有的开发组。以最终镜像、正式 Catalog/数据库只读挂载重新验证 D23 交付，隔离导入仍为首次十行、重复零行，Actor 重复消费保持一个工作流及相同目标。日期、release、XOM 身份和原 paper 接纳时刻与第十一节一致。共同 fixture 与 2000—2027 年 10,227 日期、7,041 交易时段继续一致；两侧实际依赖版本见 calendar-consistency.json，没有重建 FacDigger。
+
+正式 BacktestNode 入口在最终镜像再次通过相同隔离情景：以第十一节相同价格、现金、费用和滑点假设，在 N24 开盘后卖 JNJ 9、JPM 7、XOM 15，再买 AMZN 10、MSFT 4、NVDA 11。六笔 D23 模拟成交归属同一调仓事件，没有提前成交或重复执行；未写正式回测库或当作真实券商成交。
+
+实际券商只读验收尚未通过。现有 Gateway 的 Docker 健康检查为 healthy；但 `scripts/check_connection.py` 在账户摘要阶段超时，日志同时记录连接丢失和客户端 ID 冲突（IB 326）。另一个不注册执行客户端的诊断脚本只断开、重连自己的连接，两轮持仓、挂单和成交均未取得完整结束回报，返回未知而非已确认零。没有订单提交，没有重启共享 Gateway。上述事实说明实际会话仍有阻断，尚不足以认定唯一根因；不能用原生 Future 故障的离线复现解释全部现网失败，也不能用端口健康检查替代账户核对。
+
+结束前正式 live 库各表计数与开始时完全相同：两个工作流、十二条订单事件、三笔历史成交、两条接纳记录；账户/持仓快照等表同样未被测试修改。正式回测库仍保留原一条 826 回测。交易节点的退出码、结束时间、镜像与 restart=no 均未变化；数据消费者仍运行，FacDigger、Gateway 与 Web API/UI 健康，健康不代表券商业务回报完整。
+
+全部私有证据位于 `runtime/reports/paper/826/repair-20260924/`：最终数据与模拟输出在 `final-image/`；`linux-native-tests-final.log`、`pytest-final.log`、`calendar-consistency.json`、`broker-readonly.json`、`connection-check.log`、`web-*.txt/png`、`production-counts-before/after.json`、`production-containers-after.json` 与 `acceptance-summary.json` 保存复核依据。目录权限 700，文件 600；诊断临时凭据文件已删除，业务副本和报告不进入 Git。
+
+本轮代码与隔离验收完成；生产部署、实际 Gateway 会话恢复、完整只读核对、恢复每日 paper 交易及连续五日观察仍为后续运行事项。恢复时必须使用届时新 D 的有效批次，D23 仅作为回归样本保留。
+
+十三、2026-09-24 Gateway 会话恢复与只读重连核验
+
+用户要求先解决 Gateway 会话，并补充明确授权“允许，仅重启 Gateway”。本阶段只处理当前 paper Gateway 会话，未启动 TradingNode 或 Bot，没有下单、撤单、部署 HeyBoss 修复或修改生产配置。第十二节中的 Gateway 阻断状态为重启前的历史结论。
+
+先保存故障现场，并用全新的独立客户端 ID 1361 复验：API 可握手、账户可匹配，但账户摘要仍超时，随后出现连接看门狗报错与 IB 326 客户端 ID 冲突。另一独立客户端 1362 的 DEBUG 日志进一步取得 IB 2110（Gateway 与 IB 服务器之间的连接中断）、2103（行情服务连接中断）和 2157（合约定义服务连接中断），之后才发生重连及 326。因此换客户端 ID 不能修复该故障，Docker 的端口健康检查也不能证明上游会话或账户回报正常。原生客户端根据这些断线码清除连接状态，记录与源码一致。尚未确认最初由何种网络或休眠事件触发，不能只据这组证据归因电脑休眠。
+
+Gateway 自带 IBC 会话控制端口为 0，未启用远程恢复入口；未为本次操作临时开放控制端口。首次重启尝试被自动审批拦截，未改变服务；用户明确补充授权后，仅重启 `trading-assistant-ib-gateway-1`。新进程启动于 18:30:40.272862839，IBC 于 18:30:50 记录重新登录完成。沿用原镜像和环境，没有重建、升级或修改登录配置，其他服务未重启。
+
+恢复验收使用上一轮受验的 HeyBoss 独立镜像，仅运行只读入口，不注册交易执行客户端：
+
+- `scripts/check_connection.py` 两次通过 API 就绪、账户匹配、完整 USD 摘要、挂单与持仓五阶段检查，均复用重启前失败的 ID 1361，无 ERROR 日志。
+- 另用 ID 1363 取得持仓、全部挂单和成交完整结束回报；仅关闭自己的诊断连接，间隔 15 秒后使用相同 ID 再连接，第二轮全部通过，未复现 2110、2103、2157 或 326。
+- 两轮挂单均为零；实际三组持仓相同，JNJ 9、JPM 7、XOM 15，与正式库三笔历史成交的净数量一致。
+- 本次成交查询完整返回零条；没有将该查询结果解释为历史没有成交，也没有清空原三笔成交审计。所有检查均零订单提交。
+- 结束前正式库的工作流、订单事件、成交、账户快照、持仓快照和接纳记录计数与开始时相同。交易节点仍为原退出码及 11:44:21 结束状态，Bot 保持停止。
+
+18:35:04 最终核对确认当前 Gateway 会话恢复。私有证据保存在 `runtime/reports/paper/826/gateway-session-20260924/`：`gateway-before.log`、`precheck.log`、`native-debug-before.log`、`gateway-restart.log`、`postcheck.log`、`final-check.log`、`broker-readonly.json`、`broker-verification.json`、`production-counts-before/after.json` 和 `gateway-session-result.json`。目录 700、文件 600，连接参数仅从现有进程环境取得，没有创建凭据文件或写入 Git。
+
+本阶段为运行恢复，业务源码、生产配置和依赖未变更，因此未重复已通过的代码全量回归。Gateway 只读可用不等于 TradingNode 已完成生产核对；后续仍需按单独运行指令部署 HeyBoss 修复、由 BrokerSession 完成原生核对，再考虑当期有效信号的自动执行。网页仍读取原业务快照，未用本轮诊断伪造新快照。连续五个交易日的稳定运行验收仍未完成。
+
+十四、2026-09-24 修复部署与真实 BrokerSession 只读验收
+
+用户随后明确要求“部署之前代码修复”。本阶段部署上一轮已确认并通过验收的代码，没有新增业务实现、升级依赖或迁移存储。部署前对三个正式数据库执行 SQLite 一致性备份并检查完整性，保留原服务镜像用于回滚；Compose 环境与挂载在不输出凭据的情况下逐项比对一致。
+
+19:36:14 完成部署。后端使用已验收的 `heyboss-runtime-repair:20260924`，镜像标识为 `sha256:2aba8719059c49f2ec9fcd3c54b1644e8ae71f046cc2f2aa8eb868880286845e`，运行源码、脚本、配置及依赖文件共 115 项与当前工作区逐字节一致。前端按既有 Dockerfile 和锁文件构建 `heyboss-web-ui-repair:20260924`，镜像标识为 `sha256:692adae8504ad5e3dced79c0a1b008535170303b1a96bc2f472b74620be6d36e`。
+
+- `paper-data-sync`、`web-api` 和 `web-ui` 通过显式服务名及 `--no-deps --no-build` 更新并运行。数据消费者恢复为 D23 `already_accepted`，没有重复导入；Web API/UI 健康。
+- `trading-node` 使用 `up --no-start --no-deps --no-build --force-recreate trading-node` 更新。状态为 `created`，启动时刻仍为空，`restart=no`；不是运行中的交易节点。
+- Gateway、FacDigger 和 Bot 的容器 ID 与启动时刻均未变化；本阶段没有再次重启 Gateway，Bot 继续停止。
+
+19:37 和 19:40，使用同一修复镜像、同一独立客户端 ID 1365，分别完成真实 BrokerSession 的首次连接核对与诊断进程关闭后的重新连接核对。诊断移除全部策略、Actor 和数据客户端，不挂载正式数据库或 Catalog，进程内阻止 IB 下单、撤单和行权入口；保留原生 IB 执行客户端、NT Kernel/Trader、执行报告、Cache 和正式 BrokerSession。NT 独立启动核对仍关闭，真实核对由 BrokerSession 调用原生函数完成。
+
+两次均达到 connected/reconciled，取得当前会话的 ExecutionMassStatus，账户来源新鲜、请求表无残留，随后正常关闭。Cache 中 JNJ 9 股、JPM 7 股、XOM 15 股与原始券商回报及正式三笔历史成交净数量一致。补充查询以完整结束回报确认当前挂单为零；原生报告集合中的三条订单均为 FILLED，不能把报告条数当作挂单数。当前查询范围的成交报告为零，不影响历史成交审计。两次验证均没有调用或尝试调用交易 API，没有把内存核对结果或推断成交写入正式数据库。
+
+实际 `http://127.0.0.1:8080` 验收通过：健康与 OpenAPI，以及总览、账户、因子、策略、订单、成交、系统、Catalog、市场摘要、826 回测详情和五张报告表共 18 个 GET 接口返回 200。D23 因子仍为固定交付的 10/10 eligible 目标。浏览器实际验证总览的“当前持仓：待确认”、账户页的“持仓尚未确认”，不会把旧快照的空列表显示为已确认空仓；826 回测、463 点权益曲线和报告正常可见。网页继续读取 11:43:51 的原业务快照；独立只读核对成功没有伪造新的正式快照，因此页面保留“账户未就绪”是当前停机状态下的正确展示。
+
+三个正式数据库逐表逐行与部署前备份相同，原一条 826 回测和 27 个报告文件保留。live 库仍为两个工作流、十二条订单事件、三笔成交、两条因子接纳、6658 条账户快照和 294 条持仓快照。未启动真实或 paper 自动交易，未清理原始 826 资产或其他业务数据。连续五个常规交易日的生产执行仍待完成，恢复交易时须使用届时有效输入，不得重放 D23 补验收。
+
+证据位于 `runtime/reports/paper/826/deploy-20260924/`，目录 700、文件 600，不进入 Git。包括数据库备份、`database-before/after.json`、`rollback-images.json`、`runtime-image-source.json`、`compose-deploy.log`、`broker-session-first.json/log`、`broker-session-readonly.json/log`、`position-ledger-check.json`、`api-verification.json`、`web-*.txt/png`、`containers-deployed.json` 和 `service-verification.json`。恢复旧代码时先从 `rollback-images.json` 将旧镜像重新标记为对应 Compose 服务镜像，再显式更新原三个运行服务；交易容器仍仅创建而不启动。此次没有数据迁移，回滚代码无需覆盖数据库。部署前已通过的 1075 项 Python、137 项前端及 Linux 原生 35 项回归继续作为代码依据；本阶段另做镜像一致性、真实只读核对和正式网页验收。
+
+十五、2026-09-24 正式 paper 自动交易启动验收
+
+本节保留第一次启动的基础检查结果。后续扩展到新批次稍后发布的验收时发现价格缓存缺陷，已停止节点并在原 R1 范围修复；最终恢复结果见第十六节，不能只据本节最初的短时连接成功认定完整启动验收通过。
+
+用户明确授权“启动 HeyBoss 模拟盘自动交易，保持实盘关闭，并完成启动验收”。启动前确认 Gateway 与节点均为 paper、配置账户为 DU 前缀、连接目标为现有 paper Gateway、修复镜像与部署验收一致。活动策略仍为固定 826 release 的 `patchtst_e3` / auto，策略资金 10000 USD、单笔上限 5000 USD 及其他既有风控均未变更。正式 live.db 已再次一致性备份；运行库结构、Catalog 协调锁及中断标记预检、独立券商五阶段只读检查通过。
+
+只执行 `docker start trading-assistant-trading-node-1`，正式进程启动于 21:09:04.675748126。Gateway、FacDigger、数据消费者、Web 和 Bot 的容器及启动时刻未变化，没有启动实盘、重新构建镜像或修改凭据、配置、代码。Bot 保持停止，auto 继续走既有风险、批准与 NT 执行通路。
+
+启动验收结果：
+
+- 原生 IB 执行客户端 1202 连接成功；CATALOG 客户端、策略 Actor、Gateway、风险引擎和 Trader 正常启动。十只标的各取得 1513 条 EXTERNAL Bar，周期因子请求持续执行，未出现 Catalog 异常或节点退出。
+- 21:09:12 首份正式快照明确记录核对未完成；BrokerSession 完成本进程的原生执行核对后，21:09:42 的正式快照记录 connected/reconciled、来源有效和三组真实持仓。没有把隔离诊断的就绪状态带入正式节点。
+- 21:10:45 至 21:13:52 连续七次只读观察全部通过，取得七个不同的正式快照时刻及两个不同的券商来源更新时间，账户与持仓始终就绪。节点无自动重启，运行日志无 ERROR 或 traceback；常规 IB 状态通知不当作会话失败。
+- 独立只读客户端再做两轮原始券商检查，完整结束回报均通过，当前挂单为零，JNJ 9、JPM 7、XOM 15 与正式快照及三笔历史成交一致。没有新增或重复订单、成交；只新增实际账户与持仓快照。
+- 正式网页账户页显示“数据可用”“订单与持仓核对：已完成”和三组持仓，总览显示持仓数量 3。总览、账户、订单、成交、工作流、策略、因子及原 826 回测 API 均返回 200，旧业务仍可读。
+
+启动时已过 9 月 24 日常规收盘。按实际日历，当前预期 D=2026-09-24，下一执行窗口为 2026-09-25 13:30:00—20:00:00 UTC；数据消费者记录 `action=waiting`，最新已接纳批次仍为 D23。节点正确等待 D24 自然发布、按时接纳和 N25 开盘，没有使用旧日期或旧工作流补下订单。启动和待机验收通过，不等同于 D24 已成功产出或下一交易日已完成自动调仓；连续五个交易日的生产执行验收仍待后续事实。交易节点保留 `restart=no`，本机或 Docker 停止后不会自动恢复交易。
+
+私有证据位于 `runtime/reports/paper/826/startup-20260924/`，目录 700、文件 600，不进入 Git。包括 `live-before.db`、`preflight.json`、`connection-precheck.log`、`start.log`、`containers-before/after.json`、`trading-node-current.log`、`paper-data-sync-current.log`、`startup-observation.json`、`startup-checks.json`、`startup-result.json`、`broker-readonly.json/log`、`database-before/observed.json`、实际 API 响应及 `web-portfolio.txt/png`、`web-overview.txt`。本阶段未修改业务代码，沿用前一轮已通过的完整代码回归，新增的是正式启动与运行验收证据。
+
+十六、2026-09-24 收盘后启动边界修复与最终恢复
+
+扩展启动验收发现，Gateway 在 D24 收盘后只预热到 D23 Bar，却把墙上时钟的预期 D24 当成已经刷新完成的日期。当 D24 合法批次和新价格稍后到达时，原信号入口不再发起查询，工作流被旧价终止为 RISK_REJECTED。隔离复现使用实际 LiveDataEngine、CatalogDataClient、Gateway、TestClock 和专用数据库，结果保存在 after-close-reproduction.json；未改变真实时间、当日交付或生产工作流。发现后正常停止 paper 节点，退出码为 0，其他服务继续运行。
+
+该修正属于已确认 R1 的新 D 参考价与失败后恢复要求，范围和验收补充记录在方案 14.7。实际产品代码只修改现有 gateway.py：请求关联信号的 required_date，初始预热不再推断某日刷新已完成；仅完整成功的同代次请求更新已完成日期。恢复延迟信号和已有 NEW 工作流时重新经过原信号入口，失败轮询保留请求目标。实际价格日期、保护仓位、账户、时间窗和风险检查仍由原链路执行，没有新增下单入口、存储字段、API 或依赖。
+
+修改现有 test_paper_daily.py 中的原生异步用例，直接从信号入口验证“收盘后旧价预热、新数据稍后发布、发布期间持锁、失败后恢复、开盘前保持 NEW、开盘后使用新价且重复轮询只执行一次”；保留普通及带纳秒偏移两种时钟。没有让测试直接调用刷新方法代替真实触发，也没有给正式账户制造订单。原 Gateway 回归沿用现有用例，未增加重复测试。
+
+完整 Python 回归 1075 项通过、覆盖率 90.53%，Ruff、188 文件格式检查、103 源文件 strict mypy 和 git diff --check 通过；最终 Linux/amd64 镜像派生的禁网原生通路 35 项通过。前端无源码变化，沿用此前 137 项回归并重新检查实际页面。
+
+最终正式镜像为 heyboss-runtime-repair:20260924-price-refresh，标识 sha256:0ea1f374f0dc1955aff39bff97f3629273a169d92b6cda4cd394b2466696d609，115 个运行文件与受验工作区一致。仅替换 trading-node，环境与挂载和修复前逐项一致；不重启 Gateway、数据消费者、Web、Bot 或 FacDigger。原修复镜像与两份启动前 live.db 备份继续保留。
+
+最终节点于 21:31:34.411751043 启动。21:32:12 首份当前进程已核对快照恢复三组真实持仓；21:32:19—21:33:52 四轮观察均为连接成功、核对完成、账户来源有效、三组持仓、零重启。十只标的 EXTERNAL Bar 预热完成，因子周期检查持续运行，日志无 ERROR 或 traceback。独立券商两轮持仓、全部挂单及成交结束回报完整，挂单为零；JNJ 9、JPM 7、XOM 15 与正式快照及历史审计一致。实际总览和账户页重新显示数据可用、核对完成、当前持仓 3。
+
+正式信号、工作流、批准、订单事件、成交、接纳和因子决策逐行与启动前一致；仅新增真实账户及持仓快照。仍为两个工作流、十二条订单事件、三笔历史成交、两条接纳记录，没有真实信号因隔离复现被错误拒绝。实盘保持关闭，Bot 停止，paper auto 节点保持运行并等待 D24 自然发布与按时接纳。下一执行窗口仍为 2026-09-25 13:30—20:00 UTC；启动验收通过，下一交易日的实际调仓和连续五日生产仍待自然运行事实，restart=no 的运行边界不变。
+
+补充证据仍位于 startup-20260924 私有目录：after-close-reproduction.json/log、stopped-after-acceptance-failure.json、price-refresh-targeted.log、pytest-price-refresh.log、static-price-refresh.log、linux-price-refresh-tests.log、price-refresh-image.json、corrected-start.json、corrected-observation.json、corrected-broker/、trading-node-final.log、portfolio-corrected.json、web-*-corrected.txt/png 和最终 startup-result.json。首次基础检查和最终修复后检查分别保存，不用前一次进程的快照证明新进程就绪。
+
+十七、2026-09-25 开盘前运行检查
+
+检查截至 12:40:45。正式交易节点仍为最终修复镜像，启动时刻保持 2026-09-24 21:31:34，零容器重启、无 OOM；数据消费者、FacDigger、Gateway 和只读 Web 均在运行，Bot 停止，Gateway 与交易节点均为 paper。交易节点的 restart=no 未改变。容器运行期间本机仍可能休眠，不能用容器启动时刻证明服务连续可用。
+
+FacDigger 于 2026-09-24 23:02:57.296988 自然发布 D24，delivery 为 b507b75abf7b92ed263aee4e603c22c60e26db7c3818dad5e83c0ef7717d377f，release 保持固定，十个目标全部 eligible。消费者曾因缺少 D24 信号 Bar 阻止接纳，随后于 2026-09-25 00:22:07.510958 自然恢复并正式接纳。00:22:46 生成唯一 D24 工作流，目标为 AMZN、JPM、NVDA 各 25%，状态 NEW；执行窗口 13:30—20:00，即英国夏令时 14:30—21:00。此前 missing_expected_factor_batch 审计已标记 recovered；没有补造接纳时间或手工重放。
+
+账户最后一份就绪快照为 11:06:46，账户来源时间为 11:05:07；从 11:07 起未再取得就绪快照。12:40 仍为 broker_connected=false、reconciliation_complete=false。日志包含 IB 1100/2110 上游断线、326 客户端编号占用和完整回报失败；使用不同编号的独立只读客户端两轮检查同样收到 2110，均未取得完整持仓、挂单、成交结束回报。这表明问题不只在正式节点的客户端编号，当前真实挂单数量与持仓不能确认，不能把查询失败写成零。Gateway 当前健康检查仅探测本地 TCP 端口，healthy 不代表上游会话恢复。
+
+主机电源日志确认本轮启动后有 23 次休眠，包含合盖和维护休眠；账户快照有多段超过一分钟的间隔，最长约 20 分 18 秒，与部分休眠时段对应。此前多次重连及重新核对成功，最后一次持续断线仍未恢复。休眠确实影响了连续运行，但尚不足以断言此次持续上游故障仅由休眠造成。
+
+正式库共有三个工作流、两条批准、十二条订单事件、三笔历史成交、三条因子接纳；订单与成交计数相对前次启动验收未增加，未发现重复日工作流或重复成交 ID。账户快照仍记录历史 JNJ 9、JPM 7、XOM 15，不能作为当前券商持仓证明。实际浏览器总览与账户页均正确显示账户未就绪，持仓明确标为历史记录。代码中的账户与核对门禁保持关闭，D24 工作流继续等待恢复及有效执行窗口；尚未完成今日自动调仓验收。
+
+恢复优先级是 Gateway 上游会话与本机持续运行条件，再验证正式 BrokerSession 自动核对、账户来源新鲜度、完整挂单/持仓回报以及 D24 工作流自然执行。更换客户端编号或仅查看容器健康均不足以完成验收。本轮未重启任何服务、未修改业务代码、未提交订单，也未改动 FacDigger。
+
+私有证据位于 runtime/reports/paper/826/operation-20260925-123638/，目录 700、文件 600，不进入 Git。包括 operation-result.json、容器状态、账户就绪时间线、正式 API 响应、服务日志、独立券商两轮只读结果、主机休眠事件和两个实际网页 DOM；摘要未记录账户标识、余额或凭据。
+
+十八、2026-09-25 会话恢复与 D24 全通路实测
+
+用户明确要求“恢复会话，并检查全通路是否正确执行”。先核实 Gateway 和交易节点均为 paper、正式 D24 工作流仍为 NEW、Bot 停止，保存 live.db 一致性备份。仅重启 Gateway，13:30:49 恢复容器；未重建镜像、修改配置或重启其他服务。保留原交易进程验证自动重连，13:31:08 原生执行核对成功，随后 BrokerSession 完整检查通过。
+
+D24 自然接纳、信号、价格及批准链路通过：原 00:22:07 接纳记录不变，00:22:46 创建的唯一工作流使用固定 release、10/10 有效目标及 13:30—20:00 执行窗；实际计划采用 D24 EXTERNAL 参考价。13:31:10.542316 auto 批准及风控摘要先于订单创建落库，JNJ 九股、XOM 十五股卖单经既有 NT RiskEngine/ExecutionEngine 和 IBKR 执行客户端提交并接受。计划中的 AMZN 十股、NVDA 十一股买单须等待卖出完成并重新规划，没有提前提交。
+
+13:31:12 JNJ 九股以 270.35 成交，原始成交已落库。但提交日志明确 position_id=None，Cache 中原持仓为 JNJ.NYSE-EXTERNAL，NT 为策略推导了另一持仓标识，因 reduce_only 拒绝开出新 NETTING Position。故原九股没有被冲减。正式快照随后仍记录原三组持仓且 connected/reconciled=true，这是执行后状态失效遗漏，不能称作正确持仓展示。用户界面后来因节点停止、快照陈旧转为历史持仓，只证明陈旧展示逻辑有效，不能替代该缺陷修复。
+
+发现后正常停止唯一交易节点，13:33:31.381102 退出码 0、无 OOM，避免基于不一致 Cache 继续买入。XOM 已被券商接受的卖单于 13:33:32 才以 159.90 成交，晚于节点停止约一秒；因此正式库仍显示该订单 ACCEPTED、缺少此笔原始成交。这不是证据支持的运行中丢失回报，而是停止后回报需要补收。没有修改订单、手工补账、回退工作流或重放信号。
+
+13:35:48 使用独立客户端请求全部客户端挂单、完整持仓和原始成交：账户摘要字段完整，全部挂单为零，非零持仓只有 JPM 七股；两笔卖单的原始成交编号、数量、价格及费用均取得。JNJ 与正式成交审计逐项一致，XOM 原始回报保存于私有证据，待原有恢复通路接纳。13:38:11—16 再以正式镜像运行隔离 BrokerSession，禁止交易 API、不挂载正式数据库、不装配 Actor 或 Strategy；完整核对通过、来源年龄约 0.35 秒、JPM 七股、零挂单、两份原始成交报告、请求表无残留。仅一份订单报告不能当作两笔成交均有对应 OrderStatusReport，这一边界纳入恢复测试。
+
+截至 13:40，Gateway、消费者、FacDigger 和只读 Web 运行，交易节点与 Bot 停止，实盘关闭。D24 工作流为 ORDERS_SUBMITTED，但这仅代表已进入提交阶段；本次仅两笔卖出实际完成，零买单。正式库相对恢复前新增一条 auto 批准、七条订单事件和 JNJ 一笔成交；XOM 成交待补收。网页与库一致，但只能显示历史持仓，不能拿旧快照中的 JNJ/XOM 当作当前实际持仓。
+
+本轮结论为“Gateway 会话恢复通过，D24 数据至卖单提交通过，成交后持仓更新及完整调仓失败”。修复文件清单、关键接口与验收条件已列入 [实施方案 14.8](826-ibkr-paper-daily-implementation-plan.md)，尚未改动业务代码。不能为完成验收手工提交买单、把已提交工作流改回 NEW，或用隔离核对结果覆盖正式数据库。
+
+证据位于 runtime/reports/paper/826/recovery-20260925/，目录 700、文件 600，不进入 Git。包括恢复前/部分执行后的数据库副本、Gateway 重启与节点停止记录、连续观察、正式工作流/批准/订单/成交、原始券商两次查询、隔离 BrokerSession、服务日志、API 与真实浏览器状态。诊断未提交订单；本次两笔卖单均由已授权的正式自动交易通路自然触发。
+
+十九、2026-09-25 持仓修复实施中的原生模式约束（阶段记录，最终结果见第二十节）
+
+用户已确认 14.8。本地代码已加入实际 PositionId 绑定、完整原始成交累计终态、执行一致性失效和停止快照。三个原故障回归已复现后通过；原生执行测试发现 NETTING 会在券商发送前拒绝 EXTERNAL PositionId，单独补传标识不构成完整修复。具体最小补充是仅配置 paper Gateway 的 NT 内部 HEDGING 模式，仍以原始审计、唯一持仓和 reduce_only 限制交易；文件与验收见实施方案 14.8.1，当前等待用户裁决，正式配置未更改。
+
+仅在隔离测试进程临时调整模式后，加仓、分批清仓、两笔乱序卖出后买入三个原生用例通过；直接修改 Cache 或模拟 Gateway.submit_order 均未用于证明正常路径。全量回归首次为 1077 通过、4 失败、覆盖率 90.31%；其中一个测试装配缺少新增失效回调，修正后定向复测通过，剩下三项均为待解决的 NETTING 绑定拒绝。Ruff、187 文件格式与 103 源文件 strict mypy 通过。不得将隔离方案验证计为正式配置已通过。
+
+本阶段没有构建或部署新运行镜像，没有写入正式成交、工作流或账户快照，也没有重启 Gateway、FacDigger 或交易节点。Docker 核验交易节点保持退出码 0，数据服务和 Web 正常。Linux 镜像验收、正式库副本的 XOM 原生回放及正式审计恢复仍待完成。回归日志位于 `runtime/reports/paper/826/position-repair-20260925/`，不进入 Git。
+
+二十、2026-09-25 持仓修复完成与正式审计恢复
+
+用户已确认 14.8.1。paper 节点装配仅对 ExecutionGatewayStrategy 设置 NT 原生 oms_type=HEDGING，以支持绑定实际 PositionId；IB 股票账户仍为净持仓，回测模式不变。Gateway 先检查整组订单涉及的唯一实际持仓、可用数量和真实审计归属，再按原有 submit_order 入口提交，卖单仍为 reduce_only。未知归属、多个匹配、负仓位或数量不足均不先提交其他订单；未使用 external_order_claims 接管手工订单，也没有修改 NT 源码。
+
+原始 FillReport 按已审计 client_order_id、账户、证券和方向恢复身份，累计实际成交达到订单数量即可证明 FILLED，不依赖 Cache 订单或 OrderStatusReport。重复回放不插入新成交，内容冲突及超量同时使 Gateway 和 BrokerSession 失效；推断成交仍不入真实审计。成交后 Cache 与审计不一致时停止续买，并立即采样未就绪快照；旧核对任务不能覆盖失效状态。完整核对额外拒绝同证券多条持仓，避免只看相抵净额误判成功。异常 Cache 的快照沿用最近完整历史数据及来源时间，不合并伪仓位，不触发持仓唯一键错误。正常停止立即记录未就绪，不用本地时间刷新券商事实。
+
+最终全量 Python 为 1087 通过、覆盖率 90.73%，ruff、187 文件格式与 103 源文件 strict mypy 通过。最终 Linux amd64 镜像中的 95 项原生相关测试通过。原生用例保留完整 Gateway、RiskEngine、ExecutionEngine、Cache 链路，覆盖 EXTERNAL 恢复后加仓、部分减仓、两笔卖单乱序结束后重算买入、再次完整核对、归属不明、NETTING 绑定拒绝，以及 NETTING/HEDGING 遗漏绑定后的立即失效和历史快照。券商传输回报由测试提供；不能把这些离线成交视为实际券商完成调仓。
+
+运行镜像 heyboss-runtime-repair:20260925-position，身份 sha256:8e72560d5bdefa10e967ef3e0c5e1f57ab0704b023bddd4f687b4bbfb559cd83。112 个 Python、配置及依赖文件与本地受验文件一致。交易节点更新为该镜像，容器为 created、从未启动、restart=no。Gateway、FacDigger、数据消费者、Web 与 Bot 的镜像和启动时间核对不变；没有为部署启动任何交易服务。
+
+先以正式库的原始副本进行恢复，最终镜像于 14:50:38—42 再次通过：真实券商回报只有 JPM 七股、全部客户端零挂单、两笔原始卖出成交。XOM 缺 Cache 订单且没有对应 OrderStatusReport，仍正确补入十五股、159.90 的原始成交及 FILLED 终态；副本成交四至五、订单事件十九至二十。连续三次回放同一原生报告，成交和订单事件完全不变，原工作流与批准不变。
+
+正式恢复于 14:41:45—48 已完成 XOM 补收，最终镜像于 14:50:50—53 再作原生核对和幂等复验：成交保持五、订单事件保持二十，全部原记录、九条信号、三个工作流、三条批准、三个因子接纳和六条因子决策不变。恢复进程不装配信号 Actor，核对前关闭审批轮询，封锁 placeOrder、cancelOrder、reqGlobalCancel、exerciseOptions，交易 API 调用为零。正式记录来自重新取得的原生回报，未把隔离库复制覆盖正式库，未手工生成成交。最后来源时间为 14:50:52.006520 UTC，正常停止立即记录 reconciliation_complete=false，历史持仓为 JPM 七股。
+
+实际网页与正式 API 验收通过：JNJ 九股和 XOM 十五股均显示已成交，逐笔成交五条，账户页明确显示未就绪与一项 JPM 历史快照，原 826 回测 20260919T093538Z-c5d70233 仍可见。D24 的两笔实际卖单与两笔成交可查，没有 AMZN/NVDA 买单，工作流仍为 ORDERS_SUBMITTED，不当作整批调仓完成。
+
+结论：本轮代码修复、Linux 验收、正式晚到成交恢复和页面验证完成；paper 自动交易保持暂停，实盘和 Bot 关闭。D24 仅完成卖出，不重置、不重放或手工补买；完整自然批次调仓和连续五日生产仍待后续验收。证据、数据库原始备份、镜像核验、原生恢复脚本及网页/API 结果保存于 runtime/reports/paper/826/position-repair-20260925/，目录 700、文件 600，全部忽略于 Git。

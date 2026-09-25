@@ -53,6 +53,11 @@ def test_recent_sampling_does_not_hide_old_or_unknown_broker_facts(
     assert view.total_cash_value == 2000
     assert view.available_funds == 1500
     assert view.is_stale is (expected is not None)
+    assert view.positions == ()
+    assert view.source_state == "available"
+    assert view.broker_connected is connected
+    assert view.reconciliation_complete is reconciled
+    assert view.account_updated_at_utc == updated
     if expected is not None:
         assert expected in str(view.not_ready_reason)
     repository.close()

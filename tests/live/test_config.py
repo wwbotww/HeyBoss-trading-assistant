@@ -32,6 +32,10 @@ def test_loads_live_settings(tmp_path: Path) -> None:
         "paper_input_poll_interval_seconds",
         "paper_input_retry_interval_seconds",
         "broker_account_stale_after_seconds",
+        "catalog_request_timeout_seconds",
+        "broker_request_timeout_seconds",
+        "broker_reconciliation_timeout_seconds",
+        "broker_reconciliation_retry_interval_seconds",
     ],
 )
 def test_paper_input_and_broker_timeouts_must_be_positive(tmp_path: Path, field: str) -> None:

@@ -1,8 +1,8 @@
 826 release 接入 IBKR paper 每日自动交易：下阶段开发与修改方案
 
-更新日期：2026-09-21。
+更新日期：2026-09-24。
 
-状态：用户已确认并开始实施。HeyBoss 的 A/B/C 独立代码、迁移入口和离线回归已落地；真实输入联合验收、runtime 运行数据切换及 D 的 paper 连续验收仍待上游与环境就绪。逐项结果见 [实施验收记录](826-ibkr-paper-daily-acceptance.md)。
+状态：原 A/B/C 代码、真实输入接纳、runtime 切换以及首次 IBKR paper 成交和受控重启已完成；连续生产验收尚未完成。第十四节 R1/R2/R3 修复及“首次与重连统一由 BrokerSession 核对”的补充方案均已获用户确认并完成实现、回归与隔离验收。2026-09-24 18:35 完成获授权的 Gateway 恢复，19:36 部署 HeyBoss 修复，首次启动发现收盘后价格预热日期误标，在已确认 R1 范围补齐修复和完整回归后，于 21:31 恢复正式 paper auto 节点。本进程券商核对、持续快照和正式网页验收通过，节点保持运行并等待 D24 新批次，实盘及 Bot 未启动。历史实施结果见 [实施验收记录](826-ibkr-paper-daily-acceptance.md)，最新事实见 [联合验收记录第十六节](826-facdigger-heyboss-joint-acceptance.md)。
 
 一、阶段目标与范围
 
@@ -256,7 +256,7 @@ backtest.db 与 market-radar.db 的业务内容保持一致。共用订单 ORM �
 
 本阶段允许为新增调用方做必要的无行为重构，但先完成并验证重构，再提交功能改动；删除被替代的采集或审批重复路径。不引入插件框架、通用任务平台、额外格式版本、自动选模型或自动重训。
 
-已实施独立 HeyBoss 代码及隔离验证。2026-09-20 完成真实批次接纳、runtime 业务迁移和只读网页部署；2026-09-21 FD-04 源码、联合恢复及实际部署核对通过，两仓和前端完整检查通过。当日首次自动批准后提交的三笔 IBKR paper 订单全部成交，成交后受控重启无重复下单，实际网页核对通过。常驻数据消费者与 TradingNode auto 已启用，Bot 停止；D 的连续五日生产与执行仍待观察，详见 [联合验收记录](826-facdigger-heyboss-joint-acceptance.md)。
+已实施独立 HeyBoss 代码及隔离验证。2026-09-20 完成真实批次接纳、runtime 业务迁移和只读网页部署；2026-09-21 FD-04 源码、联合恢复及实际部署核对通过，两仓和前端完整检查通过。当日首次自动批准后提交的三笔 IBKR paper 订单全部成交，成交后受控重启无重复下单，实际网页核对通过。以上为 9 月 21 日的阶段记录；9 月 24 日节点退出后的现状和修复范围见第十四节。D 的连续五日生产与执行仍未验收通过，详见 [联合验收记录](826-facdigger-heyboss-joint-acceptance.md)。
 
 十二、开发前确认结论
 
@@ -274,3 +274,192 @@ backtest.db 与 market-radar.db 的业务内容保持一致。共用订单 ORM �
 - BrokerSession 只协调已有 NT 连接与核对状态，没有新客户端或插件。固定 NT 1.230 的断连世代内部字段依赖集中在 live/runner.py，并有重连回归。
 - 实时 Actor 检查间隔由 live 配置设为 60 秒；历史回测保留原 1800 秒默认及开盘/失效边界提醒，避免把多月历史模拟变成逐分钟磁盘轮询。
 - 固定 release、共同日历、真实 D=2026-09-18 批次、当前身份与单次接纳耗时均已核对。2026-09-21 FacDigger FD-04 源码、恢复和实际部署复验通过，本项目没有代改或重启其服务。HeyBoss 原生历史请求精度、订单状态判定和持仓方向问题已修复、全量回归并部署；首次真实 auto 成交及成交后的受控重启通过，五个常规交易日的连续证据仍未完成。
+
+十四、2026-09-24 运行稳定性修复方案（已确认并实施）
+
+本节确认范围是 R1 → R2 → R3 的代码修复、隔离验收及现有 Gateway 上的只读联验。用户已确认按顺序连续实施，并补充确认首次启动与重连均由 BrokerSession 管理核对；本节不包含启动实际 TradingNode、提交 IBKR paper/live 订单或重启生产服务。只读联验不依赖恢复交易；后续部署与恢复交易另列运行准入条件。FacDigger 的代码、配置与部署仍由对应项目处理。
+
+本轮保留现有十只标的、固定 826 release、auto/manual 模式、风控数值、数据库结构、FactorBatch 格式和唯一 NT 下单链路。没有新增第三方依赖、NT 升级、插件框架、通用重试平台或第二套持仓账本；正式 Catalog、数据库及历史报告不作为测试写入目标。
+
+14.1 已确认的问题与尚待验证的原因
+
+- Catalog：9 月 24 日 11:44:21，读锁等待超过 50ms 的 TimeoutError 逃逸到 LiveDataEngine 的 RequestData 队列，NT 调用 os._exit(1)。生产日志和隔离原生异步复现一致。同步 DataEngine 用例不能替代此项验收。
+- 券商核对：持续 mass-status 失败以及未完成核对、零持仓的本地快照均有运行证据。源码显示 BrokerSession 的外层 30 秒 wait_for 可能先于 IB 请求当前使用的 120 秒超时取消任务，NT 的共享请求 Future 取消与清理路径必须重点复现。此项目前是有源码依据的原因假设，不能仅凭空白异常日志认定唯一根因。
+- 就绪判断：现有 BrokerSession 启动阶段以 Trader.is_running 推断已核对，重连后主要依赖 reconcile_execution_state 的布尔返回。需要加入本次连接的完整券商回报与 NT Cache 一致性依据，不能仅因进程运行或连接恢复就放行。
+- 展示：PortfolioPage 只要 positions.length 为零就显示“当前没有持仓”“账户快照有效”，没有检查未核对或陈旧状态；OverviewPage 也会将未知持仓展示为当前数量 0。此问题使用现有就绪字段即可修正。
+
+14.2 R1：使 Catalog 异步读取可恢复
+
+文件清单（路径均相对 HeyBoss 根目录）：
+
+| 文件 | 具体修改 |
+|---|---|
+| `src/trading_assistant/data/catalog.py` | 保留共享锁、50ms 上限和写入中断标记；增加可区分的 CatalogBusyError，以及本地请求的最小结果对象。 |
+| `src/trading_assistant/live/catalog_client.py`（新增） | 一个具体的 NT 本地 Catalog 数据客户端及 NT 要求的配置/工厂，处理 FactorScoreData 与原生 Bar 历史请求；复用现有 CatalogRepository。 |
+| `src/trading_assistant/live/runner.py` | paper 节点注册 CATALOG 数据客户端；移除将活跃写入目录直接注册到 LiveDataEngine 同步查询路径的现有装配，区分启动预检中的暂时忙碌与运行目录损坏。 |
+| `src/trading_assistant/live/config.py`、`config/live.yaml` | 增加本轮实际使用的请求超时配置及正数校验，详见关键接口。 |
+| `src/trading_assistant/strategies/patchtst_factor.py` | 修改既有请求及完成回调，识别失败、迟到和当前请求实际收到的批次；失败时不从已完成批次缓存补出成功信号。 |
+| `src/trading_assistant/execution/gateway.py` | 修改既有执行价刷新与回调；失败不能完成预热，旧请求不能覆盖新一轮刷新，不因 Cache 仍有旧 Bar 而误判就绪。 |
+| `src/trading_assistant/strategies/dual_momentum.py` | 同步接入同一历史请求结果约定，保留已有策略的 paper 启动能力；历史请求时间改用原生 utc_now 精度。纯信号计算不改。 |
+| `tests/data/test_catalog.py` | 扩展忙碌与中断发布的区别、共享锁释放和原有存储行为回归。 |
+| `tests/live/test_catalog_client.py`（新增）、`tests/live/test_config.py`、`tests/live/test_runner.py` | 验证具体客户端、请求结束/取消、超时和 paper 装配；明确没有券商执行客户端参与 Catalog 测试。 |
+| `tests/integration/test_paper_daily.py` | 将真实 LiveDataEngine、多进程写锁和进程存活测试纳入正式回归，保留同步 Catalog/Web 锁测试。 |
+| `tests/strategies/test_patchtst_factor.py`、`tests/strategies/test_dual_momentum.py`、`tests/execution/test_gateway.py` | 扩展当前请求结果、跨日缓存、延迟回调、重复请求及无错误下单的回归。 |
+
+关键接口与行为：
+
+1. `catalog_lock(path: Path, *, exclusive: bool)` 签名不变；忙碌改抛 `CatalogBusyError(TimeoutError)`，兼容已有 TimeoutError 捕获。残留 `.catalog-writing`、数据损坏和普通 IO 错误不归类为短暂忙碌，不自动删除标记。
+2. `CatalogRequestOutcome` 只描述一次进程内读取，字段为 `status`、`rows_received`、`reason`；状态为 pending、ok、busy、failed、cancelled。它由调用方通过 NT request.params 传入，完成回调引用同一对象。当前 NT 1.230 的请求拆分对 params 做浅拷贝；用原生异步测试固定这项依赖。该对象不写 FactorBatch、不增加持久化表或格式版本。
+3. `CatalogDataClient._request(request: RequestData)` 与 `_request_bars(request: RequestBars)` 使用 NT 原生协程扩展点。磁盘读取放到受控工作线程，最多一个实际 Catalog 读取同时进行；所有数据回送、结果状态变更及 NT 回调在事件循环线程完成。继续通过原生 DataResponse 投递到 DataEngine、Cache 和 Actor，Actor/Gateway 不直接读 Parquet。
+4. 一次请求只尝试当前读取，busy 由现有因子检查/执行价刷新节奏重试；不另设重试调度器。新增 `live.catalog_request_timeout_seconds=30`，覆盖排队和读取；超时或取消后，晚到线程结果丢弃，不能更新 Cache 或发起第二次完成回调。工作线程不能被 asyncio 强制终止，停止流程须处理其真实结束状态，不能把取消 await 当作已经释放读锁。
+5. 成功、失败和取消均走一次 NT 请求收尾，释放请求关联和历史订阅。失败收尾可以不携带数据，但必须先写明非 ok 状态；调用方不能将其当成“成功查到空批次”。合法空查询为 ok/0，仍按缺数据规则处理，也不得回退到旧批次缓存。
+6. 保留 `_catalog_request_completed(...)`、`_execution_bar_request_completed(...)` 与 `_complete_execution_bar_bootstrap()`，只扩展请求结果参数和既有代次判定。当前代次读取确实成功后才能推进；下单所需价格继续遵守普通目标 D 日、缺分保护最多前一交易日的原规则，不把全部标的强行改成新的覆盖门槛。
+7. paper 的 `catalog_client_id="CATALOG"`、catalog_path 接纳证据及全部交易事件不变。backtest 继续使用既有 Catalog 回放和同一 Actor/Gateway；删除被替代的 live 直接 Catalog 注册代码，不保留两种 paper 读取路径。`validate_live_runtime` 继续验证目录和数据库结构，但不能把启动时的短暂写锁占用判为目录损坏；读取就绪由上述客户端和 Gateway 门禁保证，中断标记仍须在获得锁后判定。
+
+R1 验收方式：
+
+- 先将 9 月 24 日的退出场景变为失败测试，再修复。必须使用原生 LiveDataEngine，在另一进程持写锁时同时请求因子和执行 Bar；测试节点保持运行、其他定时任务可执行、没有信号误放行或订单。
+- 正常释放写锁后，下一轮读取取得真实新批次和新执行价；预热完成前工作流保持 NEW，旧价和读取失败不能领取 auto 批准。同样覆盖节点启动预检遇到正常发布的场景，避免只修复运行中请求。
+- 写者被终止且留下发布标记时继续阻断消费；不得清除标记、降级为成功空结果或自动恢复下单。
+- 覆盖多个执行价请求部分成功、跨日、数据为空、查询异常、超时、停止、旧代次结果晚到及重复回调。反复失败/重试后，请求关联、历史订阅、后台任务和实际工作线程数量有界并可收尾。
+- 验证原生纳秒日期边界、缺分保护、manual、dual_momentum 和现有 backtest 行为不退化。不能只测试一个替身客户端返回 busy。
+
+14.3 R2：修复券商核对任务及持仓恢复
+
+文件清单：
+
+| 文件 | 具体修改 |
+|---|---|
+| `src/trading_assistant/live/runner.py` | 修改原有 BrokerSession 的启动、状态、监测与退出清理；它仍复用唯一 NT IB 客户端和原生执行核对。 |
+| `src/trading_assistant/live/config.py`、`config/live.yaml` | 分离券商请求超时与 EODHD 采集超时，配置完整核对期限和失败重试间隔。 |
+| `src/trading_assistant/execution/gateway.py` | 复用原有账户门禁、订单归属和成交恢复；修正恢复时序，使未核对期间保持不提交，核对完成后只继续合法、未过期且未领取的工作流。 |
+| `tests/integration/test_broker_recovery.py`（新增） | 无网络地驱动真实 NT IB 请求/执行核对组件，以受控回调复现取消、断连、空回报、持仓恢复及迟到响应。 |
+| `tests/live/test_runner.py`、`tests/live/test_config.py`、`tests/live/test_portfolio_snapshot.py`、`tests/execution/test_gateway.py` | 扩展任务所有权、就绪状态、快照与网关共用状态、成交重放和卖出后恢复测试。 |
+
+关键接口与行为：
+
+1. 保留 `BrokerSession.status() -> tuple[bool, bool]`，分别表示当前连接和已完成有效核对。Gateway 和 PortfolioSnapshotActor 继续通过已有 `bind_broker_status` 消费；不增加第二个券商客户端或另一份持仓真值。
+2. `BrokerSession.monitor()` 管理一个明确归属的核对 Task，同一时刻只有一轮。新增 `close()` 完成该任务的结束处理，由 `run_live` 统一调用；周期等待超时不直接取消共享 IB 请求 Future。旧连接代次的成功结果、CancelledError 或异常结果均不能把新连接标记为就绪。
+3. 配置为 `broker_request_timeout_seconds=30`、`broker_reconciliation_timeout_seconds=120`、`broker_reconciliation_retry_interval_seconds=30`。IB 请求不再取 EODHD 的 120 秒采集参数。经补充确认，设置 `LiveExecEngineConfig(reconciliation=False)` 关闭 NT Kernel 独立的首次核对步骤：该步骤失败会在 Trader 启动前返回，原监测器无法重试。现在 Trader 先以账户未就绪门禁启动，再由 BrokerSession 串行调用原生 `reconcile_execution_state` 完成首次及重连核对；并非关闭业务核对或允许直接交易。核对超过期限立即保持未就绪；上一轮尚未正确收尾时不并发启动下一轮。正常停机的取消继续传播，清理与异常重试分开处理。
+4. 就绪依据必须包括本次连接的完整账户、订单、成交与持仓回报，原生执行核对完成，以及报告中的账户/合约数量与 NT Cache 一致。随后仍由 Gateway 的现有审计归属检查核对真实成交账本。未知、未完成、错误或不一致不能转换为零持仓，也不能只看 Trader.is_running 或一个成功布尔值。
+5. 复用原生执行报告恢复 NT 状态；只将原始券商成交交给现有审计幂等入口。不会从旧本地快照、推断成交或文档中的三组持仓直接补写生产仓位/成交。无法解释的持仓、未决订单或缺少原始成交继续阻断并保留原因。
+6. 新鲜度继续使用真实账户回报时间和原有 300 秒门槛；本地快照采样不能刷新券商来源时刻。现有 PortfolioSnapshotActor、数据库及 API 字段已能表达未核对状态，本轮优先复用并加回归，不为新展示另加字段或迁移表。
+7. 实施先复现“外层取消使共享 Future 留在请求表、后续反复失败”的具体路径，再验证所选任务管理修复。若复现发现需要修改 NT 包、升级依赖或改变券商适配器职责，先说明证据并补充方案，不暗中 monkey-patch 第三方代码。其余可独立验收的修复继续完成。
+
+R2 验收方式：
+
+- 使用真实 NT Kernel/Trader 启动流程，首次原生请求失败后可自动重试成功；Gateway 在完整核对前零提交，信号保持 NEW。核对成功后快照、Cache 和网关计划一致，重复轮询不会重复提交。
+- 使用真实 NT 请求对象/Future 和受控券商回调，覆盖 30 秒外层期限先于请求结束、内层请求超时、断连及正常停机。不得只把 FakeNode.reconcile 设置成 true/false 后认定问题已修复。
+- 覆盖取消后的下一次成功请求，确认不会复用已取消的 Future；重复失败不会快速刷屏或产生重叠核对任务，停止后无遗留任务。
+- 核对过程再次断连、旧代次成功晚到、账户回报陈旧、报告不完整、数量与 Cache 不同，均保持未就绪，Gateway 零提交。
+- 正常完成的空仓报告可以判定空仓；失败、未知和缺少结束回调的空列表不能判定空仓。真实持仓报告经原生执行核对恢复后，Cache、快照、原始成交审计和网关计划一致。
+- 覆盖已全成订单重放、部分卖出后断连、迟到成交、未决提交和过期信号；相同原始成交只入账一次，未确认卖单不继续买入，不重复领取工作流或扩大当日开仓计数。
+- 若只能证明失败时阻止下单、还不能证明核对成功后正常恢复，R2 只能记作部分通过，不能据此恢复每日自动交易。
+
+14.4 R3：修正状态展示并完成联合隔离验收
+
+文件清单：
+
+| 文件 | 具体修改 |
+|---|---|
+| `web-ui/src/pages/PortfolioPage.vue` | 根据现有 is_stale、broker_connected、reconciliation_complete 和来源时间区分“未确认”与“已确认空仓”；陈旧连接状态标为快照时状态。 |
+| `web-ui/src/pages/OverviewPage.vue` | 未核对的持仓数量显示待确认，不显示为可信的当前 0；已有历史持仓明确标注快照时间。 |
+| `web-ui/tests/portfolio-page.test.ts`、`web-ui/tests/overview-page.test.ts` | 验证健康空仓、未核对空列表、陈旧非空持仓以及恢复后的正确展示。 |
+| `tests/application/test_portfolio.py`、`tests/web_api/test_portfolio.py` | 使用现有读模型/API 契约验证质量字段完整透传，避免只改文案掩盖错误状态。 |
+| `tests/integration/test_paper_daily.py`、`tests/integration/test_broker_recovery.py` | 串联发布、读取失败、恢复、券商门禁和同一调仓幂等场景。 |
+| `docs/826-ibkr-paper-daily-implementation-plan.md`、`docs/826-ibkr-paper-daily-acceptance.md`、`docs/826-facdigger-heyboss-joint-acceptance.md`、`docs/project-context.md` | 更新最终实现、证据、未完成项和真实运行状态，不把隔离验收写成生产运行恢复。 |
+
+关键接口：保持 `/api/portfolio`、`/api/overview` 与快照持久化字段不变。`positions=[]` 只有在来源可用、账户当前已核对且未陈旧时才能展示为已确认空仓；其他状态显示“持仓尚未确认”及来源时间/原因。非空但陈旧的数据可以保留为历史快照展示，不伪装成当前持仓。前端不读取 Broker、数据库或 Catalog。
+
+联合验收按以下顺序进行：
+
+1. 定向故障回归通过后，执行完整 Ruff、格式检查、strict mypy、pytest 和项目覆盖率门槛；前端执行完整测试、类型检查、ESLint、Prettier 及生产构建。源代码或运行方式有新变化时再补相应验证，不用重复已通过检查充数。
+2. 在禁网容器中以正式 Catalog/业务库的只读挂载或隔离副本，重新验证 D=2026-09-23 交付的十行数据、固定 release、XOM 日期身份、接纳凭据、D→N 窗口与重复导入；原始交付及正式接纳凭据不改写。日期重放仅用隔离 TestClock，不改机器时间或补造生产资格。将来恢复交易必须使用届时预期交易日的新批次，D23 只作为本次回归样本。
+3. 使用实际新镜像的 LiveDataEngine 反复触发写锁、失败收尾与恢复，配合模拟执行客户端证明不提前下单、不读旧 D、不重复调仓；真实数据作为成功场景，合成数据只覆盖错误与边界场景。
+4. 用同一 Actor/Gateway/风控/审批运行隔离 NT 模拟换仓，复核卖 JNJ 9、JPM 7、XOM 15 后买 AMZN 10、MSFT 4、NVDA 11 的确定性情景。价格、现金及滑点假设明确记录，与 9 月 24 日上一轮情景一致；不将此结果当作新 IBKR 成交或模型收益评价。
+5. 保留两侧共同日历 fixture 和 2000—2027 年一致性检查；FacDigger 本轮没有代码修改，也不需要由 HeyBoss 重建或部署。
+6. 用隔离 API/页面做浏览器验收，验证未核对空列表不会显示有效空仓，完整核对恢复后显示一致；确认原 826 历史回测和其他业务数据未受测试影响。
+7. 现有 Gateway 会话可用时，复用 `scripts/check_connection.py` 的只读五阶段检查，并以隔离诊断核对实际账户、挂单、成交和持仓回报。需要连接恢复演练时只断开/重连诊断客户端，不重启共享 Gateway，不加载策略或执行网关。诊断原始结果只留权限受限的 runtime 目录；无法取得真实完整回报时如实记录未通过，不能用离线结果代替。此步骤不新增下单入口，也不需要另行批准只读动作。
+8. 交付脱敏验收摘要和 runtime 隔离证据。完成后核对正式订单/成交/接纳记录未被测试修改，交易节点维持停止。生产镜像部署、恢复交易及常驻运行验证仍分别标明待办。
+
+14.5 完成边界
+
+R1 完成意味着原生异步并发故障被修复并进入回归；R2 完成意味着可重复证明核对失败时不下单、恢复成功后状态一致且无重复交易；R3 完成意味着网页状态和隔离联合链路正确。三项均通过后才提交本地恢复运行建议。
+
+本次确认不包含部署到学校服务器、改变 restart 策略自动拉起交易、恢复 paper 自动下单或开始真实账户交易。券商联验使用明确的只读入口，恢复下单需要独立的运行指令。连续五个交易日生产验收仍按原标准保留，不能由本轮离线测试或短时只读重连替代。
+
+14.6 本轮实施结果与运行准入
+
+R1 已实现：paper 注册一个具体的 `CATALOG` 异步客户端，撤销 LiveDataEngine 对活跃 Catalog 的同步直读装配。一个实际读取线程、请求期限、结果对象和代次检查共同约束迟到结果；成功、忙碌、失败和取消均通过 NT 正常响应收尾。写锁等待仍为 50ms，中断标记和原价格资格不变。物理线程不能被 asyncio 强制停止，超期只丢弃逻辑结果，下一次物理读取等待旧线程真正结束；退出时有界等待并明确记录仍在结束的读取。
+
+R2 已实现：复现外层取消导致原生 IB Future 取消后滞留请求表的路径；改用单轮任务和不取消该任务的周期等待。原生报告生成器存在异常后返回部分列表的行为，因此同一原生 IB 客户端还必须取得完整结束回报，核验原始持仓、报告及 Cache 的数量、合约和账户，以及订单/成交报告覆盖。账户来源时间、连接代次和完整核对结果共同决定就绪。继续复用 Gateway 的持久化归属及成交审计，没有从旧快照或推断成交补写仓位。
+
+R3 已实现：沿用已有 API 与存储字段；未核对、来源缺失或陈旧时持仓数量为“待确认”，非空数据标为历史快照，只有健康且已核对的空列表显示“当前没有持仓”。隔离 API 与实际构建页面已完成浏览器验收。
+
+最终源代码回归为 1075 项通过、覆盖率 90.48%，前端 137 项通过；完整静态检查和前端构建通过。具体容器、真实 D23 输入、日历、模拟换仓及私有证据见 [联合验收第十二节](826-facdigger-heyboss-joint-acceptance.md)。原有 Catalog、因子、快照、成交重放和人工审批回归继续保留，未为没有行为修改的模块增加重复测试。
+
+R1—R3 初验时 Gateway 账户摘要超时并出现连接丢失、客户端 ID 冲突，两次原始回报检查均不完整；离线恢复测试不能替代真实券商验收。随后用户单独授权仅重启 Gateway，DEBUG 诊断确认 IB 2110 上游连接中断，18:30:50 重新登录，18:35 通过两次五阶段检查及同 ID 断开重连核验，当前 Gateway 会话阻断解除。该运行恢复没有修改代码或将全部现网故障归因于 Future 取消，详情见联合验收第十三节。
+
+19:36 按用户后续指令部署既有修复，数据消费者和 Web API/UI 更新运行，交易容器以修复镜像重建但未启动。独立只读进程使用真实 Gateway 两次通过 BrokerSession 原生核对，正式网页及业务数据保留验收通过，详见联合验收第十四节。此次部署没有恢复自动交易；正式节点启动时仍须完成自己的当前会话核对，不能复用诊断进程的就绪结果。恢复执行与五日观察按后续运行指令进行，使用届时有效批次，不得重放 D23 来补做生产交易。
+
+21:09 用户另行明确授权后，正式 paper auto 节点已启动并完成自己的 BrokerSession 核对。十只标的执行价预热、因子周期检查、连续七轮快照、独立券商回报和实际网页启动验收通过，现保持运行。实盘与 Bot 未启动，没有重放旧批次或产生重复订单；当前等待 D24 新输入，下一常规执行窗口为 2026-09-25 13:30—20:00 UTC。此次完成启动验收，下一交易日的实际自动执行和五日连续生产仍按原标准记录，详见联合验收第十五节。
+
+14.7 启动验收补充：收盘后启动与同一 D 稍后发布
+
+启动检查进一步发现 R1 原验收遗漏的时序：9 月 24 日收盘后启动只读到 D23 Bar，却以墙上时钟的预期 D24 标记预热日期；D24 合法批次随后到达时不再刷新，工作流被旧参考价终止为 RISK_REJECTED。真实 LiveDataEngine、CatalogDataClient、Gateway 与隔离数据库已经复现，未连接券商或改动正式批次。基础连接与持仓恢复通过不代表该通路通过；已回退本次 paper 节点启动，保留其他服务。
+
+本补充继续落实第十四节已经确认的 R1 新 D 参考价、正常失败收尾和旧缓存隔离要求，不增加里程碑、依赖、数据库字段或下单通路。文件清单为现有 `src/trading_assistant/execution/gateway.py`、`tests/integration/test_paper_daily.py`、`tests/execution/test_gateway.py`，以及原四份方案、联合验收、实施验收和项目事实文档。
+
+关键接口：现有 `_request_execution_bar_history` 增加由真实信号调用方传入的 `required_date`，并与请求代次关联；启动预热不推断已经为某个 D 刷新。`_complete_execution_bar_bootstrap` 只记录成功完成的请求目标日期，恢复延迟和已有 NEW 工作流时重新经过 `_handle_signal` 的日期资格检查。失败后的现有轮询继续保留该目标；完整成功前工作流保持 NEW，实际 Bar 新鲜度仍由原计划与风控验证。所有变更复用原请求、回调与轮询方法，不增加独立刷新服务。
+
+验收方式：使用真实异步数据引擎，先在收盘后以 D−1 数据完成启动预热，再发布 D 的新 Bar 和合法接纳信号；必须由信号入口自动刷新，不能在测试中直接调用刷新方法掩盖问题。覆盖新发布时有写锁、失败后释放恢复、未完成前零批准与零执行、恢复后采用新价格，以及开盘后的重复轮询只执行一次。继续通过原跨日、迟到回调、保护仓位、manual/auto 和完整静态/单元回归；之后在已授权的 paper 范围重建部署、重新启动并核验真实会话和网页。实际生产输入和时钟不改写，不用历史 D23 补单。
+
+14.7 已完成：实际修改 gateway.py 和原生集成测试，Gateway 现有单元回归保持通过；全部 Python 1075 项、覆盖率 90.53%、完整静态检查和最终 Linux 原生 35 项通过。最终修复镜像于 21:31:34 仅部署到交易节点并恢复 paper auto，四轮当前会话快照、独立券商回报和正式网页验收通过。实盘保持关闭，未新增订单，D24 实际执行和五日连续生产仍待后续自然运行。最终镜像身份及启动证据见联合验收第十六节。
+
+14.8 2026-09-25 成交实测新增修复方案（已确认并实施）
+
+会话恢复已经完成。D24 经正式风控及 auto 批准后提交了两笔卖单，真实 paper 成交暴露出恢复持仓归属与成交后状态失效的缺口，不能将上一次启动验收视为后续调仓已经通过。运行事实见联合验收第十八节。此次代码方案在编码前提交确认；恢复 Gateway、保护性停止节点与只读查询已执行，不重复请求这些运行操作的授权。
+
+需要修复的具体行为：
+
+- Gateway 提交 JNJ 卖单时没有传 position_id，而重启核对恢复出的持仓为 JNJ.NYSE-EXTERNAL。NT 将该成交关联到策略自己的新 NETTING 持仓，随后因 reduce_only 拒绝开出新仓，原九股持仓没有被冲减。不得通过取消 reduce_only、伪造持仓或修改 NT 源码掩盖这一问题。
+- BrokerSession 的就绪结果在连接保持时沿用首次完整核对，成交后 Cache 更新异常未使共享就绪状态失效，网页短时仍将错误 Cache 作为当前持仓。失效必须同时传到提交门禁和快照，不能只记录日志。
+- XOM 在节点停止后一秒成交，原始回报未被正式节点接收。需要保留并通过现有原生成交恢复通路补入。当前 `_accept_fill` 在没有 Cache 订单时只写 PARTIALLY_FILLED；恢复验收须覆盖只有完整原始成交、缺少对应 OrderStatusReport 的情况，避免已经全部成交的订单永久阻塞后续调仓。
+
+文件清单：
+
+- `src/trading_assistant/execution/gateway.py`：修改现有提交、成交接纳和恢复检查，绑定已验证的实际 Position，验证成交净数量及订单终态，并通知共享核对状态失效。
+- `src/trading_assistant/live/runner.py`：复用 BrokerSession 的单轮核对和 monitor，增加执行异常的明确失效入口及装配；不创建第二个 IB 客户端。
+- `src/trading_assistant/live/portfolio_snapshot.py`：沿用既有状态字段，在正常停止时写入明确未就绪的最后一份快照，避免等待陈旧阈值才反映节点停止。
+- `tests/execution/test_gateway.py`、`tests/integration/test_broker_recovery.py`、`tests/live/test_runner.py`、`tests/live/test_portfolio_snapshot.py`：扩展对应现有测试，覆盖原生持仓恢复后的真实成交处理、失效传播、晚到回报和正常停止。
+- 原实施方案、联合验收、实施验收和 project-context 四份文档：记录最终实现及运行结果。
+
+关键接口和边界：
+
+1. 保留 `_submit_orders(event, planned_orders)` 入口。对已有持仓的减仓或加仓，在账户、证券、方向、数量及持久化归属验证后，向 NT 原有 `submit_order(order, position_id=position.id)` 传实际持仓标识；首次建仓仍由 NT 建立 Position。没有唯一可解释的匹配时整组预检失败，不取列表第一项，也不接管手工仓位。
+2. 保留 `_accept_fill` 与 `_on_execution_report`，复用现有按 client_order_id 查询成交和去重的仓储接口。只有经过身份验证的原始券商成交才进入正式审计；累计成交量与已审计委托数量一致时才能确认全部成交，冲突或超量必须阻断。原生推断成交不能用于补账，重复回报不能增加数量或将终态降级。
+3. BrokerSession 增加具体的 `invalidate(reason: str) -> None` 入口，真实调用方为 Gateway 成交一致性检查；通过现有装配绑定失效回调。失效后提交与快照立即未就绪，旧核对任务不能重新置为就绪，复用既有 monitor 完成新的完整核对后才恢复。交易链路、账户来源时间和重试上限不变。
+4. 停止时保留历史持仓与其来源时间，但最后一份快照明确不可用于交易。复用既有数据库/API 字段和页面判断，不新增表、状态版本、前端数据通路或依赖。
+
+验收方式：
+
+- 原生 NT 集成用例必须从恢复为 EXTERNAL 的真实 Position 开始，经过现有 Gateway、RiskEngine、ExecutionEngine 和成交事件，验证卖出后原 Position 数量减小或关闭，全部卖单终态后按真实剩余持仓计算买单。不得替换 submit_order 为直接改数量的 mock 来证明此问题已修复。
+- 同时覆盖现有仓位加仓、部分成交、多笔卖单回调顺序、多个匹配仓位或归属不明的拒绝，以及重复成交回放。
+- 注入成交后 Cache 不一致：本地仍收到新账户摘要也不能恢复就绪；未完整重新核对前零后续买单，快照和 API 均标为未就绪。正常停止后网页立即降为历史持仓。
+- 复制本次正式库到隔离环境，补放 XOM 的真实原始回报；即使缺少该卖单的 Cache 订单及 OrderStatusReport，也须正确保存成交及可证明的终态，重复回放无新增成交，不产生订单。随后验证券商 JPM 七股、零挂单与审计净数量一致。
+- 完整 ruff、格式、mypy strict、pytest 和至少 90% 覆盖率通过；在实际 Linux 镜像中运行原生恢复到换仓的集成用例，再核验镜像与受验源文件一致。
+- 正式恢复先补齐可验证的券商审计和当前持仓，不把已有 ORDERS_SUBMITTED 重置为 NEW，也不重放两笔已成交卖单。此次 D24 为部分执行，未提交的买单不能仅凭工作流名称认定完成；继续执行须有可证明的恢复状态，无法证明则保持暂停，使用下一自然批次验收，不能手工补单冒充自动执行。
+
+不改变 FacDigger、模型、日历、风险限额、实盘禁用和 restart=no；不引入插件、自动重放机制或新的订单提交路径。
+
+14.8.1 原生执行测试发现的 OMS 配置补充（已确认并实施）
+
+14.8 实施中的原生测试证明：仅向 `submit_order` 传入恢复持仓的 PositionId 不足以修复问题。原 Gateway 继承 IB 客户端的 NETTING 模式，NT ExecutionEngine 会在发送券商前拒单，原因是 `AAPL.NASDAQ-EXTERNAL` 不符合该策略预期的 `AAPL.NASDAQ-ExecutionGatewayStrategy-000`。这是原生校验，不是券商权限或 reduce_only 问题。用户已补充确认调整 Gateway 内部持仓关联模式。
+
+最终实现仅在 `live/runner.py::build_trading_node_config` 的 Gateway 配置中显式设置 NT 已有的 `oms_type="HEDGING"`，使其支持绑定实际 PositionId。这里改变的是 NT 策略内部的持仓关联方式，IB 股票账户仍按实际净持仓交易；不允许空头、对冲头寸或同证券多个可交易持仓。执行 14.8 的唯一持仓、真实成交归属、数量和 reduce_only 检查。回测配置不变。不配置按证券批量接管全部外部订单的 `external_order_claims`，以免扩大对手工订单的管理范围。
+
+文件仍在已列清单内：`live/runner.py` 增加上述配置；`tests/live/test_runner.py` 验证正式装配；`tests/integration/test_broker_recovery.py` 保留默认 NETTING 拒绝 EXTERNAL 标识的负向回归，并验证正式装配模式的减仓、加仓、乱序成交、再次核对及故障失效。其余 Gateway、快照和文档按 14.8 完成。
+
+原生正常路径保留 Gateway.submit_order、RiskEngine、ExecutionEngine 和 Cache，只替换券商传输口模拟回报，不直接修改 Cache 数量。另在 NETTING 与 HEDGING 两种模式注入遗漏绑定的故障：共享门禁失效、停止续买，并立即写入未就绪快照。NETTING 可能留下未减仓旧仓位，HEDGING 可能出现净数量相抵的多条仓位；后者仍必须拒绝重新就绪，不能因合计数量与券商一致而通过核对。快照保留最近完整历史数据与来源时间，避免异常仓位触发唯一键冲突或被合并成假空仓。正常停止也立即保存未就绪快照。
+
+兼容现有测试装配另在 `tests/integration/test_paper_daily.py` 的唯一 `bind_broker_status` 调用补上传入的失效回调，不改变业务行为。最终质量、镜像与正式恢复结果见联合验收第二十节。

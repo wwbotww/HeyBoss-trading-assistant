@@ -26,6 +26,17 @@ const {
 } = useQuery(overviewQuery())
 
 const portfolio = computed(() => overviewData.value?.portfolio)
+const positionsConfirmed = computed(() => {
+  const snapshot = portfolio.value
+  return (
+    snapshot?.source_state === 'available' &&
+    !snapshot.is_stale &&
+    snapshot.broker_connected === true &&
+    snapshot.reconciliation_complete === true &&
+    Boolean(snapshot.account_updated_at_utc) &&
+    !snapshot.not_ready_reason
+  )
+})
 const workflowCounts = computed(() => {
   const counts = overviewData.value?.workflow_status_counts ?? {}
   return Object.entries(counts).sort((left, right) => right[1] - left[1])
@@ -110,8 +121,12 @@ async function retry(): Promise<void> {
         />
         <MetricCard
           label="当前持仓"
-          :value="String(portfolio.positions.length)"
-          helper="最近完整账户快照"
+          :value="positionsConfirmed ? String(portfolio.positions.length) : '待确认'"
+          :helper="
+            positionsConfirmed
+              ? '最近完整账户快照'
+              : `历史快照记录 ${portfolio.positions.length} 项 · ${formatDateTime(portfolio.snapshot_at_utc)}`
+          "
         />
       </section>
       <p v-if="portfolio.not_ready_reason" role="status">

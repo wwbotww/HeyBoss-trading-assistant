@@ -7,10 +7,11 @@ import os
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import local
 from time import monotonic, sleep
-from typing import cast
+from typing import Literal, cast
 
 import pandas as pd
 from nautilus_trader.core.data import Data
@@ -19,6 +20,19 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog, TimestampLike
 
 _LOCK_STATE = local()
+
+
+class CatalogBusyError(TimeoutError):
+    """发布者仍持锁, 允许调用方在下一轮重新读取。"""
+
+
+@dataclass
+class CatalogRequestOutcome:
+    """随 NT 请求参数浅复制传递, 仅在事件循环内更新的本轮读取结果。"""
+
+    status: Literal["pending", "ok", "busy", "failed", "cancelled"] = "pending"
+    rows_received: int = 0
+    reason: str | None = None
 
 
 @contextmanager
@@ -44,7 +58,9 @@ def catalog_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
                 break
             except BlockingIOError:
                 if monotonic() >= deadline:
-                    raise TimeoutError("Catalog is busy; retry the complete operation") from None
+                    raise CatalogBusyError(
+                        "Catalog is busy; retry the complete operation"
+                    ) from None
                 sleep(0.005)
         held[root] = exclusive
         marker = root / ".catalog-writing"

@@ -7,3 +7,7 @@ live:
   paper_input_poll_interval_seconds: 60
   paper_input_retry_interval_seconds: 1800
   broker_account_stale_after_seconds: 300
+  catalog_request_timeout_seconds: 30
+  broker_request_timeout_seconds: 30
+  broker_reconciliation_timeout_seconds: 120
+  broker_reconciliation_retry_interval_seconds: 30

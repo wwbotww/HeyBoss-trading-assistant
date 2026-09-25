@@ -7,11 +7,13 @@ from functools import partial
 
 import pandas as pd
 from nautilus_trader.common.actor import Actor
+from nautilus_trader.common.component import TimeEvent
 from nautilus_trader.config import ActorConfig
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import ClientId
 
+from trading_assistant.data.catalog import CatalogRequestOutcome
 from trading_assistant.execution.events import TRADE_SIGNAL_TOPIC, TradeSignalEvent
 from trading_assistant.signals.momentum import calculate_dual_momentum_weights
 from trading_assistant.storage.repository import TradingRepository
@@ -52,6 +54,8 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         self._active_month: str | None = None
         self._repository: TradingRepository | None = None
         self._catalog_requests: set[str] = set()
+        self._catalog_outcomes: dict[str, CatalogRequestOutcome] = {}
+        self._request_generation = 0
 
     def on_start(self) -> None:
         """建立审计仓储并订阅规范 Catalog 的原生日线 BarType。"""
@@ -142,25 +146,55 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
             self._repository.record_signal(published_event)
         self.msgbus.publish(self._settings.signal_topic, published_event)
 
-    def _request_catalog_history(self) -> None:
+    def _request_catalog_history(self, _: TimeEvent | None = None) -> None:
         """通过 NT DataEngine 向 Catalog 请求策略启动所需历史 Bar。"""
-        end = datetime.fromtimestamp(self.clock.timestamp_ns() / 1_000_000_000, tz=UTC)
+        self._request_generation += 1
+        generation = self._request_generation
+        for outcome in self._catalog_outcomes.values():
+            outcome.status = "cancelled"
+        self._catalog_outcomes.clear()
+        self._pending_sessions.clear()
+        self._monthly_closes.clear()
+        self._active_month = None
+        end = self.clock.utc_now()
         start = end - timedelta(days=self._settings.catalog_lookback_days)
         requested_bar_types = tuple(dict.fromkeys(self._settings.bar_types))
         self._catalog_requests = set(requested_bar_types)
         client_id = ClientId(self._settings.catalog_client_id)
         for value in requested_bar_types:
+            outcome = CatalogRequestOutcome()
+            self._catalog_outcomes[value] = outcome
             self.request_bars(
                 BarType.from_str(value),
                 start=start,
                 end=end,
                 client_id=client_id,
-                callback=partial(self._catalog_request_completed, value),
+                callback=partial(self._catalog_request_completed, value, generation=generation),
+                params={"catalog_outcome": outcome},
             )
 
-    def _catalog_request_completed(self, bar_type: str, _: UUID4) -> None:
+    def _catalog_request_completed(
+        self, bar_type: str, _: UUID4, *, generation: int | None = None
+    ) -> None:
+        if generation is not None and (
+            generation != self._request_generation or bar_type not in self._catalog_requests
+        ):
+            return
         self._catalog_requests.discard(bar_type)
         if self._catalog_requests:
+            return
+        if any(
+            (outcome := self._catalog_outcomes.get(value)) is None
+            or outcome.status != "ok"
+            or outcome.rows_received == 0
+            for value in self._settings.bar_types
+        ):
+            self.log.warning("Momentum history is incomplete; retrying in 60 seconds")
+            self.clock.set_time_alert_ns(
+                "momentum-catalog-retry",
+                self.clock.timestamp_ns() + 60_000_000_000,
+                callback=self._request_catalog_history,
+            )
             return
         self._emit_latest_catalog_signal()
 
@@ -185,9 +219,18 @@ class DualMomentumActor(Actor):  # type: ignore[misc]
         self._monthly_closes.clear()
         self._active_month = None
         self._catalog_requests.clear()
+        self._request_generation += 1
+        for outcome in self._catalog_outcomes.values():
+            outcome.status = "cancelled"
+        self._catalog_outcomes.clear()
 
     def on_stop(self) -> None:
         """取消订阅并释放数据库连接。"""
+        self._request_generation += 1
+        for outcome in self._catalog_outcomes.values():
+            outcome.status = "cancelled"
+        if "momentum-catalog-retry" in self.clock.timer_names:
+            self.clock.cancel_timer("momentum-catalog-retry")
         if self._settings.stream_bars:
             for value in self._settings.bar_types:
                 self.unsubscribe_bars(BarType.from_str(value))

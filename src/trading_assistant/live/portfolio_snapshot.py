@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from math import isfinite
 
 from nautilus_trader.accounting.accounts.base import Account
@@ -108,7 +108,7 @@ class PortfolioSnapshotActor(Actor):  # type: ignore[misc]
             fire_immediately=True,
         )
 
-    def _capture_snapshot(self, _: TimeEvent) -> None:
+    def _capture_snapshot(self, _: TimeEvent | None, *, stopping: bool = False) -> None:
         repository = self._repository
         if repository is None:
             raise RuntimeError("Portfolio snapshot repository is not initialized")
@@ -123,6 +123,8 @@ class PortfolioSnapshotActor(Actor):  # type: ignore[misc]
         connected, reconciled = (
             (None, None) if self._broker_status is None else self._broker_status()
         )
+        if stopping:
+            reconciled = False
         now_ns = self.clock.timestamp_ns()
         last_event = account_update(account, self._currency)
         total = account.balance_total(self._currency)
@@ -135,24 +137,58 @@ class PortfolioSnapshotActor(Actor):  # type: ignore[misc]
         cash = float(raw_cash) if isinstance(raw_cash, (int, float)) else None
         if cash is not None and not isfinite(cash):
             cash = None
-        repository.record_portfolio_snapshot(
-            timestamp_ns=now_ns,
-            account_id=str(self._account_id),
-            currency=str(self._currency),
-            net_liquidation=total.as_double(),
-            available_funds=None if available is None else available.as_double(),
-            total_cash_value=cash,
-            account_updated_at_utc=utc_datetime_from_ns(last_event.ts_event),
-            broker_connected=connected,
-            reconciliation_complete=reconciled,
-            broker_stale_after_seconds=self._settings.broker_account_stale_after_seconds,
-            not_ready_reason=account_not_ready_reason(
+        source_time: datetime | None = utc_datetime_from_ns(last_event.ts_event)
+        net_liquidation = total.as_double()
+        available_funds = None if available is None else available.as_double()
+        reason = (
+            "trading node stopped"
+            if stopping
+            else account_not_ready_reason(
                 account,
                 now_ns=now_ns,
                 stale_after_seconds=self._settings.broker_account_stale_after_seconds,
                 broker_connected=connected,
                 reconciliation_complete=reconciled,
-            ),
+            )
+        )
+        if len({position.instrument_id for position in positions}) != len(positions) or any(
+            position.signed_quantity <= 0 for position in positions
+        ):
+            # 异常 Cache 不满足每证券唯一多头约束, 保留最后完整快照而不合并伪仓位。
+            reconciled = False
+            reason = "ambiguous broker positions" if not stopping else "trading node stopped"
+            previous = repository.latest_portfolio_snapshot(account_id=str(self._account_id))
+            positions = (
+                ()
+                if previous is None
+                else tuple(
+                    PositionSnapshotInput(
+                        instrument_id=position.instrument_id,
+                        signed_quantity=position.signed_quantity,
+                        side=position.side,
+                        avg_open_price=position.avg_open_price,
+                        realized_pnl=position.realized_pnl,
+                    )
+                    for position in previous.positions
+                )
+            )
+            if previous is not None:
+                source_time = previous.account_updated_at_utc
+                net_liquidation = previous.net_liquidation
+                available_funds = previous.available_funds
+                cash = previous.total_cash_value
+        repository.record_portfolio_snapshot(
+            timestamp_ns=now_ns,
+            account_id=str(self._account_id),
+            currency=str(self._currency),
+            net_liquidation=net_liquidation,
+            available_funds=available_funds,
+            total_cash_value=cash,
+            account_updated_at_utc=source_time,
+            broker_connected=connected,
+            reconciliation_complete=reconciled,
+            broker_stale_after_seconds=self._settings.broker_account_stale_after_seconds,
+            not_ready_reason=reason,
             positions=positions,
         )
         self.log.info(
@@ -161,9 +197,12 @@ class PortfolioSnapshotActor(Actor):  # type: ignore[misc]
         )
 
     def on_stop(self) -> None:
-        """停止定时器并释放数据库连接。"""
+        """停止时立即标记历史快照不可交易, 保留券商来源时间。"""
         if SNAPSHOT_TIMER_NAME in self.clock.timer_names:
             self.clock.cancel_timer(SNAPSHOT_TIMER_NAME)
         if self._repository is not None:
-            self._repository.close()
-            self._repository = None
+            try:
+                self._capture_snapshot(None, stopping=True)
+            finally:
+                self._repository.close()
+                self._repository = None

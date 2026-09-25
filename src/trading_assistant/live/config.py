@@ -21,6 +21,10 @@ class LiveSettings:
     paper_input_poll_interval_seconds: int = 60
     paper_input_retry_interval_seconds: int = 1800
     broker_account_stale_after_seconds: int = 300
+    catalog_request_timeout_seconds: int = 30
+    broker_request_timeout_seconds: int = 30
+    broker_reconciliation_timeout_seconds: int = 120
+    broker_reconciliation_retry_interval_seconds: int = 30
 
 
 def load_live_settings(path: Path) -> LiveSettings:
@@ -45,6 +49,14 @@ def load_live_settings(path: Path) -> LiveSettings:
             broker_account_stale_after_seconds=int(
                 values.get("broker_account_stale_after_seconds", 300)
             ),
+            catalog_request_timeout_seconds=int(values.get("catalog_request_timeout_seconds", 30)),
+            broker_request_timeout_seconds=int(values.get("broker_request_timeout_seconds", 30)),
+            broker_reconciliation_timeout_seconds=int(
+                values.get("broker_reconciliation_timeout_seconds", 120)
+            ),
+            broker_reconciliation_retry_interval_seconds=int(
+                values.get("broker_reconciliation_retry_interval_seconds", 30)
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"live 配置字段无效: {path}: {exc}") from exc
@@ -62,6 +74,10 @@ def load_live_settings(path: Path) -> LiveSettings:
         "paper_input_poll_interval_seconds",
         "paper_input_retry_interval_seconds",
         "broker_account_stale_after_seconds",
+        "catalog_request_timeout_seconds",
+        "broker_request_timeout_seconds",
+        "broker_reconciliation_timeout_seconds",
+        "broker_reconciliation_retry_interval_seconds",
     ):
         if getattr(settings, name) < 1:
             raise ValueError(f"{name} 必须为正数")

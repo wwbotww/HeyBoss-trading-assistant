@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from functools import partial
 from math import floor, isfinite
 from pathlib import Path
@@ -26,12 +27,19 @@ from nautilus_trader.model.events import (
     OrderRejected,
     OrderSubmitted,
 )
-from nautilus_trader.model.identifiers import AccountId, ClientId, ClientOrderId, InstrumentId
+from nautilus_trader.model.identifiers import (
+    AccountId,
+    ClientId,
+    ClientOrderId,
+    InstrumentId,
+    PositionId,
+)
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.orders import Order
 from nautilus_trader.trading.strategy import Strategy
 from sqlalchemy.exc import SQLAlchemyError
 
+from trading_assistant.data.catalog import CatalogRequestOutcome
 from trading_assistant.data.corporate_actions import CorporateActionRepository
 from trading_assistant.data.factor import expected_factor_date, factor_execution_window
 from trading_assistant.data.market_calendar import CALENDAR_VERSION, shift_regular_session
@@ -139,16 +147,22 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         self._deferred_signals: dict[str, TradeSignalEvent] = {}
         self._factor_plan_summaries: dict[str, str] = {}
         self._execution_prices_ready = not config.bootstrap_from_catalog
+        self._execution_outcomes: dict[str, CatalogRequestOutcome] = {}
         self._execution_price_date: date | None = None
+        self._execution_request_date: date | None = None
         self._execution_request_started_ns: int | None = None
         self._execution_request_generation = 0
         self._broker_status: Callable[[], tuple[bool, bool]] | None = None
+        self._invalidate_broker: Callable[[str], None] | None = None
         self._startup_reports: list[object] = []
         self._recovery_error: str | None = None
 
-    def bind_broker_status(self, status: Callable[[], tuple[bool, bool]]) -> None:
+    def bind_broker_status(
+        self, status: Callable[[], tuple[bool, bool]], *, invalidate: Callable[[str], None]
+    ) -> None:
         """由节点装配共享券商状态, 不查询外部服务。"""
         self._broker_status = status
+        self._invalidate_broker = invalidate
         self.msgbus.subscribe("reports.execution.*", self._on_execution_report)
         self.msgbus.subscribe("events.order.*", self._on_external_order_event)
 
@@ -197,6 +211,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
     def _handle_signal(self, message: object) -> None:
         if not isinstance(message, TradeSignalEvent):
             return
+        required_date = None
         if self._settings.bootstrap_from_catalog and message.factor_context is not None:
             required_date = date.fromisoformat(message.factor_context.asof_date)
             if self._execution_price_date != required_date:
@@ -207,7 +222,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 f"Deferred signal until execution price bootstrap completes: event_id={message.id}"
             )
             if not self._execution_bar_requests:
-                self._request_execution_bar_history()
+                self._request_execution_bar_history(required_date=required_date)
             return
         self._process_signal(message)
 
@@ -302,15 +317,19 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 timestamp_ns=now_ns,
             )
 
-    def _request_execution_bar_history(self) -> None:
+    def _request_execution_bar_history(self, *, required_date: date | None = None) -> None:
         """通过 NT DataEngine 为所有策略统一加载 EXTERNAL 执行 Bar。"""
         if self._settings.catalog_lookback_days < 1:
             raise ValueError("catalog_lookback_days must be positive")
         end = self.clock.utc_now()
         self._execution_prices_ready = False
+        self._execution_request_date = required_date
         self._execution_request_started_ns = self.clock.timestamp_ns()
         self._execution_request_generation += 1
         generation = self._execution_request_generation
+        for outcome in self._execution_outcomes.values():
+            outcome.status = "cancelled"
+        self._execution_outcomes.clear()
         start = end - timedelta(days=self._settings.catalog_lookback_days)
         bar_types = tuple(dict.fromkeys(self._settings.execution_bar_types.values()))
         self._execution_bar_requests = set(bar_types)
@@ -319,6 +338,8 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             return
         client_id = ClientId(self._settings.catalog_client_id)
         for value in bar_types:
+            outcome = CatalogRequestOutcome()
+            self._execution_outcomes[value] = outcome
             try:
                 self.request_bars(
                     BarType.from_str(value),
@@ -328,6 +349,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                     callback=partial(
                         self._execution_bar_request_completed, value, generation=generation
                     ),
+                    params={"catalog_outcome": outcome},
                 )
             except Exception as exc:
                 self._execution_request_generation += 1
@@ -338,7 +360,10 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
     def _execution_bar_request_completed(
         self, bar_type: str, _: UUID4, *, generation: int | None = None
     ) -> None:
-        if generation is not None and generation != self._execution_request_generation:
+        if generation is not None and (
+            generation != self._execution_request_generation
+            or bar_type not in self._execution_bar_requests
+        ):
             return
         self._execution_bar_requests.discard(bar_type)
         if not self._execution_bar_requests:
@@ -348,6 +373,15 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         """结束执行价预热并恢复启动阶段已经落库的 NEW 信号。"""
         if self._execution_prices_ready:
             return
+        self._execution_request_started_ns = None
+        if any(
+            (outcome := self._execution_outcomes.get(value)) is None
+            or outcome.status != "ok"
+            or outcome.rows_received == 0
+            for value in self._settings.execution_bar_types.values()
+        ):
+            self.log.warning("Execution price history is incomplete; waiting for the next poll")
+            return
         missing = sorted(
             value
             for value in self._settings.execution_bar_types.values()
@@ -355,20 +389,20 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         )
         if missing:
             self.log.error(f"Execution price bootstrap missing BarTypes: {', '.join(missing)}")
+            return
         self._execution_prices_ready = True
-        self._execution_price_date = expected_factor_date(
-            datetime.fromtimestamp(self.clock.timestamp_ns() / 1e9, tz=UTC)
-        )
+        # 启动预热可能早于当期发布; 只认可实际信号发起并完整结束的日期请求。
+        self._execution_price_date = self._execution_request_date
         self._execution_request_started_ns = None
 
         deferred = tuple(self._deferred_signals.values())
         self._deferred_signals.clear()
         for event in deferred:
-            self._process_signal(event)
+            self._handle_signal(event)
 
         repository = self._require_repository()
         for workflow in repository.list_new_signal_workflows(scope=self._settings.signal_scope):
-            self._process_signal(workflow.to_event())
+            self._handle_signal(workflow.to_event())
 
     def _poll_approved_signal(self, _: TimeEvent) -> None:
         """领取人工确认信号并在提交前重新计算和风控。"""
@@ -388,7 +422,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 self._execution_request_generation += 1
             if not self._execution_prices_ready:
                 if not self._execution_bar_requests:
-                    self._request_execution_bar_history()
+                    self._request_execution_bar_history(required_date=self._execution_request_date)
                 return
         if self._settings.approval_mode != "manual":
             pending = tuple(self._deferred_signals.values())
@@ -517,7 +551,9 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             if self.cache.orders_open(strategy_id=self.id):
                 return (), "open orders require reconciliation before factor rebalance"
             if self._settings.broker_account_stale_after_seconds is not None:
-                ownership = self._ownership_rejection(current_quantities)
+                ownership = self._ownership_rejection(
+                    current_quantities, strategy_name=event.strategy_name
+                )
                 if ownership is not None:
                     return (), ownership
 
@@ -669,6 +705,35 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
     def _submit_orders(
         self, event: TradeSignalEvent, planned_orders: tuple[_PlannedOrder, ...]
     ) -> None:
+        position_ids: dict[str, PositionId | None] = {}
+        rejection = None
+        if self._settings.broker_account_stale_after_seconds is not None:
+            rejection = self._ownership_rejection(
+                {
+                    canonical: self._current_quantity(InstrumentId.from_str(route))
+                    for canonical, route in self._settings.instrument_routes.items()
+                },
+                strategy_name=event.strategy_name,
+                positions_only=True,
+            )
+        # 整组先核验唯一实际持仓, 避免第一笔提交后才发现另一笔无法绑定。
+        for planned in planned_orders:
+            positions = self.cache.positions_open(
+                instrument_id=InstrumentId.from_str(planned.instrument_id),
+                account_id=AccountId(self._settings.account_id),
+            )
+            if len(positions) > 1 or (positions and positions[0].signed_qty <= 0):
+                rejection = f"ambiguous execution position: {planned.instrument_id}"
+            elif planned.side == OrderSide.SELL and (
+                not positions or positions[0].signed_qty < planned.quantity
+            ):
+                rejection = f"insufficient execution position: {planned.instrument_id}"
+            position_ids[planned.instrument_id] = positions[0].id if len(positions) == 1 else None
+        if rejection is not None:
+            self._record_factor_skip(event, rejection)
+            self._pending_buys.pop(str(event.id), None)
+            self._failed_signals.add(str(event.id))
+            return
         prepared: list[tuple[Order, _PlannedOrder, _OrderContext]] = []
         for planned in planned_orders:
             rejection = self._account_rejection() or self._factor_rejection(event, execution=True)
@@ -727,7 +792,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 quantity=context.quantity,
                 reason=event.reason,
             )
-            self.submit_order(order)
+            self.submit_order(order, position_id=position_ids[planned.instrument_id])
 
     def on_order_submitted(self, event: OrderSubmitted) -> None:
         """记录 NT 已提交事件。"""
@@ -763,14 +828,47 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             or str(event.instrument_id) != context.instrument_id
             or event.order_side.name != context.direction
         ):
-            self._recovery_error = "owned fill account mismatch"
+            self._fail_recovery("owned fill account mismatch")
             return
-        order = self.cache.order(event.client_order_id)
-        status = (
-            "FILLED"
-            if order is not None and order.status == OrderStatus.FILLED
-            else "PARTIALLY_FILLED"
+        repository = self._require_repository()
+        filled = Decimal(0)
+        duplicate = False
+        trade_id = str(event.trade_id)
+        offset = 0
+        while self._settings.backtest_run_id is None:
+            rows = repository.list_fill_audits(
+                scope=self._settings.signal_scope,
+                client_order_id=str(event.client_order_id),
+                offset=offset,
+                limit=500,
+            )
+            filled += sum((Decimal(str(row.quantity)) for row in rows), Decimal(0))
+            duplicate = duplicate or any(row.trade_id == trade_id for row in rows)
+            if len(rows) < 500:
+                break
+            offset += 500
+        quantity = event.last_qty.as_decimal()
+        total = filled if duplicate else filled + quantity
+        if quantity <= 0 or total > Decimal(str(context.quantity)):
+            self._fail_recovery("owned fill quantity exceeds audited order")
+            return
+        status = "FILLED" if total == Decimal(str(context.quantity)) else "PARTIALLY_FILLED"
+        if self._settings.backtest_run_id is not None:
+            order = self.cache.order(event.client_order_id)
+            status = (
+                "FILLED"
+                if order is not None and order.status == OrderStatus.FILLED
+                else "PARTIALLY_FILLED"
+            )
+        latest = repository.list_order_audits(
+            scope=self._settings.signal_scope, client_order_id=str(event.client_order_id), limit=1
         )
+        if (
+            status != "FILLED"
+            and latest
+            and latest[0].status in {"CANCELED", "EXPIRED", "REJECTED", "DENIED"}
+        ):
+            status = latest[0].status
         try:
             inserted = self._require_repository().record_fill(
                 run_id=self._settings.backtest_run_id,
@@ -799,11 +897,31 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 ),
             )
         except (ValueError, SQLAlchemyError) as exc:
-            self._recovery_error = f"fill audit requires reconciliation: {type(exc).__name__}"
-            self.log.error(self._recovery_error)
+            self._fail_recovery(f"fill audit requires reconciliation: {type(exc).__name__}")
             return
-        if inserted and order is not None and order.is_closed:
+        if inserted and isinstance(event, OrderFilled) and self._invalidate_broker is not None:
+            rejection = self._ownership_rejection(
+                {
+                    canonical: self._current_quantity(InstrumentId.from_str(route))
+                    for canonical, route in self._settings.instrument_routes.items()
+                },
+                strategy_name=context.strategy_name,
+                positions_only=True,
+            )
+            if rejection is not None:
+                self._pending_buys.pop(context.signal_event_id, None)
+                self._failed_signals.add(context.signal_event_id)
+                self._invalidate_broker(rejection)
+                return
+        if inserted and status == "FILLED":
             self._finish_sell(context, str(event.client_order_id), failed=False)
+
+    def _fail_recovery(self, reason: str) -> None:
+        """审计冲突同时关闭本网关及共享核对门禁。"""
+        self._recovery_error = reason
+        self.log.error(reason)
+        if self._invalidate_broker is not None:
+            self._invalidate_broker(reason)
 
     def _restore_order_context(self, client_id: str) -> _OrderContext | None:
         if client_id in self._order_contexts:
@@ -855,7 +973,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 or report.order_side.name != context.direction
                 or report.quantity.as_double() != context.quantity
             ):
-                self._recovery_error = "owned order report identity or quantity mismatch"
+                self._fail_recovery("owned order report identity or quantity mismatch")
                 return
             self._require_repository().record_order_event(
                 signal_event_id=context.signal_event_id,
@@ -897,11 +1015,19 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
             )
         )
 
-    def _ownership_rejection(self, current: dict[str, int]) -> str | None:
+    def _ownership_rejection(
+        self,
+        current: dict[str, int],
+        *,
+        strategy_name: str = "patchtst_e3",
+        positions_only: bool = False,
+    ) -> str | None:
         """只有可由本作用域真实成交解释的数量才可继续调仓。"""
         repository = self._require_repository()
         routes = set(self._settings.instrument_routes.values())
-        if any(str(order.instrument_id) in routes for order in self.cache.orders_open()):
+        if not positions_only and any(
+            str(order.instrument_id) in routes for order in self.cache.orders_open()
+        ):
             return "open broker orders require reconciliation before rebalance"
         owned: dict[str, float] = {}
         filled_by_order: dict[str, float] = {}
@@ -911,7 +1037,7 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 scope=self._settings.signal_scope, offset=offset, limit=500
             )
             for fill in fills:
-                if fill.strategy_name != "patchtst_e3":
+                if fill.strategy_name != strategy_name:
                     continue
                 filled_by_order[fill.client_order_id] = (
                     filled_by_order.get(fill.client_order_id, 0) + fill.quantity
@@ -928,10 +1054,17 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
                 account_id=AccountId(self._settings.account_id),
             )
             actual = sum(float(position.signed_qty) for position in positions)
-            if actual != current[canonical] or actual != owned.get(route, 0) or actual < 0:
+            if (
+                len(positions) > 1
+                or any(position.signed_qty <= 0 for position in positions)
+                or actual != current[canonical]
+                or actual != owned.get(route, 0)
+            ):
                 return (
                     f"position ownership or corporate action reconciliation required: {canonical}"
                 )
+        if positions_only:
+            return None
         # CREATED 或提交中断不能因券商暂时没返回就当作从未提交。
         offset = 0
         while True:
@@ -1246,9 +1379,13 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
         self._daily_new_positions.clear()
         self._execution_bar_requests.clear()
         self._deferred_signals.clear()
+        for outcome in self._execution_outcomes.values():
+            outcome.status = "cancelled"
+        self._execution_outcomes.clear()
         self._execution_prices_ready = not self._settings.bootstrap_from_catalog
         self._factor_plan_summaries.clear()
         self._execution_price_date = None
+        self._execution_request_date = None
         self._execution_request_started_ns = None
         self._execution_request_generation += 1
         self._startup_reports.clear()
@@ -1256,6 +1393,9 @@ class ExecutionGatewayStrategy(Strategy):  # type: ignore[misc]
 
     def on_stop(self) -> None:
         """取消订阅并释放数据库连接。"""
+        self._execution_request_generation += 1
+        for outcome in self._execution_outcomes.values():
+            outcome.status = "cancelled"
         self.msgbus.unsubscribe(self._settings.signal_topic, self._handle_signal)
         if self._broker_status is not None:
             self.msgbus.unsubscribe("reports.execution.*", self._on_execution_report)

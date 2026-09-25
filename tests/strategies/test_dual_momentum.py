@@ -7,6 +7,7 @@ from nautilus_trader.common.component import TestClock
 from nautilus_trader.core.uuid import UUID4
 
 from tests.data.helpers import make_bar
+from trading_assistant.data.catalog import CatalogRequestOutcome
 from trading_assistant.strategies.dual_momentum import (
     DualMomentumActor,
     DualMomentumActorConfig,
@@ -66,6 +67,9 @@ def test_catalog_bootstrap_emits_latest_completed_month_once(tmp_path: Path) -> 
         "2026-07": {"SPY.ARCA": 108.0},
     }
     actor._catalog_requests = {"SPY", "QQQ"}
+    actor._catalog_outcomes = {
+        "SPY.ARCA-1-DAY-LAST-EXTERNAL": CatalogRequestOutcome(status="ok", rows_received=1)
+    }
     actor._catalog_request_completed("SPY", UUID4())
     assert actor.published == []
     actor._catalog_request_completed("QQQ", UUID4())

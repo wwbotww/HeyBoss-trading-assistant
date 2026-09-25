@@ -14,7 +14,7 @@ from nautilus_trader.common.component import TestClock, TimeEvent
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import ClientId, InstrumentId
+from nautilus_trader.model.identifiers import ClientId, InstrumentId, PositionId
 
 from tests.data.helpers import make_bar
 from trading_assistant.data.market_calendar import CALENDAR_VERSION
@@ -157,7 +157,14 @@ class _CatalogBootstrapGateway(_PlanningGateway):
         request_id: UUID4 | None = None,
         params: dict[str, object] | None = None,
     ) -> UUID4:
-        del start, end, limit, update_catalog, join_request, params
+        del start, end, limit, update_catalog, join_request
+        from trading_assistant.data.catalog import CatalogRequestOutcome
+
+        assert params is not None
+        outcome = params["catalog_outcome"]
+        assert isinstance(outcome, CatalogRequestOutcome)
+        outcome.status = "ok"
+        outcome.rows_received = int(self.cache.bar(bar_type) is not None)
         used_request_id = request_id or UUID4()
         self.requested_bar_types.append(
             (str(bar_type), None if client_id is None else str(client_id))
@@ -1008,7 +1015,27 @@ def test_synchronous_sell_fills_wait_for_all_sells_and_count_only_submitted_buys
     )
     submitted: list[tuple[OrderSide, str]] = []
 
-    def submit_immediately(self: _PlanningGateway, order: Order) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        _PlanningCache,
+        "positions_open",
+        lambda self, *, instrument_id, account_id: (
+            [
+                SimpleNamespace(
+                    id=PositionId(f"{instrument_id}-EXTERNAL"),
+                    signed_qty=gateway.quantities[str(instrument_id)],
+                )
+            ]
+            if gateway.quantities.get(str(instrument_id), 0)
+            else []
+        ),
+    )
+
+    def submit_immediately(
+        self: _PlanningGateway, order: Order, *, position_id: PositionId | None = None
+    ) -> None:
+        del position_id
         instrument = str(order.instrument_id)
         from types import SimpleNamespace
 
@@ -1058,6 +1085,8 @@ def test_native_reports_restore_identity_replay_fills_and_preserve_terminal_stat
     from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 
     gateway, repository, event = _factor_setup(tmp_path)
+    invalidations: list[str] = []
+    gateway._invalidate_broker = invalidations.append
     repository.register_signal_workflow(event, scope="paper:factor")
     repository.record_order_event(
         signal_event_id=str(event.id),
@@ -1098,6 +1127,8 @@ def test_native_reports_restore_identity_replay_fills_and_preserve_terminal_stat
     gateway._order_contexts.clear()
     gateway._on_execution_report(first)
     gateway._on_execution_report(fill("second", 4))
+    # 重连可能只有完整原始成交而没有对应订单报告, 仍应确认可证明的全部成交。
+    assert repository.list_latest_order_audits(scope="paper:factor")[0].status == "FILLED"
     report = OrderStatusReport(
         account_id=AccountId("IB-DU123"),
         instrument_id=InstrumentId.from_str("S0.US"),
@@ -1120,9 +1151,49 @@ def test_native_reports_restore_identity_replay_fills_and_preserve_terminal_stat
     latest = repository.list_latest_order_audits(scope="paper:factor")[0]
     assert latest.status == "FILLED"
     assert latest.venue_order_id == "17:901"
+    gateway._on_execution_report(fill("overfill", 1))
+    assert gateway._recovery_error == "owned fill quantity exceeds audited order"
+    assert len(repository.list_fill_audits(scope="paper:factor")) == 2
+    gateway._on_execution_report(fill("first", 3))
+    assert gateway._recovery_error == "fill audit requires reconciliation: ValueError"
+    assert len(repository.list_fill_audits(scope="paper:factor")) == 2
     report.account_id = AccountId("IB-DU999")
     gateway._on_execution_report(report)
     assert gateway._recovery_error is not None
+    assert invalidations == [
+        "owned fill quantity exceeds audited order",
+        "fill audit requires reconciliation: ValueError",
+        gateway._recovery_error,
+    ]
+
+
+@pytest.mark.parametrize("quantities", [(5, 5), (-10,), (3,), ()])
+def test_invalid_second_position_rejects_entire_sell_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quantities: tuple[int, ...]
+) -> None:
+    from types import SimpleNamespace
+
+    gateway, repository, event = _factor_setup(tmp_path)
+    repository.register_signal_workflow(event, scope="paper:factor")
+    monkeypatch.setattr(
+        _PlanningCache,
+        "positions_open",
+        lambda self, *, instrument_id, account_id: [
+            SimpleNamespace(id=PositionId(f"{instrument_id}-{index}"), signed_qty=quantity)
+            for index, quantity in enumerate((10,) if str(instrument_id) == "S7.US" else quantities)
+        ],
+    )
+    submitted: list[object] = []
+    monkeypatch.setattr(_PlanningGateway, "submit_order", lambda *args, **_: submitted.append(args))
+    plan = tuple(
+        _PlannedOrder(canonical, canonical, OrderSide.SELL, 10, 100, 0, False)
+        for canonical in ("S7.US", "S8.US")
+    )
+    gateway._execute_plan(event, plan)
+    assert submitted == []
+    assert repository.list_order_audits(scope="paper:factor") == ()
+    assert str(event.id) in gateway._failed_signals
+    assert str(event.id) not in gateway._pending_buys
 
 
 def test_recovery_requires_owned_positions_complete_fills_and_terminal_orders(
