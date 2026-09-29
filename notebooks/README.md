@@ -4,4 +4,4 @@
 
 - `backtest_analysis.ipynb`：读取回测生成的 `summary.json`、`fills.csv` 与 `returns.csv`，检查指标、成交和权益回撤。
 
-回测输出格式和指标语义见 [`docs/technical-reference.md`](../docs/technical-reference.md#报告)。
+回测输出格式和指标语义见[技术参考](../docs/reference/technical-reference.md#报告)，运行与网页报告路径见[回测指引](../docs/operations/data-and-backtest.md)。

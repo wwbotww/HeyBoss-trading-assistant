@@ -49,13 +49,13 @@ rename 后的 `<delivery_id>/`。协议不使用 `schema_version`、manifest 历
 
 `factors.parquet` 的字段顺序和 Arrow 类型固定如下：
 
-| 字段 | 类型 | 规则 |
-|---|---|---|
-| `security_id` | string | 外部交付身份；由显式配置按 `asof_date` 关联 HeyBoss 标的 |
-| `symbol` | string | 仅供显示和审计，不参与自动映射 |
-| `asof_date` | date32/date | 因子信息截止交易日 |
-| `score` | float64 nullable | eligible 时有限且非空；否则必须为空 |
-| `eligible` | bool | 是否进入该日排序横截面 |
+| 字段          | 类型             | 规则                                                     |
+| ------------- | ---------------- | -------------------------------------------------------- |
+| `security_id` | string           | 外部交付身份；由显式配置按 `asof_date` 关联 HeyBoss 标的 |
+| `symbol`      | string           | 仅供显示和审计，不参与自动映射                           |
+| `asof_date`   | date32/date      | 因子信息截止交易日                                       |
+| `score`       | float64 nullable | eligible 时有限且非空；否则必须为空                      |
+| `eligible`    | bool             | 是否进入该日排序横截面                                   |
 
 主键为 `(security_id, asof_date)`，文件必须按 `(asof_date, security_id)` 升序排列。文件不得
 包含 `target`、split、未来收益、特征或中性化输入。
@@ -76,14 +76,14 @@ source, model, input, time, coverage, artifact
 
 子字段固定为：
 
-| 节点 | 字段 |
-|---|---|
-| `source` | `kind, repository, commit, run_id, run_manifest_sha256` |
-| `model` | `release_id, model_id, model_type, checkpoint_sha256, training_dataset_id, higher_score_is_better, forecast_horizon_sessions, score_semantics` |
-| `input` | `snapshot_id, snapshot_manifest_sha256, universe_semantics, universe_sha256, identity_policy` |
-| `time` | `calendar, calendar_version, timezone, minimum_asof_date, maximum_asof_date, signal_available, earliest_execution` |
-| `coverage` | `candidate_rows, actual_rows, expected_eligible_rows, scored_eligible_rows, missing_eligible_rows, ratio` |
-| `artifact` | `file, sha256, bytes, row_count, date_count` |
+| 节点       | 字段                                                                                                                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`   | `kind, repository, commit, run_id, run_manifest_sha256`                                                                                        |
+| `model`    | `release_id, model_id, model_type, checkpoint_sha256, training_dataset_id, higher_score_is_better, forecast_horizon_sessions, score_semantics` |
+| `input`    | `snapshot_id, snapshot_manifest_sha256, universe_semantics, universe_sha256, identity_policy`                                                  |
+| `time`     | `calendar, calendar_version, timezone, minimum_asof_date, maximum_asof_date, signal_available, earliest_execution`                             |
+| `coverage` | `candidate_rows, actual_rows, expected_eligible_rows, scored_eligible_rows, missing_eligible_rows, ratio`                                      |
+| `artifact` | `file, sha256, bytes, row_count, date_count`                                                                                                   |
 
 `artifact.sha256` 只校验 Parquet 字节。`delivery_id` 是除 `created_at` 和 `delivery_id` 自身外的
 完整 manifest 语义哈希：
@@ -196,13 +196,13 @@ HeyBoss 不读取 FacDigger 配置、训练快照或映射审计文件，也不�
 
 身份解析只使用 FactorBatch 的 `asof_date`，不使用 `created_at`、导入时间或下一交易日。
 
-| 情况 | 行为 |
-|---|---|
-| 活跃目标身份缺口、过期或映射歧义 | evaluation 和 signal 均拒绝；不能合成为不合格占位 |
-| 活跃目标的已知旧/新身份出现在错误日期 | 拒绝，即使该行不合格或同时存在正确身份行 |
-| 身份有效，但 signal 缺少目标行 | 拒绝，保持完整候选横截面要求 |
+| 情况                                   | 行为                                               |
+| -------------------------------------- | -------------------------------------------------- |
+| 活跃目标身份缺口、过期或映射歧义       | evaluation 和 signal 均拒绝；不能合成为不合格占位  |
+| 活跃目标的已知旧/新身份出现在错误日期  | 拒绝，即使该行不合格或同时存在正确身份行           |
+| 身份有效，但 signal 缺少目标行         | 拒绝，保持完整候选横截面要求                       |
 | 身份有效，但 evaluation 无该目标的预测 | 保留原有 `eligible=false` 占位，不把它当作有效零分 |
-| 接收范围外或不在生命周期内的标的 | 保持过滤行为；范围外股票缺少 ISIN 不阻止导入 |
+| 接收范围外或不在生命周期内的标的       | 保持过滤行为；范围外股票缺少 ISIN 不阻止导入       |
 
 原固定查找实现会忽略未命中的外部行，evaluation 又允许为缺失预测创建不合格占位，两者
 组合可能掩盖历史身份错误。现在先解析目标及当天身份，再检查目标身份历史中的错期输入，
@@ -232,18 +232,18 @@ CustomData 类身份，不依赖 Catalog 查询 metadata；这样 BacktestNode �
 交付值；原始分数、eligible 和价格可用时间不变。`batch_size` 计数为当天目标标的数量，
 不是历史身份数量。更新映射不会迁移或覆盖已有 Catalog；有冲突时需另选隔离 Catalog 验证。
 
-## 当前验收边界
+## 联调验收方式
 
-当前消费者支持模型通用的五列契约、固定及日期区间身份映射。配置/导入测试覆盖区间边界、
+消费者支持模型通用的五列契约、固定及日期区间身份映射。配置/导入测试覆盖区间边界、
 错期及不合格行拒绝、历史缺口、范围过滤、完整批次和幂等；Actor 回归覆盖身份切换后的稳定
-标的及逐日信号审计。这些是工程能力，不代表真实证券映射已经核实或新实验效果通过验收。
-使用真实数据的完整联调还必须满足：
+标的及逐日信号审计。测试通过不能替代某份真实交付的映射和时效核对。
+以下为新 release 或新交付的验收方法，826 已完成部分及剩余事项统一见[进度页](../status.md)：
 
 1. 双方固定可复现的具体 Git commit；
 2. 核实双方真实目标及日期映射，用选定 ModelRelease 发布 evaluation 与 signal bundle；
 3. 同一原始目录同时通过 FacDigger verifier 和 HeyBoss importer；
 4. 完成 evaluation 的 Catalog→Actor→风险→模拟成交→报告；
-5. 完成单日 signal 的价格前置检查和人工审批前 dry run。
+5. 对 signal 检查 D 日价格、开盘前接纳、N 日窗口、账户与风控；生产执行按已选择的 manual/auto 路径验收原始成交与持仓。隔离 dry run 与真实执行分别记录。
 
 仓库内 `tests/fixtures/factor_batches/` 保存一份 FacDigger 原始发布的、显式标记为
 `NOT-FOR-TRADING` 的单日模拟交付，只用于跨仓契约回归和单次交易链路验收。它不是
@@ -323,12 +323,12 @@ uv run --frozen python scripts/check_calendar_consistency.py \
 ```
 
 脚本比较两份固定 JSON 样例，并用各自解释器比较完整交易日集合、开收盘和前后日，同时
-记录依赖环境。真实 826 交付、运行命令和限制见 [联合实施与验收记录](facdigger-heyboss-joint-implementation-plan.md)。
+记录依赖环境。真实 826 交付、运行命令和限制见 [联合实施与验收记录](../archive/facdigger-heyboss-joint-implementation-plan.md)。
 
-## 826 每日接纳入口与当前状态
+## 每日接纳入口
 
 `scripts/sync_paper_daily.py --once/--serve` 使用同一接纳流程；单实例锁避免误开两个消费者。固定 release、source_kind、D、身份、日历、内容及同日冲突全部复用公开的 `validate_factor_bundle` 和原导入器。通过这些检查后才准备行情，不把调用开始时间作为接纳完成时间。迟到或跨过截止的同步不得产生 paper 接纳。
 
 生产 Catalog 的读写都使用 `.catalog.lock`；写进程异常终止留下 `.catalog-writing` 时，NT 与 Web 都停止消费，不能仅删除标记后把旧目录当作完整数据。需停止写入并保留现场，在新目录从真实来源重建、重新核验接纳与引用路径，保留最新交易审计库。
 
-当前独立开发与真实交接的边界见 [826 验收记录](826-ibkr-paper-daily-acceptance.md)。历史 826 evaluation 仍只用于隔离回测，不能因 auto 已启用就进入 paper。
+操作步骤见[Paper 运行指引](../operations/paper.md)，已核实进度及未完成验收见[进度页](../status.md)。历史 826 evaluation 仍只用于隔离回测，不能因 auto 已启用就进入 paper。

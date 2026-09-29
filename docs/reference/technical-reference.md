@@ -1,6 +1,6 @@
 # Trading Assistant 技术设计参考
 
-本文说明当前版本的系统架构、目录职责、数据语义、策略运行、回测、paper 执行、存储和开发约束。稳定产品范围和不可违反的规则以 [project-context.md](project-context.md) 为准。
+本文说明当前版本的系统架构、目录职责、数据语义、策略运行、回测、paper 执行、存储和开发约束。稳定产品范围和不可违反的规则以 [project-context.md](../project-context.md) 为准。
 
 ## 总体架构
 
@@ -60,7 +60,7 @@ src/trading_assistant/
 ├── risk/                       应用风控规则
 ├── data/                       供应商适配、FactorBatch 导入、Catalog 与质量检查
 ├── backtest/                   BacktestNode、费用、分红模拟和报告
-├── live/                       TradingNode 与账户快照
+├── live/                       TradingNode、每日输入、异步 Catalog 客户端、券商核对与快照
 ├── storage/                    SQLAlchemy 模型和审计仓储
 ├── market_radar/               成员/分类及市场来源适配、纯指标计算、同步与独立快照仓储
 ├── notify/                     Telegram 审批与通知
@@ -73,16 +73,16 @@ web-ui/                         独立 Vue 3 只读用户界面、生成式 API 
 
 ## 配置边界
 
-| 文件 | 职责 |
-|---|---|
-| `config/instruments.yaml` | canonical、EODHD、IBKR、因子身份与交易生命周期 |
-| `config/data.yaml` | 数据源、历史范围、BarType、重试和质量阈值 |
-| `config/strategies.yaml` | 唯一活动策略、审批模式和策略参数 |
-| `config/risk.yaml` | 账户级交易风控阈值 |
-| `config/backtest.yaml` | 资金、费用、滑点、时间边界和报告路径 |
-| `config/live.yaml` | Catalog 预热、审批轮询、通知和账户快照间隔 |
+| 文件                       | 职责                                                                     |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `config/instruments.yaml`  | canonical、EODHD、IBKR、因子身份与交易生命周期                           |
+| `config/data.yaml`         | 数据源、历史范围、BarType、重试和质量阈值                                |
+| `config/strategies.yaml`   | 唯一活动策略、审批模式和策略参数                                         |
+| `config/risk.yaml`         | 账户级交易风控阈值                                                       |
+| `config/backtest.yaml`     | 资金、费用、滑点、时间边界和报告路径                                     |
+| `config/live.yaml`         | 每日输入、因子轮询、Catalog 请求、券商核对和快照期限                     |
 | `config/market-radar.yaml` | 25 只固定监测池、10 只观察股、宏观输入和当前成员分类设置；不授予交易资格 |
-| `.env` | 凭据、账户、连接地址和本地路径，不进入 Git |
+| `.env`                     | 凭据、账户、连接地址和本地路径，不进入 Git                               |
 
 ## 数据设计
 
@@ -111,7 +111,7 @@ IBKR 历史适配器保留为备用来源，使用分块、重叠和追加模式
 
 `data_symbol` 只用于供应商请求。`live_instrument_id` 只在 IBKR 合约解析和执行边界使用，例如把 `AAPL.US` 映射成 `AAPL.NASDAQ`。
 
-`factor_security_id` 是 FacDigger 稳定身份到 canonical ID 的显式映射。它是可选字段；没有映射的标的不进入因子批次。禁止根据展示用 `symbol` 自动匹配。
+`factor_security_id` 或互斥的 `factor_identity_periods` 将 FacDigger 身份显式映射到 canonical ID，统一按因子 `asof_date` 解析。没有配置映射的标的不参与因子消费；已经启用映射且处于生命周期内的目标若存在日期身份缺口则拒绝批次，不能通过删去该目标降低覆盖要求。禁止根据展示用 `symbol` 自动匹配。详细边界见[日期身份映射](factor-integration.md#按日期的身份映射)。
 
 `first_trading_date` 和可选 `last_trading_date` 定义标的真实交易生命周期。数据同步将全局请求窗口与该区间求交，退市后质量检查不再误报陈旧；回测预检也只要求生命周期交集内的 Bar。
 
@@ -142,7 +142,7 @@ EODHD 的 `adjusted_close` 同时包含拆股和现金分红影响，原始 OHLC
 - 供应商历史修订；
 - 本地数据陈旧程度。
 
-质量报告写入 `reports/data-quality/`。错误会阻止规范序列写入；警告保留在报告中供人工核对。
+质量报告写入 `DATA_QUALITY_REPORT_ROOT`；宿主环境模板为 `runtime/reports/data-quality/`。错误会阻止规范序列写入；警告保留在报告中供人工核对。
 
 ### FacDigger 因子边界
 
@@ -150,7 +150,7 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 
 `FactorScoreData` 是注册到 NT 的逐证券 CustomData。它以固定 CustomData 类身份路由，不在 `DataType.metadata` 中保存契约标记：NT 1.230 的 Catalog 历史查询不会把查询 metadata 带回数据对象，若订阅端依赖 metadata 会形成不同 Topic 并丢失整批数据。回测通过 `BacktestDataConfig` 从 Catalog 流式投递；paper Actor 通过同一 Catalog 历史请求 bootstrap。两条入口最终调用相同的批次聚合方法。Actor 永远不读取 FactorBatch 文件，也不加载 FacDigger 代码。
 
-详细契约与 FacDigger 改造步骤见 [factor-integration.md](factor-integration.md)。
+详细交付契约、日历和导入边界见[因子接入参考](factor-integration.md)。
 
 ### 市场雷达链路
 
@@ -167,14 +167,14 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
       application/market_radar.py → GET API → Vue 市场雷达
 ```
 
-| CLI | 输入与写入 |
-|---|---|
-| `sync_market_radar.py` | 固定价格池 → 双 BarType Catalog/公司行动/质量报告 → 价格快照 |
-| `sync_market_breadth.py` | 可替换当前成员来源 + 同一行情管道 → 当前成员与宽度快照 |
-| `sync_market_macro.py` | HYG/LQD、VIX/VIX3M + FRED DFII10 → 来源观测与完整宏观象限 |
-| `sync_market_earnings.py` | 当前成员/分类、成员与观察池并集 Trends、仅观察池财报 → FY1 与统一聚合 |
-| `sync_market_fundamentals.py` | 显式观察股当前财报 → 可复算的最小规范输入与基本面快照 |
-| `sync_market_economic_events.py` | 美国固定 31 日请求 → 当前经济事件规范快照 |
+| CLI                              | 输入与写入                                                            |
+| -------------------------------- | --------------------------------------------------------------------- |
+| `sync_market_radar.py`           | 固定价格池 → 双 BarType Catalog/公司行动/质量报告 → 价格快照          |
+| `sync_market_breadth.py`         | 可替换当前成员来源 + 同一行情管道 → 当前成员与宽度快照                |
+| `sync_market_macro.py`           | HYG/LQD、VIX/VIX3M + FRED DFII10 → 来源观测与完整宏观象限             |
+| `sync_market_earnings.py`        | 当前成员/分类、成员与观察池并集 Trends、仅观察池财报 → FY1 与统一聚合 |
+| `sync_market_fundamentals.py`    | 显式观察股当前财报 → 可复算的最小规范输入与基本面快照                 |
+| `sync_market_economic_events.py` | 美国固定 31 日请求 → 当前经济事件规范快照                             |
 
 成员权威来源在 CLI 装配，当前使用 State Street SPY 持仓代理；EODHD Components 只负责行业分类。更换来源不改变下游成员契约、指标、数据库和 API。当前成员不是历史指数成分，来源不足必须保留覆盖率和缺失状态，不能补成历史 PIT 数据。
 
@@ -205,7 +205,9 @@ backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual
 
 ### PatchTST E3 因子规则
 
-`signals/factor.py` 接收 eligible 的 canonical 分数，按“分数降序、canonical ID 升序”稳定选择前 N 名，再将目标总敞口等权分配。可选标的不足 N 个时保持现金，不用缺失数据凑数。
+`signals/factor.py` 接收完整候选的 canonical 分数，缺分用 `None` 保留。有效分数按“分数降序、canonical ID 升序”稳定选择前 N 名，返回目标权重及缺分保护集合。有效数不足 N 或缺分比例超限时返回 `SKIP`；Actor 只记决策审计，不发布空权重交易事件，也不据此清空已有持仓。
+
+Gateway 根据执行时真实持仓保留缺分标的数量，并将保护仓位估值计入同一权益与风控预算，扣除后再分配正常目标。保护价过旧、无法估值或超限时整批跳过；纯信号函数不访问账户。完整规则见[缺分保护与恢复](factor-integration.md#统一日历缺分保护与恢复2026-09)。
 
 `PatchTSTFactorActor` 必须等到 `batch_size` 声明的完整横截面后才计算。重复行幂等，冲突行或批次大小变化失败关闭。回测可显式允许 `evaluation_predictions`；paper runner 强制禁止评估数据并验证最新生产批次完整。
 
@@ -228,7 +230,7 @@ backtest 和 live runner 不保存具体 Actor 路径。当前显式支持 `dual
 
 Gateway 启动时会请求配置池中的全部 EXTERNAL Bar，并在请求完成前暂存新信号。计划阶段仍只强制目标标的和当前非零持仓具有最新执行价；缺失的非目标候选不会阻止无关订单。未知目标身份失败关闭。
 
-NT 固定先启动 Actor、再启动 Strategy。策略 Actor 的同步 Catalog bootstrap 因而可能在 Gateway 订阅 Topic 前已经生成信号。Actor 会先把幂等工作流写为 `NEW`；Gateway 完成执行价预热后按同一 `signal_scope` 恢复这些 `NEW` 工作流。恢复只覆盖尚未进入执行边界的信号，不会自动重放 `PROCESSING` 或已提交订单。
+NT 先启动 Actor、再启动 Strategy；paper 的 Catalog 请求通过异步客户端响应，不依靠回调和 Topic 订阅的先后顺序保证信号不丢失。Actor 先把幂等工作流写为 `NEW`，Gateway 在对应 D 的执行价完成后按同一 `signal_scope` 恢复这些工作流。恢复仍经过日期、窗口、接纳、账户和风控检查，不会自动重放 `PROCESSING` 或已提交订单。
 
 manual 工作流：
 
@@ -245,6 +247,8 @@ NEW → PROCESSING → ORDERS_SUBMITTED
 ```
 
 任一阶段的应用风控失败进入 `RISK_REJECTED`。状态领取使用期望旧状态的原子更新，Bot 只能修改审批状态，不能访问任何下单接口。
+
+`ORDERS_SUBMITTED` 表示工作流到达提交阶段，不表示所有订单成交或调仓完成。逐单状态、原始成交和实际持仓共同决定执行结果；不能把网页状态或验收结论反写到工作流制造完成。
 
 如果进程在订单提交边界崩溃，工作流可能保持 `PROCESSING`。系统故意不自动重试，操作者必须先核对 IBKR 和审计记录。
 
@@ -278,39 +282,51 @@ BacktestNode 和 TradingNode 都装配：
 
 `data_start` 到 `evaluation_start` 是预热区间，只更新策略状态，不发布计入绩效的信号。`evaluation_start` 到 `end` 是正式评估区间。
 
-规范日线的 `ts_event` 位于交易日起点，完整 OHLC 到该日结束才可用。回测通过 NT `LatencyModel` 延迟订单激活，因此月末信号只能在后续 Bar 成交，不能使用同一根日线开盘价。
+规范日线的 `ts_event` 位于交易日起点，完整 OHLC 到该日结束才可用。双动量回测通过 NT `LatencyModel` 延迟订单激活，月末信号只能在后续 Bar 成交。
+
+因子回测另由装配层将 EXTERNAL 日线 open 转为 N 开盘 QuoteTick，关闭完整 Bar 撮合，全部开盘输入入缓存后再执行同一个 Gateway，不额外附加一天延迟。D 的信号不能使用 D 开盘或 N 收盘；固定充足流动性、零价差加既定滑点是模拟假设，不能当作真实开盘成交保证。
 
 ### 报告
 
-每次运行写入 `reports/backtests/<run-id>/`：
+每次运行写入 `backtest.report_root/<run-id>/`，由所选 profile 的 `config/backtest.yaml` 配置；相对路径以 `project_root` 解析。Web 的 `REPORT_ROOT` 只控制读取，不覆盖回测写入。正式网页路径对齐见[操作指引](../operations/data-and-backtest.md#报告与网页路径对齐)。报告内容为：
 
-| 文件 | 内容 |
-|---|---|
-| `summary.json` | 收益、回撤、Sharpe、换手率、分红、费用和 NT 统计 |
-| `fills.csv` | 逐笔成交与佣金 |
-| `returns.csv` | NT 账户权益、现金、市值和收益率 |
-| `orders.csv` | NT 订单报告 |
-| `positions.csv` | NT 仓位报告 |
-| `account.csv` | NT 账户报告 |
-| `nt-equity.json` | 分红模拟模块记录的原始账户快照 |
+| 文件             | 内容                                             |
+| ---------------- | ------------------------------------------------ |
+| `summary.json`   | 收益、回撤、Sharpe、换手率、分红、费用和 NT 统计 |
+| `fills.csv`      | 逐笔成交与佣金                                   |
+| `returns.csv`    | NT 账户权益、现金、市值和收益率                  |
+| `orders.csv`     | NT 订单报告                                      |
+| `positions.csv`  | NT 仓位报告                                      |
+| `account.csv`    | NT 账户报告                                      |
+| `nt-equity.json` | 分红模拟模块记录的原始账户快照                   |
 
 报告层直接读取 NT 状态，不根据 fills 另行重放账户。
 
 ## Paper 运行设计
 
-TradingNode 只验证已准备的 Catalog 和运行库，不在启动路径采集供应商。`paper-data-sync` 独立发现固定 release 的完整当日交付，复用原导入器与 EODHD 同步服务，并使用完成时的 UTC 时钟接纳。NT 与 Web 使用 `CoordinatedParquetDataCatalog`，不绕过共享文件锁；runner 在 NT 注册边界替换同名 Catalog。
+TradingNode 只验证已准备的 Catalog 和运行库，不在启动路径采集供应商。`paper-data-sync` 独立发现固定 release 的完整当日交付，复用原导入器与 EODHD 同步服务，并使用完成时的 UTC 时钟接纳。
 
-Gateway 在启动、当前 D 改变及请求超时后通过 NT 刷新 EXTERNAL Bar。回调按请求世代隔离，未完成请求不规划订单。因子 Actor 的历史请求也防止重入与旧回调重新触发决策。交易日历与因子格式保持原契约。
+paper runner 注册具体的 `CatalogDataClientFactory`，由 `CatalogDataClient` 在单个物理工作线程读取协调 Catalog，再经 NT 原生响应交付因子和 Bar；LiveDataEngine 不直接同步读取活跃写入目录。成功、锁忙、异常和取消均完成请求收尾，失败不把旧缓存当成本轮成功。Web 与 backtest 继续使用 `CoordinatedParquetDataCatalog`，共同遵守文件锁和中断写入标记。
+
+Gateway 在启动、当前 D 改变及请求超时后通过 NT 刷新 EXTERNAL Bar。请求关联实际信号 D，初始预热不能将时钟预期日当作已有缓存的日期；恢复 NEW 工作流使用同一日期请求入口。回调按请求世代隔离，未完成请求不规划订单。因子 Actor 防止重入和旧回调重新触发决策，单日已接纳交付不反复改写交易依据。
 
 `trading-node`、数据服务和 manual Bot 是独立进程；默认配置是固定 826 / auto。自动领取保存计划、风险依据和批准后才允许提交，auto 不领取人工 APPROVED。交易节点禁止 Compose 自动重启，异常提交状态不自动重放。
 
-BrokerSession 复用当前 NT IB 客户端，检查 transport ready、执行客户端连接与 NT 核对结果。断连世代变化立即失效旧核对，并异步请求有界重连核对；NT 1.230 的客户端断连世代字段是本处唯一的固定版本内部字段依赖，升级 NT 必须回归这条边界。
+BrokerSession 复用唯一 NT IB 执行客户端，统一管理首次及重连核对；runner 使用 `LiveExecEngineConfig(reconciliation=False)` 关闭 Kernel 独立首次核对，仍必须调用并通过原生执行核对。Trader 可以先启动，Gateway 与快照共同等待完整账户、挂单、原始成交、持仓与 Cache 一致后才就绪。
+
+每轮核对是独立长任务，不因短周期等待被取消，也不并发发起第二轮；失败或超期后按配置重试。断连世代或执行一致性失效立即撤销就绪，旧任务不能重新标记成功。NT 1.230 客户端断连世代的内部字段依赖集中在 `live/runner.py`，升级 NT 时须回归首次失败重试、重连和旧任务失效边界。
+
+当前间隔来自 `config/live.yaml`：输入和因子检查 60 秒、输入失败重试 1800 秒、Catalog 请求及原生 IB 请求 30 秒、完整券商核对 120 秒、失败重试 30 秒、快照采样 30 秒。因子开盘与失效边界另有提醒，不用每天重启替代跨日刷新。
 
 IBKR MarginAccount 的 total 已为净值；CASH 回测才叠加持仓。快照保留采样时间与券商回报时间，Web 使用快照给出的 300 秒阈值判定来源陈旧。现金来自 TotalCashValue，可用资金来自 FullAvailableFunds，二者不相加。旧快照的未知来源保留空值。
 
-恢复按持久化 client_order_id、venue_order_id 和 scope 关联原始报告，不依赖内存 tags，也不按证券接管手工订单。paper 不记录 NT 推断成交。成交写入幂等并与对应订单事件共用事务；累计持仓数量与本策略成交不能解释时停止调仓。日内已提交开仓计数来自批准计划与提交记录。
+恢复按持久化 client_order_id、venue_order_id 和 scope 关联原始报告，不依赖内存 tags，也不按证券接管手工订单。paper 不记录 NT 推断成交。成交写入幂等并与对应订单事件共用事务，部分成交、撤单、过期、拒单和全部成交分别保存；已审计身份的原始成交累计达到订单数量可独立证明 FILLED，无须依赖仍存在的 Cache 订单或订单状态报告，冲突和超量阻断。日内已提交开仓计数来自批准计划与提交记录。
 
-数据库需停写后显式运行 `migrate_factor_protection.py` 与 `migrate_execution_audit.py`，两者默认预检、应用时备份，不在启动时自动迁移。SQLite 忙最多等待 50ms 后失败关闭。部署与真实连续运行状态见 [826 验收记录](826-ibkr-paper-daily-acceptance.md)。
+paper Gateway 显式采用 NT 内部 HEDGING，将订单绑定到经审计确认的实际 PositionId，以处理启动恢复为 EXTERNAL 的持仓；IB 股票净持仓和回测模式不变。提交前检查整组涉及证券的唯一多头持仓、归属和数量，卖出保留 reduce_only。同证券多条仓位即使净额相抵也不视为核对成功。
+
+成交后 Cache 与原始审计不一致时停止续买并使 BrokerSession 失效，立即采样未就绪快照；异常 Cache 沿用最近完整历史数据及其来源时间。正常停止也记录未就绪，不用本地时间刷新券商事实。卖单全部终态后才按真实持仓重算买入。
+
+数据库需停写后显式运行 `migrate_factor_protection.py` 与 `migrate_execution_audit.py`，两者默认预检、应用时备份，不在启动时自动迁移。SQLite 忙最多等待 50ms 后失败关闭。操作见[Paper 指引](../operations/paper.md)，带日期的部署与验收结论统一见[进度页](../status.md)。
 
 ## 存储与 Web 边界
 
@@ -350,7 +366,7 @@ Compose 的 `web` profile 将 API 与前端作为两个独立服务装配。`web
 
 市场三视图及个股两维度分别披露各源日期、覆盖和新鲜度；基本面与价格互不遮蔽。未来事件只读已发布经济批次与同批财报，在查询 UTC 日起的 14 日窗口中独立降级。重新读取只有 GET，不采集或下单；同路径保留滚动、跨页回顶，键盘标签、宽表和详情焦点由共用组件实现。
 
-Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。部署时明确指定 Web 服务，不启动交易核心；操作命令见 [README](../README.md#打开只读-web-操作台)。历史删除恢复验收保留在 [Web 重构记录](archive/web-rebuild.md) 与 [市场雷达 R7 记录](archive/market-radar-implementation-plan.md#r7部署隔离与文档)，不据此推断当前容器状态。
+Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前端仍可启动并展示明确故障态。部署时明确指定 Web 服务，不启动交易核心；操作命令见 [Web 操作指引](../operations/web.md#构建与启动)。历史删除恢复验收保留在 [Web 重构记录](../archive/web-rebuild.md) 与 [市场雷达 R7 记录](../archive/market-radar-implementation-plan.md#r7部署隔离与文档)，不据此推断当前容器状态。
 
 界面采用浅色中性背景，品牌强调色与成功、警告、错误状态色分开。公共组件统一加载、空数据和失败展示；图表具有文字摘要，抽屉支持 Escape、焦点恢复和窄屏展示。前端不在浏览器计算金融指标。详细市场交互见 [市场雷达参考](market-radar.md#页面交互与运行边界)。
 
@@ -372,13 +388,6 @@ Nginx 使用 Compose 内部 DNS 延迟解析 API，因此 API 缺席时静态前
 
 生产代码要求完整类型注解，中文注释和文档，英文运行日志。`signals/` 必须能在无网络环境下独立测试。
 
-```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src scripts tests
-uv run pytest
-uv run pre-commit run --all-files
-docker compose config --quiet
-```
+检查命令统一见[README 开发检查](../../README.md#开发检查)。纯文档修改核对事实、路径、Markdown 链接与标题锚点；Python 或前端变更仍执行对应完整检查，不将历史测试数量当作本轮结果。
 
 测试额外检查只有 `execution/gateway.py` 可以调用 `submit_order`。新增依赖、第二条执行链路、并行历史结构或 live/backtest 分叉实现都需要先修改事实源并获得确认。

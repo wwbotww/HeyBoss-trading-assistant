@@ -2,23 +2,23 @@
 
 本文描述当前代码的市场雷达实现，核对日期为 2026-09-16，代码基线为 `9709beb`。它取代已归档的实施计划作为日常模块参考；本次核对不重新证明供应商权限、真实数据新鲜度或容器在线状态。
 
-产品范围和硬性架构约束见 [项目事实源](project-context.md)，模块装配见 [技术参考](technical-reference.md#市场雷达链路)，操作命令见 [README](../README.md#同步市场雷达)。历史方案和验收证据见 [归档目录](archive/README.md)。
+产品范围和硬性架构约束见 [项目事实源](../project-context.md)，模块装配见 [技术参考](technical-reference.md#市场雷达链路)，操作命令见 [市场同步指引](../operations/market-radar.md)。历史方案和验收证据见 [归档目录](../archive/README.md)。
 
 ## 范围与数据入口
 
 市场雷达是独立只读业务域，不产生交易信号，不接入风控或审批，不修改交易标的池。界面有总览、板块、个股三个视图，个股再分“趋势与风险”“财务与估值”两种维度。
 
-[当前配置](../config/market-radar.yaml) 的固定价格池为 25 只：SPY、RSP、HYG、LQD、11 只板块 ETF 和 10 只观察股。宏观另外使用 VIX/VIX3M 指数。动态市场成员来自 State Street SPY 持仓，数量以每次成功批次为准，不能把历史验收时的 503 固定为当前成员数。
+[当前配置](../../config/market-radar.yaml) 的固定价格池为 25 只：SPY、RSP、HYG、LQD、11 只板块 ETF 和 10 只观察股。宏观另外使用 VIX/VIX3M 指数。动态市场成员来自 State Street SPY 持仓，数量以每次成功批次为准，不能把历史验收时的 503 固定为当前成员数。
 
-| 功能 | 实际输入 | 持久化与边界 |
-|---|---|---|
-| 市场、板块和个股价格指标 | EODHD EOD、拆股、分红 | 复用 NT 双 BarType 和共享 Catalog，指标读取 INTERNAL 总回报价 |
-| 当前市场宽度 | State Street SPY 当前持仓与同一价格管道 | 当前横截面代理，不提供历史 PIT 指数成员宽度 |
-| 宏观象限 | HYG/LQD、VIX/VIX3M、FRED DFII10 | FRED 当前修订观测，不具备 vintage/PIT 回放语义 |
-| 盈利修正 | 当前成员与观察股并集的 EODHD Calendar Trends | FY1 三十日修正，输出市场、观察池及 11 板块聚合 |
-| 财报事件 | 仅观察股的 EODHD Earnings Calendar | 不扩大到全市场事件请求 |
-| 财务与估值 | 观察股 EODHD Fundamentals | 当前最小规范输入及单项指标，不提供历史 PIT 基本面 |
-| 经济事件 | EODHD 美国经济事件 | 采集含当天 31 个日历日，页面显示查询日起 14 个日历日 |
+| 功能                     | 实际输入                                     | 持久化与边界                                                  |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------------------- |
+| 市场、板块和个股价格指标 | EODHD EOD、拆股、分红                        | 复用 NT 双 BarType 和共享 Catalog，指标读取 INTERNAL 总回报价 |
+| 当前市场宽度             | State Street SPY 当前持仓与同一价格管道      | 当前横截面代理，不提供历史 PIT 指数成员宽度                   |
+| 宏观象限                 | HYG/LQD、VIX/VIX3M、FRED DFII10              | FRED 当前修订观测，不具备 vintage/PIT 回放语义                |
+| 盈利修正                 | 当前成员与观察股并集的 EODHD Calendar Trends | FY1 三十日修正，输出市场、观察池及 11 板块聚合                |
+| 财报事件                 | 仅观察股的 EODHD Earnings Calendar           | 不扩大到全市场事件请求                                        |
+| 财务与估值               | 观察股 EODHD Fundamentals                    | 当前最小规范输入及单项指标，不提供历史 PIT 基本面             |
+| 经济事件                 | EODHD 美国经济事件                           | 采集含当天 31 个日历日，页面显示查询日起 14 个日历日          |
 
 EODHD `GSPC.INDX` Components 只提供盈利聚合所需的行业分类，不增删 State Street 权威成员。无法匹配的成员保留 `unclassified`，来源额外记录单独计数。价格观察池的板块配置仅供相对价格计算，不用来推断财务指标适用性。
 
@@ -26,18 +26,18 @@ EODHD `GSPC.INDX` Components 只提供盈利聚合所需的行业分类，不增
 
 当前有六个一次性同步入口，没有常驻调度；页面刷新只重新读取本地批次。
 
-| CLI | 已支持模式 | 主要发布内容 |
-|---|---|---|
-| [sync_market_radar.py](../scripts/sync_market_radar.py) | bootstrap、daily、reconcile | 固定价格池快照 |
-| [sync_market_breadth.py](../scripts/sync_market_breadth.py) | bootstrap、daily | 当前成员及四项宽度；不提供 reconcile |
-| [sync_market_macro.py](../scripts/sync_market_macro.py) | bootstrap、daily、reconcile | 风险偏好、实际利率观测及宏观象限 |
-| [sync_market_earnings.py](../scripts/sync_market_earnings.py) | 当前采集 | 成员/分类、FY1、观察股财报及统一盈利快照 |
-| [sync_market_fundamentals.py](../scripts/sync_market_fundamentals.py) | 当前采集 | 规范财报输入与基本面快照 |
-| [sync_market_economic_events.py](../scripts/sync_market_economic_events.py) | 当前采集 | 美国经济事件规范快照 |
+| CLI                                                                            | 已支持模式                  | 主要发布内容                             |
+| ------------------------------------------------------------------------------ | --------------------------- | ---------------------------------------- |
+| [sync_market_radar.py](../../scripts/sync_market_radar.py)                     | bootstrap、daily、reconcile | 固定价格池快照                           |
+| [sync_market_breadth.py](../../scripts/sync_market_breadth.py)                 | bootstrap、daily            | 当前成员及四项宽度；不提供 reconcile     |
+| [sync_market_macro.py](../../scripts/sync_market_macro.py)                     | bootstrap、daily、reconcile | 风险偏好、实际利率观测及宏观象限         |
+| [sync_market_earnings.py](../../scripts/sync_market_earnings.py)               | 当前采集                    | 成员/分类、FY1、观察股财报及统一盈利快照 |
+| [sync_market_fundamentals.py](../../scripts/sync_market_fundamentals.py)       | 当前采集                    | 规范财报输入与基本面快照                 |
+| [sync_market_economic_events.py](../../scripts/sync_market_economic_events.py) | 当前采集                    | 美国经济事件规范快照                     |
 
 后三个入口不提供历史回填参数；同日重跑更新该日批次，失败保留之前成功发布的结果。盈利和基本面不写 Catalog，经济事件也不写 Catalog。涉及价格的同步与交易节点启动同步共享 Catalog，写入必须串行。
 
-独立市场库使用 [MarketRadarRepository](../src/trading_assistant/market_radar/storage.py)，与 live、backtest 数据库分开。当前 [模型](../src/trading_assistant/market_radar/models.py) 定义十四张表：同步审计、价格、当前成员、宽度、风险偏好、宏观观测、宏观象限、盈利成员、FY1 观测、财报事件、盈利快照、基本面观测、基本面快照及经济事件快照。
+独立市场库使用 [MarketRadarRepository](../../src/trading_assistant/market_radar/storage.py)，与 live、backtest 数据库分开。当前 [模型](../../src/trading_assistant/market_radar/models.py) 定义十四张表：同步审计、价格、当前成员、宽度、风险偏好、宏观观测、宏观象限、盈利成员、FY1 观测、财报事件、盈利快照、基本面观测、基本面快照及经济事件快照。
 
 每类规范输入/派生快照与对应 COMPLETE 状态在数据库事务内发布；请求或结构错误不得发布残缺批次，合法缺失按各指标语义保留。Catalog 与 SQLite 没有跨存储事务：同步失败可能已经留下合法 Catalog 增量和 FAILED 审计，不保证整站原子刷新，也不要求不同来源具有同一日期。
 
@@ -45,19 +45,19 @@ Web 只读取已发布结果，不建表、不连接供应商、不扫描全市�
 
 ## 价格指标
 
-实现见 [metrics.py](../src/trading_assistant/market_radar/metrics.py)，回归见 [test_metrics.py](../tests/market_radar/test_metrics.py)。以下 t 表示序列最新观测，窗口按有效观测数量计，不按自然日计。
+实现见 [metrics.py](../../src/trading_assistant/market_radar/metrics.py)，回归见 [test_metrics.py](../../tests/market_radar/test_metrics.py)。以下 t 表示序列最新观测，窗口按有效观测数量计，不按自然日计。
 
-| 指标 | 当前计算 |
-|---|---|
-| N 日总回报 | `close[t] / close[t-N] - 1`，要求 N+1 个观测 |
-| 距 200 日均线 | 当前收盘价除以最近 200 个收盘价算术均值，再减 1 |
-| RSP/SPY 确认 | RSP 与 SPY 的 20 日总回报之差 |
-| 板块 RS20、RS60 | 板块 ETF 与 SPY 同窗口总回报之差 |
-| 个股 126–21 动量 | `close[t-21] / close[t-126] - 1`，要求 127 个观测 |
-| 行业相对动量 | 个股与所属板块 ETF 的 126–21 动量之差 |
-| 20 日实现波动率 | 最近 20 个对数收益的样本标准差乘以 `sqrt(252)` |
-| 126 日最大回撤 | 最近 126 个收盘价相对该窗口内运行峰值的最小收益，保留负值 |
-| ATR20 比率 | 最近 20 个 True Range 的算术均值除以最新收盘价；要求 21 根 Bar |
+| 指标             | 当前计算                                                       |
+| ---------------- | -------------------------------------------------------------- |
+| N 日总回报       | `close[t] / close[t-N] - 1`，要求 N+1 个观测                   |
+| 距 200 日均线    | 当前收盘价除以最近 200 个收盘价算术均值，再减 1                |
+| RSP/SPY 确认     | RSP 与 SPY 的 20 日总回报之差                                  |
+| 板块 RS20、RS60  | 板块 ETF 与 SPY 同窗口总回报之差                               |
+| 个股 126–21 动量 | `close[t-21] / close[t-126] - 1`，要求 127 个观测              |
+| 行业相对动量     | 个股与所属板块 ETF 的 126–21 动量之差                          |
+| 20 日实现波动率  | 最近 20 个对数收益的样本标准差乘以 `sqrt(252)`                 |
+| 126 日最大回撤   | 最近 126 个收盘价相对该窗口内运行峰值的最小收益，保留负值      |
+| ATR20 比率       | 最近 20 个 True Range 的算术均值除以最新收盘价；要求 21 根 Bar |
 
 快照以 SPY 最新价格日期为基准；标的最新日期未对齐时为 unavailable，有当日价格但历史不足时为 insufficient_history。缺失指标保持 null，不能补零或前向填充。价格口径只供监测，不代表实际可成交价格。
 
@@ -74,7 +74,7 @@ Web 只读取已发布结果，不建表、不连接供应商、不扫描全市�
 
 ## 宏观象限
 
-实现见 [macro.py](../src/trading_assistant/market_radar/macro.py)、[regime.py](../src/trading_assistant/market_radar/regime.py) 和对应测试。
+实现见 [macro.py](../../src/trading_assistant/market_radar/macro.py)、[regime.py](../../src/trading_assistant/market_radar/regime.py) 和对应测试。
 
 四条价格输入必须为正有限值、具有同一最新日期，并在精确共同日期集合上计算，不前向填充：
 
@@ -91,7 +91,7 @@ Robust Z 使用最近最多 756 个输入，至少 504 个；公式为 `(当前�
 
 ## 盈利修正与财报事件
 
-实现见 [eodhd_calendar.py](../src/trading_assistant/market_radar/eodhd_calendar.py)、[earnings.py](../src/trading_assistant/market_radar/earnings.py) 和 [service.py](../src/trading_assistant/market_radar/service.py)。
+实现见 [eodhd_calendar.py](../../src/trading_assistant/market_radar/eodhd_calendar.py)、[earnings.py](../../src/trading_assistant/market_radar/earnings.py) 和 [service.py](../../src/trading_assistant/market_radar/service.py)。
 
 Trends 请求当前市场成员与观察股的并集，按固定 50 只顺序分批；每只只选财政期日期最大的 `+1y` 记录。任一批请求或结构校验失败，整次同步失败。财报事件只请求观察股，范围为采集 UTC 日前 365 日至后 60 日。
 
@@ -106,7 +106,7 @@ Trends 请求当前市场成员与观察股的并集，按固定 50 只顺序分
 
 ## 当前基本面
 
-实现见 [eodhd_fundamentals.py](../src/trading_assistant/market_radar/eodhd_fundamentals.py)、[fundamentals.py](../src/trading_assistant/market_radar/fundamentals.py)，输入和边界回归见 [test_fundamentals.py](../tests/market_radar/test_fundamentals.py)。
+实现见 [eodhd_fundamentals.py](../../src/trading_assistant/market_radar/eodhd_fundamentals.py)、[fundamentals.py](../../src/trading_assistant/market_radar/fundamentals.py)，输入和边界回归见 [test_fundamentals.py](../../tests/market_radar/test_fundamentals.py)。
 
 采集完整配置观察池，并使用交易配置中显式的 EODHD 身份。行业适用性由供应商 Sector/Industry 决定：普通公司计算经营指标；金融企业仅保留 ROE/PB；REIT 的通用指标不适用；分类未知有独立原因。
 
@@ -121,7 +121,7 @@ TTM 要求四个财政期，相邻期末间隔为 70–110 日，最早至最新
 
 ## 经济事件与十四日事件轴
 
-实现见 [economic_events.py](../src/trading_assistant/market_radar/economic_events.py)、[eodhd_economic_events.py](../src/trading_assistant/market_radar/eodhd_economic_events.py) 和 [只读查询层](../src/trading_assistant/application/market_radar.py)。
+实现见 [economic_events.py](../../src/trading_assistant/market_radar/economic_events.py)、[eodhd_economic_events.py](../../src/trading_assistant/market_radar/eodhd_economic_events.py) 和 [只读查询层](../../src/trading_assistant/application/market_radar.py)。
 
 采集国家固定 US，请求采集 UTC 日 D 的 [D, D+30] 闭区间。最多请求 offset=0、1000 两页，每页 limit=1000，必须出现不足千行的尾页；因此成功批次最多包含 1999 条原始记录。满两页、超量、同键冲突或跨页交叠失败关闭；同页完全重复可合并。完成只代表收到的响应通过校验，不承诺供应商覆盖完整或分页原子性。
 
@@ -133,41 +133,41 @@ TTM 要求四个财政期，相邻期末间隔为 70–110 日，最早至最新
 
 覆盖为实际请求范围与展示范围的交集；陈旧不删除仍在展示窗内的事件。合法空批次可为 available，未采集或零覆盖不能被解释为零事件。一源损坏时保留另一源，两源都损坏返回脱敏 503；未来采集时刻不合法，未来事件日期合法。
 
-交易日历来源已经选定，接入仍属待实施工作；当前事件轴继续使用十四个日历日，不能因后续新增依赖就自动改为十个交易日。
+交易执行与因子接入已经统一使用 XNYS 日历；市场事件轴仍按本模块契约使用十四个日历日，没有改为十个交易日。两种日期窗口服务于不同业务，不因共享日历依赖而自动切换。
 
 ## 查询接口与新鲜度
 
-全部市场路由见 [market_radar.py](../src/trading_assistant/web_api/routes/market_radar.py)，均为 GET：
+全部市场路由见 [market_radar.py](../../src/trading_assistant/web_api/routes/market_radar.py)，均为 GET：
 
-| 路由后缀（共同前缀 /api/market-radar） | 返回内容 |
-|---|---|
-| /summary | 价格快照概览和模块状态 |
-| /breadth | 当前成员宽度及覆盖 |
-| /macro | 后端分类的宏观象限 |
-| /earnings | 统一盈利聚合 |
-| /fundamentals | 当前基本面与独立来源新鲜度 |
-| /events | 含当天十四日事件轴 |
-| /sectors、/sectors/{sector_id} | 板块价格指标 |
-| /stocks、/stocks/{instrument_id} | 观察股价格指标及详情 |
+| 路由后缀（共同前缀 /api/market-radar） | 返回内容                   |
+| -------------------------------------- | -------------------------- |
+| /summary                               | 价格快照概览和模块状态     |
+| /breadth                               | 当前成员宽度及覆盖         |
+| /macro                                 | 后端分类的宏观象限         |
+| /earnings                              | 统一盈利聚合               |
+| /fundamentals                          | 当前基本面与独立来源新鲜度 |
+| /events                                | 含当天十四日事件轴         |
+| /sectors、/sectors/{sector_id}         | 板块价格指标               |
+| /stocks、/stocks/{instrument_id}       | 观察股价格指标及详情       |
 
 个股价格列表接受 sector、query、sort、direction、offset、limit，limit 上限 50；其他上述集合快照接口没有时间窗或历史回放参数。详情身份必须属于已发布快照，不根据 URL 自动扩充观察池。API schema 从 Python 生成，前端不手写第二套字段模型。
 
-新鲜度阈值来自 [application/market_radar.py](../src/trading_assistant/application/market_radar.py)，均在“超过”边界后标记陈旧：
+新鲜度阈值来自 [application/market_radar.py](../../src/trading_assistant/application/market_radar.py)，均在“超过”边界后标记陈旧：
 
-| 来源 | 判断依据 | 陈旧阈值 |
-|---|---|---|
-| 当前宽度 | 成员日期相对查询 UTC 日期 | 7 个日历日 |
-| 宏观 | 风险价格日期、实际利率观测日期分别判断 | 3 个日历日 |
-| 盈利修正 | 快照采集日期 | 3 个日历日 |
-| 基本面本地采集 | 快照采集日期 | 14 个日历日 |
-| 基本面供应商更新 | 每个标的供应商更新日期，缺失为 unknown | 3 个日历日 |
-| 经济/财报事件 | 各自采集时间与查询时刻的秒差 | 86400 秒 |
+| 来源             | 判断依据                               | 陈旧阈值    |
+| ---------------- | -------------------------------------- | ----------- |
+| 当前宽度         | 成员日期相对查询 UTC 日期              | 7 个日历日  |
+| 宏观             | 风险价格日期、实际利率观测日期分别判断 | 3 个日历日  |
+| 盈利修正         | 快照采集日期                           | 3 个日历日  |
+| 基本面本地采集   | 快照采集日期                           | 14 个日历日 |
+| 基本面供应商更新 | 每个标的供应商更新日期，缺失为 unknown | 3 个日历日  |
+| 经济/财报事件    | 各自采集时间与查询时刻的秒差           | 86400 秒    |
 
 价格单项的 complete 只表示在快照日期历史充分，不证明今天数据已刷新。来源状态、字段有效性、日期覆盖与新鲜度是不同维度；已成功读取的 stale/partial 保留原值和说明，损坏不能伪装成 missing 或 empty。基本面缺库/缺表分别显示 missing/empty，请求不建库或迁移；结构、元数据及时间损坏返回脱敏错误。
 
 ## 页面交互与运行边界
 
-实现见 [MarketRadarPage.vue](../web-ui/src/pages/MarketRadarPage.vue)、[router.ts](../web-ui/src/router.ts) 和 [页面测试](../web-ui/tests/market-radar-page.test.ts)。
+实现见 [MarketRadarPage.vue](../../web-ui/src/pages/MarketRadarPage.vue)、[router.ts](../../web-ui/src/router.ts) 和 [页面测试](../../web-ui/tests/market-radar-page.test.ts)。
 
 - 总览展示价格、当前宽度、宏观象限、盈利及未来事件；板块视图展示价格强弱与盈利聚合；个股分别展示趋势风险、财务估值。未实现早期设想中的历史宽度图、板块轮动或综合排名。
 - 价格、基本面和其他来源独立读取；板块价格缺失不能遮蔽已经读到的盈利详情。摘要描述自身模块状态，不替其他请求证明成功。
@@ -183,4 +183,4 @@ Compose 权限与只读边界见 [技术参考](technical-reference.md#存储与
 
 本参考通过对照现有配置、计算函数、存储与查询逻辑、CLI 参数、路由和相关测试整理。修改指标时同步此处及对应测试；新增能力先更新实施方案，验收后再写入当前能力。
 
-[历史 R0–R7 记录](archive/market-radar-implementation-plan.md) 保留原始验收证据和未采纳设想的来由。本次整理不修改因子交付、因子持仓保护或两仓联合实施方案，也不把待实现能力写成当前实现。
+[历史 R0–R7 记录](../archive/market-radar-implementation-plan.md) 保留原始验收证据和未采纳设想的来由。运行步骤见[市场同步指引](../operations/market-radar.md)，项目进度见[进度页](../status.md)；本参考不根据历史部署或采集日期判断服务当前状态。
