@@ -4,14 +4,45 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.market_radar.test_economic_events import economic_event
 from tests.web_api import seed_fundamental_data, seed_market_radar_data, seed_web_data, web_settings
+from trading_assistant.market_radar.economic_events import EconomicEventBatch, EconomicEventSnapshot
 from trading_assistant.market_radar.metrics import BreadthMetric
+from trading_assistant.market_radar.storage import MarketRadarRepository
 from trading_assistant.web_api.app import create_app
+
+
+@pytest.mark.parametrize("state", ["missing", "old_schema", "configured", "partial_schema"])
+def test_sync_status_get_is_read_only_and_distinguishes_unconfigured_from_damage(
+    tmp_path: Path, state: str
+) -> None:
+    database = tmp_path / "market-radar.db"
+    if state != "missing":
+        seed_market_radar_data(tmp_path)
+        if state in {"old_schema", "partial_schema"}:
+            with sqlite3.connect(database) as connection:
+                connection.execute("DROP TABLE daily_sync_worker")
+                if state == "old_schema":
+                    connection.execute("DROP TABLE daily_sync_attempts")
+    before = database.read_bytes() if database.exists() else None
+    with TestClient(create_app(web_settings(tmp_path, account=""))) as client:
+        response = client.get("/api/market-radar/sync-status")
+        assert response.status_code == (503 if state == "partial_schema" else 200)
+        if response.status_code == 200:
+            payload = response.json()
+            assert payload["worker_state"] == "not_configured"
+            assert len(payload["jobs"]) == 6
+            assert payload["jobs"][0]["target_satisfied"] is False
+        assert str(database) not in response.text
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            assert client.request(method, "/api/market-radar/sync-status").status_code == 405
+    assert (database.read_bytes() if database.exists() else None) == before
 
 
 @pytest.mark.parametrize("state", ["missing", "corrupt"])
@@ -50,15 +81,61 @@ def test_market_database_failure_does_not_break_other_read_only_pages(
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
-def test_events_get_preserves_fields_scope_and_read_only_contract(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lookback", [0, 7])
+def test_events_get_preserves_fields_scope_and_read_only_contract(
+    tmp_path: Path, lookback: int
+) -> None:
     seed_market_radar_data(tmp_path)
     database = tmp_path / "market-radar.db"
+    if lookback:
+        writer = MarketRadarRepository(f"sqlite:///{database}")
+        old = writer.latest_economic_event_snapshot()
+        assert old is not None
+        start = old.as_of_date - timedelta(days=7)
+        snapshot = EconomicEventSnapshot.model_validate(
+            old.model_dump()
+            | {
+                "window_start": start,
+                "batch": EconomicEventBatch(
+                    events=(
+                        economic_event(event_date=start, actual=0.0),
+                        economic_event(event_date=old.as_of_date - timedelta(days=1), actual=None),
+                        *old.batch.events,
+                    ),
+                    request_count=1,
+                    raw_record_count=3,
+                    duplicate_count=0,
+                ),
+            }
+        )
+        writer.start_sync_run(
+            run_id="seven-day",
+            source=snapshot.source,
+            started_at_utc=snapshot.captured_at_utc,
+            requested_start_date=start,
+            requested_end_date=snapshot.window_end,
+            instrument_count=0,
+        )
+        writer.publish_economic_events_and_complete("seven-day", snapshot=snapshot)
+        writer.close()
     before = database.read_bytes()
     with TestClient(create_app(web_settings(tmp_path, account=""))) as client:
         response = client.get("/api/market-radar/events")
         assert response.status_code == 200
         payload = response.json()
         assert len(payload["days"]) == 14
+        recent = payload["recent_economic"]
+        assert len(recent["days"]) == 7
+        assert recent["window_start"] == recent["days"][0]["day"]
+        assert recent["window_end"] == recent["days"][-1]["day"]
+        assert recent["source"]["captured_at_utc"] == payload["economic_source"]["captured_at_utc"]
+        assert recent["source"]["coverage"]["state"] == ("covered" if lookback else "uncovered")
+        assert recent["source"]["window_event_count"] == (2 if lookback else None)
+        assert recent["source"]["coverage"]["covered_days"] == lookback
+        if lookback:
+            assert recent["days"][0]["economic_events"][0]["actual"] == 0
+            assert recent["days"][-1]["economic_events"][0]["actual"] is None
+        assert all(not day["earnings_events"] for day in recent["days"])
         assert payload["window_start"] == payload["days"][0]["day"]
         assert payload["window_end"] == payload["days"][-1]["day"]
         for key in ("economic_source", "earnings_source"):
@@ -104,6 +181,13 @@ def test_event_missing_sources_do_not_create_database_or_tables(tmp_path: Path, 
         assert len(payload["days"]) == 14
         assert all(
             not day["economic_events"] and not day["earnings_events"] for day in payload["days"]
+        )
+        recent = payload["recent_economic"]
+        assert recent["source"]["source_state"] == ("missing" if state == "missing" else "empty")
+        assert recent["source"]["coverage"] is recent["source"]["window_event_count"] is None
+        assert len(recent["days"]) == 7
+        assert all(
+            not day["economic_events"] and not day["earnings_events"] for day in recent["days"]
         )
     assert (database.read_bytes() if database.exists() else None) == before
 
@@ -290,9 +374,9 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
     assert payload["coverage"] == {"eligible": 25, "observed": 25, "ratio": 1.0}
     assert payload["market"]["spy_return_20"]["value"] == 0.04
     assert [item["state"] for item in payload["modules"]] == [
+        "stale",
         "complete",
-        "complete",
-        "complete",
+        "stale",
         "complete",
         "complete",
         "complete",
@@ -307,6 +391,12 @@ def test_price_radar_endpoints_expose_only_complete_snapshot(tmp_path: Path) -> 
     assert breadth_payload["freshness"] == {
         "membership_age_days": 1,
         "stale_after_days": 7,
+        "price": {
+            "actual_as_of_date": breadth_payload["as_of_date"],
+            "expected_as_of_date": breadth_payload["as_of_date"],
+            "lag_sessions": 0,
+            "state": "fresh",
+        },
     }
     assert breadth_payload["b50"] == {
         "value": 0.5,

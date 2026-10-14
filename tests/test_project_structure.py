@@ -285,6 +285,7 @@ def test_web_compose_services_are_isolated_and_read_only() -> None:
         "${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog:ro",
         "${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data:ro",
         "${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports:ro",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/data:/app/market-radar/data:ro",
     ]
 
     assert web_ui["profiles"] == ["web"]
@@ -310,22 +311,33 @@ def test_market_sync_compose_service_is_explicit_and_credential_scoped() -> None
     assert set(sync["environment"]) == {
         "EODHD_API_TOKEN",
         "FRED_API_KEY",
-        "CATALOG_PATH",
+        "MARKET_RADAR_CATALOG_PATH",
         "MARKET_RADAR_DATABASE_URL",
         "MARKET_RADAR_REPORT_ROOT",
         "LOG_LEVEL",
     }
     assert set(sync).isdisjoint({"env_file", "ports", "expose", "depends_on", "restart"})
     assert sync["volumes"] == [
-        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog",
-        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data",
-        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/catalog:/app/market-radar/catalog",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/data:/app/market-radar/data",
+        "${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/reports:/app/market-radar/reports",
     ]
-    assert sync["environment"]["CATALOG_PATH"] == services["web-api"]["environment"]["CATALOG_PATH"]
+    assert (
+        sync["environment"]["MARKET_RADAR_CATALOG_PATH"]
+        != services["web-api"]["environment"]["CATALOG_PATH"]
+    )
     assert (
         sync["environment"]["MARKET_RADAR_DATABASE_URL"]
         == services["web-api"]["environment"]["MARKET_RADAR_DATABASE_URL"]
     )
+
+    daily = services["market-radar-daily"]
+    assert daily["environment"] == sync["environment"]
+    assert daily["volumes"] == sync["volumes"]
+    assert set(daily).isdisjoint({"env_file", "ports", "expose", "depends_on"})
+    assert daily["profiles"] == ["market-radar"]
+    assert daily["restart"] == "unless-stopped"
+    assert daily["healthcheck"]["test"][-1] == "--healthcheck"
 
 
 def test_web_ui_runtime_proxy_preserves_same_origin_failure_boundary() -> None:

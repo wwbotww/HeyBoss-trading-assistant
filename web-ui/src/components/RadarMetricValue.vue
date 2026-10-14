@@ -2,11 +2,13 @@
 import { computed } from 'vue'
 
 import type { RadarMetric } from '../api/types'
-import { formatPercent } from '../utils/format'
+import { formatNumber, formatPercent } from '../utils/format'
 
 const props = withDefaults(
   defineProps<{
     metric: RadarMetric
+    unit: 'percent' | 'percentage_points'
+    colorMode: 'directional' | 'neutral'
     compact?: boolean
   }>(),
   {
@@ -18,17 +20,22 @@ const tone = computed(() => {
   if (props.metric.value === null) {
     return 'muted'
   }
-  return props.metric.value >= 0 ? 'positive' : 'negative'
+  if (props.colorMode === 'neutral' || props.metric.value === 0) return 'neutral'
+  return props.metric.value > 0 ? 'positive' : 'negative'
+})
+
+const value = computed(() => {
+  if (props.metric.value === null) return '—'
+  return props.unit === 'percentage_points'
+    ? `${formatNumber(props.metric.value * 100)} 个百分点`
+    : formatPercent(props.metric.value)
 })
 
 const detail = computed(() => {
-  if (props.metric.validity === 'complete') {
-    return `${String(props.metric.observations)} 个观测`
-  }
-  if (props.metric.validity === 'insufficient_history') {
-    return `历史 ${String(props.metric.observations)} / ${String(props.metric.required)}`
-  }
-  return '数据不可用'
+  if (props.metric.validity === 'unavailable') return '数据不可用'
+  const history = `可用历史 ${String(props.metric.observations)} 根日线`
+  if (props.compact && props.metric.validity === 'complete') return history
+  return `${history} / 最低需要 ${String(props.metric.required)} 根${props.unit === 'percentage_points' ? '（两侧历史取较短值）' : ''}`
 })
 </script>
 
@@ -37,7 +44,7 @@ const detail = computed(() => {
     class="radar-metric"
     :class="[`radar-metric--${tone}`, { 'radar-metric--compact': compact }]"
   >
-    <strong class="tabular">{{ formatPercent(metric.value) }}</strong>
+    <strong class="tabular">{{ value }}</strong>
     <span>{{ detail }}</span>
   </div>
 </template>

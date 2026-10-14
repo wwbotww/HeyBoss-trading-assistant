@@ -85,7 +85,10 @@ def test_settings_and_unexpected_errors_do_not_expose_internal_values(tmp_path: 
     assert sqlite_database_path("sqlite:///:memory:", tmp_path) is None
     assert sqlite_database_path("postgresql://localhost/db", tmp_path) is None
     settings = WebApiSettings.from_environment({}, project_root=tmp_path)
-    assert settings.market_radar_database_path == tmp_path / "data" / "market-radar.db"
+    assert (
+        settings.market_radar_database_path
+        == tmp_path / "runtime/market-radar/data/market-radar.db"
+    )
     with pytest.raises(ValueError, match="positive"):
         WebApiSettings.from_environment(
             {"PORTFOLIO_SNAPSHOT_STALE_SECONDS": "0"},

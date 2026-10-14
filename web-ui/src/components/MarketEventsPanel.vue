@@ -22,17 +22,27 @@ const props = defineProps<{
   error: string | undefined
   kind: string
   date: string
+  window: 'upcoming' | 'recent'
 }>()
 const emit = defineEmits<{
   retry: []
   'update:kind': [kind: string]
   'update:date': [date: string]
+  'update:window': [window: 'upcoming' | 'recent']
 }>()
 const tabs = [
   { value: 'all', label: '全部' },
   { value: 'economic', label: '美国经济' },
   { value: 'earnings', label: '观察股财报' },
 ]
+const windowTabs = [
+  { value: 'upcoming', label: '未来十四日' },
+  { value: 'recent', label: '最近七日经济事件' },
+]
+const windowData = computed(() =>
+  props.window === 'recent' ? props.data?.recent_economic : props.data,
+)
+const activeKind = computed(() => (props.window === 'recent' ? 'economic' : props.kind))
 const sourceLabels = {
   available: '批次可读',
   empty: '尚未发布',
@@ -44,17 +54,19 @@ const sourceLabels = {
 const sessionLabels = { before_market: '盘前', after_market: '盘后', unknown: '时间未知' }
 const sources = computed(() =>
   props.data
-    ? [
-        { kind: 'economic', label: '美国经济', value: props.data.economic_source },
-        { kind: 'earnings', label: '观察股财报', value: props.data.earnings_source },
-      ]
+    ? props.window === 'recent'
+      ? [{ kind: 'economic', label: '美国经济', value: props.data.recent_economic.source }]
+      : [
+          { kind: 'economic', label: '美国经济', value: props.data.economic_source },
+          { kind: 'earnings', label: '观察股财报', value: props.data.earnings_source },
+        ]
     : [],
 )
 const visibleSources = computed(() =>
-  sources.value.filter((source) => props.kind === 'all' || source.kind === props.kind),
+  sources.value.filter((source) => activeKind.value === 'all' || source.kind === activeKind.value),
 )
 const days = computed(() =>
-  (props.data?.days ?? []).filter((day) => !props.date || day.day === props.date),
+  (windowData.value?.days ?? []).filter((day) => !props.date || day.day === props.date),
 )
 const selected = ref<{ kind: 'economic' | 'earnings'; key: string } | null>(null)
 const notice = ref('')
@@ -76,20 +88,18 @@ function earningsKey(item: EarningsEvent): string {
 const selectedEvent = computed(() => {
   if (!selected.value || props.error) return null
   if (selected.value.kind === 'economic') {
-    const item = props.data?.days
+    const item = windowData.value?.days
       .flatMap((day) => day.economic_events)
       .find((item) => economicKey(item) === selected.value?.key)
     return item ? { kind: 'economic' as const, item } : null
   }
-  const item = props.data?.days
+  const item = windowData.value?.days
     .flatMap((day) => day.earnings_events)
     .find((item) => earningsKey(item) === selected.value?.key)
   return item ? { kind: 'earnings' as const, item } : null
 })
-const detailSource = computed(() =>
-  selectedEvent.value?.kind === 'economic'
-    ? props.data?.economic_source
-    : props.data?.earnings_source,
+const detailSource = computed(
+  () => sources.value.find((source) => source.kind === selectedEvent.value?.kind)?.value,
 )
 const detailTitle = computed(() => {
   const entry = selectedEvent.value
@@ -110,7 +120,7 @@ const detailFields = computed<ReadonlyArray<readonly [string, string | number | 
       ['来源时钟 · 时区未确认', item.source_time],
       ['比较口径 · comparison', item.comparison],
       ['期间 · period', item.period],
-      ['实际值 · actual', item.actual],
+      ['实际值 · actual', item.actual ?? '未取得实际值'],
       ['预期值 · estimate', item.estimate],
       ['前值 · previous', item.previous],
       ['变化 · change', item.change],
@@ -129,7 +139,7 @@ const detailFields = computed<ReadonlyArray<readonly [string, string | number | 
   ]
 })
 
-watch([() => props.data, () => props.error], () => {
+watch([() => props.data, () => props.error, () => props.window], () => {
   if (selected.value && !selectedEvent.value) {
     selected.value = null
     notice.value = props.error
@@ -165,8 +175,8 @@ function dayCount(day: MarketEventDay): string {
 }
 function eventCount(day: MarketEventDay): number {
   return (
-    (props.kind !== 'earnings' ? day.economic_events.length : 0) +
-    (props.kind !== 'economic' ? day.earnings_events.length : 0)
+    (activeKind.value !== 'earnings' ? day.economic_events.length : 0) +
+    (activeKind.value !== 'economic' ? day.earnings_events.length : 0)
   )
 }
 </script>
@@ -176,8 +186,14 @@ function eventCount(day: MarketEventDay): number {
     <header class="events-header">
       <div>
         <p class="eyebrow"><CalendarDays :size="15" aria-hidden="true" /> Event horizon</p>
-        <h3 id="events-title">未来事件</h3>
-        <p>含当天的 14 个日历日 · 独立于行情、盈利修正与交易状态</p>
+        <h3 id="events-title">{{ window === 'recent' ? '最近七日经济事件结果' : '未来事件' }}</h3>
+        <p>
+          {{
+            window === 'recent'
+              ? '截至昨天的 7 个日历日 · 实际值取自最近成功采集，缺失不代表未公布'
+              : '含当天的 14 个日历日 · 独立于行情、盈利修正与交易状态'
+          }}
+        </p>
       </div>
       <button
         ref="reloadButton"
@@ -191,6 +207,14 @@ function eventCount(day: MarketEventDay): number {
         }}
       </button>
     </header>
+    <div class="event-filters event-window-filter">
+      <SegmentedTabs
+        :model-value="window"
+        :tabs="windowTabs"
+        label="事件窗口筛选"
+        @update:model-value="emit('update:window', $event === 'recent' ? 'recent' : 'upcoming')"
+      />
+    </div>
     <DataState v-if="loading" state="loading" title="正在读取已发布事件" />
     <DataState
       v-else-if="error"
@@ -202,8 +226,8 @@ function eventCount(day: MarketEventDay): number {
     />
     <template v-else-if="data">
       <p class="events-read-time">
-        窗口 {{ data.window_start }} — {{ data.window_end }} · 读取于
-        {{ formatDateTime(data.observed_at_utc) }}。不会自动滚动到次日，请按需重新读取。
+        窗口 {{ windowData?.window_start }} — {{ windowData?.window_end }} · 读取于
+        {{ formatDateTime(data.observed_at_utc) }}。页面跨 UTC 午夜会自动重新读取。
       </p>
       <div class="event-sources">
         <article
@@ -251,7 +275,7 @@ function eventCount(day: MarketEventDay): number {
               />
               <StatusPill
                 :status="source.value.coverage?.state === 'covered' ? 'neutral' : 'partial'"
-                :label="`日期覆盖 ${source.value.coverage?.covered_days ?? 0} / 14 日`"
+                :label="`日期覆盖 ${source.value.coverage?.covered_days ?? 0} / ${windowData?.days.length ?? 0} 日`"
               />
             </div>
             <p v-if="source.value.coverage?.state !== 'covered'" class="event-gap">
@@ -281,7 +305,7 @@ function eventCount(day: MarketEventDay): number {
       <p class="events-boundary">
         覆盖仅表示请求日期范围，不保证供应商事件完整。来源日期与时钟未经时区确认；不提供重要性、利好利空判断或交易动作。
       </p>
-      <div class="event-filters">
+      <div v-if="window === 'upcoming'" class="event-filters">
         <SegmentedTabs
           :model-value="kind"
           :tabs="tabs"
@@ -297,7 +321,7 @@ function eventCount(day: MarketEventDay): number {
       </div>
       <div class="event-dates" role="group" aria-label="事件日期筛选">
         <button
-          v-for="day in data.days"
+          v-for="day in windowData?.days"
           :key="day.day"
           type="button"
           :aria-label="`筛选 ${day.day}`"
@@ -313,7 +337,7 @@ function eventCount(day: MarketEventDay): number {
         <article v-for="day in days" :key="day.day" class="event-day">
           <header>
             <h4>{{ day.day }}</h4>
-            <span v-if="day.day === data.window_start">窗口首日</span>
+            <span v-if="day.day === windowData?.window_start">窗口首日</span>
           </header>
           <div class="event-day-content">
             <div class="day-source-states">
@@ -321,7 +345,10 @@ function eventCount(day: MarketEventDay): number {
                 {{ source.label }} · {{ daySourceLabel(source.value, day) }}
               </p>
             </div>
-            <ul v-if="kind !== 'earnings' && day.economic_events.length" aria-label="美国经济事件">
+            <ul
+              v-if="activeKind !== 'earnings' && day.economic_events.length"
+              aria-label="美国经济事件"
+            >
               <li v-for="item in day.economic_events" :key="economicKey(item)">
                 <button
                   class="event-row"
@@ -333,7 +360,11 @@ function eventCount(day: MarketEventDay): number {
                     ><small
                       >美国经济 · {{ item.comparison || '比较口径未确认' }} ·
                       {{ item.period || '期间未确认' }}</small
-                    ><strong>{{ item.event_type }}</strong></span
+                    ><strong>{{ item.event_type }}</strong>
+                    <small v-if="window === 'recent'" class="event-result"
+                      >实际值 {{ item.actual ?? '未取得实际值' }} · 预期
+                      {{ item.estimate ?? '—' }} · 前值 {{ item.previous ?? '—' }}</small
+                    ></span
                   >
                   <span class="event-time"
                     >{{ item.source_time || '时间未确认'
@@ -343,7 +374,7 @@ function eventCount(day: MarketEventDay): number {
               </li>
             </ul>
             <ul
-              v-if="kind !== 'economic' && day.earnings_events.length"
+              v-if="activeKind !== 'economic' && day.earnings_events.length"
               aria-label="观察股财报事件"
             >
               <li v-for="item in day.earnings_events" :key="earningsKey(item)">
@@ -389,7 +420,7 @@ function eventCount(day: MarketEventDay): number {
               ? '数值原样展示，单位未确认；change_percentage 不乘 100，也不标成已确认百分比。'
               : '财报时段保留盘前 / 盘后 / 未知，不映射成精确开收盘时间。'
           }}
-          缺失值用 — 表示来源未提供，不补零、不推导 surprise。
+          实际值缺失标为“未取得实际值”，其余缺失字段显示 —；不补零、不推导 surprise。
         </p>
         <dl class="event-detail-fields">
           <div v-for="[label, value] in detailFields" :key="label">
@@ -558,6 +589,12 @@ dd {
 }
 .event-filters {
   margin-bottom: 22px;
+}
+.event-window-filter {
+  margin-top: 18px;
+}
+.event-result {
+  overflow-wrap: anywhere;
 }
 .event-filters :deep(.segmented-tabs) {
   max-width: 100%;

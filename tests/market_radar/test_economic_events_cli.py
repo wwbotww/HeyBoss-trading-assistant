@@ -34,7 +34,7 @@ def test_economic_cli_uses_environment_and_prints_empty_success(
     data_config = tmp_path / "http.yaml" if override else cli.PROJECT_ROOT / "config" / "data.yaml"
     monkeypatch.setenv("EODHD_API_TOKEN", " test-token ")
     if override:
-        monkeypatch.setenv("MARKET_RADAR_DATABASE_URL", "sqlite:////tmp/isolated.db")
+        monkeypatch.setenv("MARKET_RADAR_DATABASE_URL", f"sqlite:///{tmp_path / 'isolated.db'}")
     else:
         monkeypatch.delenv("MARKET_RADAR_DATABASE_URL", raising=False)
 
@@ -42,9 +42,9 @@ def test_economic_cli_uses_environment_and_prints_empty_success(
         assert kwargs["eodhd_api_token"] == "test-token"  # noqa: S105
         assert kwargs["data_config_path"] == data_config
         expected_database = (
-            "sqlite:////tmp/isolated.db"
+            f"sqlite:///{tmp_path / 'isolated.db'}"
             if override
-            else (f"sqlite:///{cli.PROJECT_ROOT / 'data' / 'market-radar.db'}")
+            else f"sqlite:///{tmp_path}/cli-runtime/market-radar/data/market-radar.db"
         )
         assert kwargs["database_url"] == expected_database
         assert set(kwargs) == {"database_url", "eodhd_api_token", "data_config_path"}
@@ -54,7 +54,7 @@ def test_economic_cli_uses_environment_and_prints_empty_success(
             source="eodhd_economic_events",
             snapshot_date=ECONOMIC_AT.date(),
             captured_at_utc=ECONOMIC_AT,
-            window_start=ECONOMIC_AT.date(),
+            window_start=ECONOMIC_AT.date() - timedelta(days=7),
             window_end=ECONOMIC_AT.date() + timedelta(days=30),
             request_count=1,
             raw_record_count=0,
@@ -76,7 +76,7 @@ def test_economic_cli_uses_environment_and_prints_empty_success(
         "source": "eodhd_economic_events",
         "snapshot_date": "2026-09-05",
         "captured_at_utc": "2026-09-05 01:00:00+00:00",
-        "window_start": "2026-09-05",
+        "window_start": "2026-08-29",
         "window_end": "2026-10-05",
         "request_count": "1",
         "raw_record_count": "0",

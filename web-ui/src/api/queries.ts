@@ -20,6 +20,7 @@ import {
   fetchMarketRadarStock,
   fetchMarketRadarStocks,
   fetchMarketRadarSummary,
+  fetchMarketRadarSyncStatus,
   fetchOrder,
   fetchOrders,
   fetchOverview,
@@ -62,6 +63,7 @@ export const queryKeys = {
   catalog: ['data', 'catalog'] as const,
   dataQuality: ['data', 'quality', 'latest'] as const,
   system: ['system', 'status'] as const,
+  marketRadarSyncStatus: ['market-radar', 'sync-status'] as const,
   marketRadarSummary: ['market-radar', 'summary'] as const,
   marketRadarBreadth: ['market-radar', 'breadth'] as const,
   marketRadarEarnings: ['market-radar', 'earnings'] as const,
@@ -133,41 +135,85 @@ export const dataQualityQuery = () =>
   queryOptions({ queryKey: queryKeys.dataQuality, queryFn: fetchLatestDataQuality })
 export const systemQuery = () =>
   queryOptions({ queryKey: queryKeys.system, queryFn: fetchSystemStatus })
+const radarReadOptions = {
+  refetchInterval: 60_000,
+  refetchIntervalInBackground: false,
+  refetchOnWindowFocus: 'always',
+  refetchOnReconnect: 'always',
+} as const
+
+export const marketRadarSyncStatusQuery = () =>
+  queryOptions({
+    ...radarReadOptions,
+    queryKey: queryKeys.marketRadarSyncStatus,
+    queryFn: fetchMarketRadarSyncStatus,
+  })
+
 export const marketRadarSummaryQuery = () =>
-  queryOptions({ queryKey: queryKeys.marketRadarSummary, queryFn: fetchMarketRadarSummary })
-export const marketRadarBreadthQuery = () =>
-  queryOptions({ queryKey: queryKeys.marketRadarBreadth, queryFn: fetchMarketRadarBreadth })
-export const marketRadarEarningsQuery = () =>
-  queryOptions({ queryKey: queryKeys.marketRadarEarnings, queryFn: fetchMarketRadarEarnings })
+  queryOptions({
+    ...radarReadOptions,
+    queryKey: queryKeys.marketRadarSummary,
+    queryFn: fetchMarketRadarSummary,
+  })
+export const marketRadarBreadthQuery = (enabled = true) =>
+  queryOptions({
+    ...radarReadOptions,
+    enabled,
+    queryKey: queryKeys.marketRadarBreadth,
+    queryFn: fetchMarketRadarBreadth,
+  })
+export const marketRadarEarningsQuery = (enabled = true) =>
+  queryOptions({
+    ...radarReadOptions,
+    enabled,
+    queryKey: queryKeys.marketRadarEarnings,
+    queryFn: fetchMarketRadarEarnings,
+  })
 export const marketRadarFundamentalsQuery = (enabled: boolean) =>
   queryOptions({
+    ...radarReadOptions,
     queryKey: queryKeys.marketRadarFundamentals,
     queryFn: fetchMarketRadarFundamentals,
     enabled,
   })
 export const marketRadarEventsQuery = (enabled: boolean) =>
   queryOptions({
+    ...radarReadOptions,
     queryKey: queryKeys.marketRadarEvents,
     queryFn: fetchMarketRadarEvents,
     enabled,
   })
-export const marketRadarMacroQuery = () =>
-  queryOptions({ queryKey: queryKeys.marketRadarMacro, queryFn: fetchMarketRadarMacro })
-export const marketRadarSectorsQuery = () =>
-  queryOptions({ queryKey: queryKeys.marketRadarSectors, queryFn: fetchMarketRadarSectors })
+export const marketRadarMacroQuery = (enabled = true) =>
+  queryOptions({
+    ...radarReadOptions,
+    enabled,
+    queryKey: queryKeys.marketRadarMacro,
+    queryFn: fetchMarketRadarMacro,
+  })
+export const marketRadarSectorsQuery = (enabled = true) =>
+  queryOptions({
+    ...radarReadOptions,
+    enabled,
+    queryKey: queryKeys.marketRadarSectors,
+    queryFn: fetchMarketRadarSectors,
+  })
 export const marketRadarSectorQuery = (sectorId: string, enabled = true) =>
   queryOptions({
+    ...radarReadOptions,
     queryKey: queryKeys.marketRadarSector(sectorId),
     queryFn: () => fetchMarketRadarSector(sectorId),
     enabled,
   })
-export const marketRadarStocksQuery = (query: StockRadarQuery) =>
+export const marketRadarStocksQuery = (query: StockRadarQuery, enabled = true) =>
   queryOptions({
+    ...radarReadOptions,
+    enabled,
     queryKey: queryKeys.marketRadarStocks(query),
     queryFn: () => fetchMarketRadarStocks(query),
   })
 export const marketRadarStockQuery = (instrumentId: string, enabled = true) =>
   queryOptions({
+    ...radarReadOptions,
     queryKey: queryKeys.marketRadarStock(instrumentId),
     queryFn: () => fetchMarketRadarStock(instrumentId),
     enabled,

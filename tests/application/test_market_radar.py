@@ -214,6 +214,7 @@ def test_event_source_failures_are_isolated(economic_state: str, earnings_state:
     result = service.events()
     for source, state in (
         (result.economic_source, economic_state),
+        (result.recent_economic.source, economic_state),
         (result.earnings_source, earnings_state),
     ):
         assert source.source_state == state
@@ -240,6 +241,8 @@ def test_event_future_capture_is_invalid_but_other_source_is_retained(offset: ti
         repository=cast(MarketRadarRepository, repository), clock=lambda: ECONOMIC_AT + offset
     ).events()
     assert result.economic_source.source_state == "invalid"
+    assert result.recent_economic.source.source_state == "invalid"
+    assert all(not day.economic_events for day in result.recent_economic.days)
     assert all(not day.economic_events for day in result.days)
     assert result.earnings_source.source_state == "empty"
 
@@ -248,10 +251,88 @@ def test_event_missing_repository_and_naive_clock() -> None:
     result = MarketRadarQueryService(repository=None, clock=lambda: ECONOMIC_AT).events()
     assert result.economic_source.source_state == result.earnings_source.source_state == "missing"
     assert len(result.days) == 14
+    assert result.recent_economic.source.source_state == "missing"
+    assert len(result.recent_economic.days) == 7
     with pytest.raises(ValueError, match="timezone-aware"):
         MarketRadarQueryService(
             repository=None, clock=lambda: ECONOMIC_AT.replace(tzinfo=None)
         ).events()
+
+
+@pytest.mark.parametrize(
+    ("lookback", "offset", "covered_days"),
+    [(0, 0, 0), (0, 1, 1), (0, 7, 7), (7, 0, 7), (7, 1, 7), (7, 31, 7), (7, 35, 3), (7, 38, 0)],
+)
+def test_recent_coverage_uses_actual_batch_range(
+    lookback: int,
+    offset: int,
+    covered_days: int,
+) -> None:
+    snapshot = economic_snapshot(window_start=ECONOMIC_AT.date() - timedelta(days=lookback))
+    observed = ECONOMIC_AT + timedelta(days=offset)
+    repository = EventRepository(snapshot, None)
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository), clock=lambda: observed
+    ).events()
+    recent = result.recent_economic
+    source = recent.source
+    assert source.coverage is not None
+    assert source.coverage.covered_days == covered_days
+    assert source.coverage.state == (
+        "covered" if covered_days == 7 else "partial" if covered_days else "uncovered"
+    )
+    assert source.captured_at_utc == result.economic_source.captured_at_utc == ECONOMIC_AT
+    assert source.freshness == result.economic_source.freshness
+    assert recent.window_start == observed.date() - timedelta(days=7)
+    assert recent.window_end == observed.date() - timedelta(days=1)
+    assert all(not day.earnings_events for day in recent.days)
+    assert source.window_event_count == (
+        sum(len(day.economic_events) for day in recent.days) if covered_days else None
+    )
+    assert repository.calls == ["economic", "earnings"]
+
+
+@pytest.mark.parametrize("query_day", [date(2026, 1, 2), date(2024, 3, 1)])
+def test_recent_and_upcoming_boundaries_share_one_capture(query_day: date) -> None:
+    capture = datetime.combine(query_day - timedelta(days=1), datetime.min.time(), UTC)
+    observed = capture + timedelta(days=1, hours=1)
+    events = tuple(
+        economic_event(event_date=query_day + timedelta(days=offset))
+        for offset in (-8, -7, -1, 0, 13, 14)
+    )
+    snapshot = economic_snapshot(
+        as_of_date=capture.date(),
+        captured_at_utc=capture,
+        window_start=capture.date() - timedelta(days=7),
+        window_end=capture.date() + timedelta(days=30),
+        batch=EconomicEventBatch(
+            events=events, request_count=1, raw_record_count=6, duplicate_count=0
+        ),
+    )
+    repository = EventRepository(snapshot, None)
+    clocks: list[datetime] = []
+
+    def clock() -> datetime:
+        clocks.append(observed)
+        return observed
+
+    result = MarketRadarQueryService(
+        repository=cast(MarketRadarRepository, repository), clock=clock
+    ).events()
+    assert len(clocks) == 1
+    assert repository.calls == ["economic", "earnings"]
+    assert [len(day.economic_events) for day in result.recent_economic.days] == [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+    ]
+    assert [len(day.economic_events) for day in result.days] == [1] + [0] * 12 + [1]
+    assert result.recent_economic.source.window_event_count == 2
+    assert snapshot.batch.events == events
 
 
 def _metric(value: float, observations: int = 220) -> MetricValue:
@@ -685,6 +766,9 @@ def test_breadth_aggregate_validity_is_explicit(
     snapshot = _breadth_snapshot(metric=metric, membership_date=membership_date)
 
     class BreadthRepository:
+        def daily_worker(self) -> None:
+            return None
+
         def latest_current_breadth_snapshot(self) -> CurrentBreadthSnapshot:
             return snapshot
 
@@ -701,6 +785,9 @@ def test_breadth_aggregate_validity_is_explicit(
 
 def test_corrupt_breadth_does_not_hide_price_summary() -> None:
     class BrokenBreadthRepository:
+        def daily_worker(self) -> None:
+            return None
+
         def latest_price_snapshot(self) -> PriceRadarSnapshot:
             return _snapshot()
 
@@ -744,6 +831,9 @@ def test_macro_staleness_and_failure_are_isolated_from_price_summary(tmp_path: P
     repository.close()
 
     class BrokenMacroRepository:
+        def daily_worker(self) -> None:
+            return None
+
         def latest_price_snapshot(self) -> PriceRadarSnapshot:
             return _snapshot()
 
@@ -828,6 +918,9 @@ def test_earnings_staleness_boundary(age_days: int, expected: str) -> None:
 
 def test_corrupt_earnings_isolated_from_other_summary_modules() -> None:
     class BrokenEarningsRepository:
+        def daily_worker(self) -> None:
+            return None
+
         def latest_price_snapshot(self) -> PriceRadarSnapshot:
             return _snapshot()
 

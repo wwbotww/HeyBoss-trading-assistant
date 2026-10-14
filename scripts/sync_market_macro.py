@@ -11,6 +11,10 @@ from datetime import date
 from pathlib import Path
 from typing import NoReturn
 
+from trading_assistant.market_radar.runtime import (
+    load_market_radar_runtime,
+    market_radar_writer_lock,
+)
 from trading_assistant.market_radar.service import MarketMacroSyncSummary, sync_market_macro
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -59,18 +63,11 @@ async def _run(
 ) -> MarketMacroSyncSummary:
     """从环境变量和非敏感配置装配宏观价格同步。"""
     try:
+        runtime = load_market_radar_runtime(PROJECT_ROOT, os.environ)
         return await sync_market_macro(
-            catalog_path=Path(os.getenv("CATALOG_PATH", PROJECT_ROOT / "catalog" / "eodhd")),
-            database_url=os.getenv(
-                "MARKET_RADAR_DATABASE_URL",
-                f"sqlite:///{PROJECT_ROOT / 'data' / 'market-radar.db'}",
-            ),
-            report_directory=Path(
-                os.getenv(
-                    "MARKET_RADAR_REPORT_ROOT",
-                    PROJECT_ROOT / "reports" / "market-radar",
-                )
-            ),
+            catalog_path=runtime.catalog_path,
+            database_url=runtime.database_url,
+            report_directory=runtime.report_directory,
             market_config_path=args.market_config,
             data_config_path=args.data_config,
             mode=args.mode,
@@ -109,8 +106,10 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     try:
-        summary = asyncio.run(_run(args, parser))
-    except (ConnectionError, RuntimeError, TimeoutError) as exc:
+        runtime = load_market_radar_runtime(PROJECT_ROOT, os.environ)
+        with market_radar_writer_lock(runtime):
+            summary = asyncio.run(_run(args, parser))
+    except (ValueError, OSError, RuntimeError) as exc:
         print(f"Market macro sync failed: {type(exc).__name__}")
         return 1
     _print_summary(summary)

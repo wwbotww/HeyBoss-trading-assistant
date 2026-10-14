@@ -591,6 +591,8 @@ def test_schema_is_independent_and_complete_run_is_readable(tmp_path: Path) -> N
     assert inspect(engine).get_table_names() == [
         "current_breadth_snapshots",
         "current_market_members",
+        "daily_sync_attempts",
+        "daily_sync_worker",
         "earnings_calendar_events",
         "earnings_market_members",
         "earnings_revision_snapshots",
@@ -995,6 +997,8 @@ def test_old_five_table_database_initializes_without_republishing(tmp_path: Path
         "sync_runs",
         "price_snapshots",
         "current_market_members",
+        "daily_sync_attempts",
+        "daily_sync_worker",
         "current_breadth_snapshots",
         "risk_appetite_snapshots",
     }
@@ -1502,12 +1506,14 @@ def _start_economic(
     repository: MarketRadarRepository,
     run_id: str,
     started_at: datetime = ECONOMIC_AT,
+    *,
+    lookback_days: int = 0,
 ) -> None:
     repository.start_sync_run(
         run_id=run_id,
         source="eodhd_economic_events",
         started_at_utc=started_at,
-        requested_start_date=started_at.date(),
+        requested_start_date=started_at.date() - timedelta(days=lookback_days),
         requested_end_date=started_at.date() + timedelta(days=30),
         instrument_count=0,
     )
@@ -1617,7 +1623,10 @@ def test_economic_same_day_replaces_reschedules_withdrawals_and_empty_batch(tmp_
     assert path.read_bytes() == before
 
 
-def test_economic_next_date_appends_and_failed_run_keeps_latest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lookback_days", [0, 7])
+def test_economic_next_date_appends_and_failed_run_keeps_latest(
+    tmp_path: Path, lookback_days: int
+) -> None:
     database_url = f"sqlite:///{tmp_path}/radar.db"
     repository = MarketRadarRepository(database_url)
     repository.create_schema()
@@ -1627,11 +1636,11 @@ def test_economic_next_date_appends_and_failed_run_keeps_latest(tmp_path: Path) 
     newer = economic_snapshot(
         as_of_date=tomorrow.date(),
         captured_at_utc=tomorrow,
-        window_start=tomorrow.date(),
+        window_start=tomorrow.date() - timedelta(days=lookback_days),
         window_end=tomorrow.date() + timedelta(days=30),
         batch=EconomicEventBatch(events=(), request_count=1, raw_record_count=0, duplicate_count=0),
     )
-    _start_economic(repository, "new", tomorrow)
+    _start_economic(repository, "new", tomorrow, lookback_days=lookback_days)
     repository.publish_economic_events_and_complete("new", snapshot=newer)
     _start_economic(repository, "failed", tomorrow)
     repository.fail_sync_run("failed", completed_at_utc=tomorrow, error_summary="ValueError")

@@ -7,8 +7,8 @@ import {
   Search,
   ShieldCheck,
 } from '@lucide/vue'
-import { useQuery } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -23,6 +23,7 @@ import {
   marketRadarStockQuery,
   marketRadarStocksQuery,
   marketRadarSummaryQuery,
+  marketRadarSyncStatusQuery,
 } from '../api/queries'
 import type {
   BreadthMetric,
@@ -36,6 +37,7 @@ import EarningsRevisionCard from '../components/EarningsRevisionCard.vue'
 import FundamentalMetricValue from '../components/FundamentalMetricValue.vue'
 import MacroRegimeChart from '../components/MacroRegimeChart.vue'
 import MarketEventsPanel from '../components/MarketEventsPanel.vue'
+import MarketRadarSyncStatus from '../components/MarketRadarSyncStatus.vue'
 import PaginationControls from '../components/PaginationControls.vue'
 import RadarMetricValue from '../components/RadarMetricValue.vue'
 import SegmentedTabs from '../components/SegmentedTabs.vue'
@@ -144,17 +146,67 @@ const stockParams = computed<StockRadarQuery>(() => {
   return query
 })
 
+const queryClient = useQueryClient()
+const syncStatus = useQuery(marketRadarSyncStatusQuery())
+let midnightTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleMidnight(): void {
+  clearTimeout(midnightTimer)
+  if (document.visibilityState === 'hidden') return
+  const now = new Date()
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)
+  midnightTimer = setTimeout(
+    () => {
+      void queryClient.invalidateQueries({ queryKey: ['market-radar'] })
+      scheduleMidnight()
+    },
+    midnight - now.getTime() + 100,
+  )
+}
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'visible')
+    void queryClient.invalidateQueries({ queryKey: ['market-radar'] })
+  scheduleMidnight()
+}
+onMounted(() => {
+  scheduleMidnight()
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('focus', onVisibilityChange)
+})
+onBeforeUnmount(() => {
+  clearTimeout(midnightTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('focus', onVisibilityChange)
+})
 const summary = useQuery(marketRadarSummaryQuery())
-const breadth = useQuery(marketRadarBreadthQuery())
-const earnings = useQuery(marketRadarEarningsQuery())
-const macro = useQuery(marketRadarMacroQuery())
-const sectors = useQuery(marketRadarSectorsQuery())
-const stocks = useQuery(computed(() => marketRadarStocksQuery(stockParams.value)))
+const breadth = useQuery(computed(() => marketRadarBreadthQuery(activeView.value === 'overview')))
+const earnings = useQuery(computed(() => marketRadarEarningsQuery(activeView.value !== 'stocks')))
+const macro = useQuery(computed(() => marketRadarMacroQuery(activeView.value === 'overview')))
+const needsSectors = computed(
+  () =>
+    activeView.value === 'sectors' ||
+    (activeView.value === 'stocks' && stockDimension.value === 'price'),
+)
+const sectors = useQuery(computed(() => marketRadarSectorsQuery(needsSectors.value)))
+const stocks = useQuery(
+  computed(() =>
+    marketRadarStocksQuery(
+      stockParams.value,
+      activeView.value === 'stocks' && stockDimension.value === 'price',
+    ),
+  ),
+)
 const fundamentals = useQuery(
   computed(() => marketRadarFundamentalsQuery(activeView.value === 'stocks')),
 )
 const events = useQuery(computed(() => marketRadarEventsQuery(activeView.value === 'overview')))
+const eventWindow = computed(() => (route.query.event_window === 'recent' ? 'recent' : 'upcoming'))
+const eventDays = computed(() =>
+  eventWindow.value === 'recent'
+    ? events.data.value?.recent_economic.days
+    : events.data.value?.days,
+)
 const eventKind = computed(() => {
+  if (eventWindow.value === 'recent') return 'economic'
   const value = route.query.event_kind
   return activeView.value === 'overview' && (value === 'economic' || value === 'earnings')
     ? value
@@ -164,7 +216,7 @@ const eventDate = computed(() => {
   const value = route.query.event_date
   return activeView.value === 'overview' &&
     typeof value === 'string' &&
-    events.data.value?.days.some((day) => day.day === value)
+    eventDays.value?.some((day) => day.day === value)
     ? value
     : ''
 })
@@ -172,8 +224,19 @@ function setEventFilter(kind: string, date: string): void {
   const query: LocationQueryRaw = { ...route.query }
   delete query.event_kind
   delete query.event_date
-  if (kind === 'economic' || kind === 'earnings') query.event_kind = kind
-  if (events.data.value?.days.some((day) => day.day === date)) query.event_date = date
+  if (eventWindow.value === 'upcoming' && (kind === 'economic' || kind === 'earnings'))
+    query.event_kind = kind
+  if (eventDays.value?.some((day) => day.day === date)) query.event_date = date
+  void router.replace({ query })
+}
+function setEventWindow(window: 'upcoming' | 'recent'): void {
+  const query: LocationQueryRaw = { ...route.query }
+  delete query.event_window
+  delete query.event_date
+  if (window === 'recent') {
+    query.event_window = window
+    delete query.event_kind
+  }
   void router.replace({ query })
 }
 const sectorDetail = useQuery(
@@ -228,7 +291,7 @@ const refreshingSources = computed(() =>
     { label: '宏观象限', visible: activeView.value === 'overview', query: macro },
     { label: '当前宽度', visible: activeView.value === 'overview', query: breadth },
     { label: '盈利修正', visible: activeView.value !== 'stocks', query: earnings },
-    { label: '板块价格', visible: activeView.value === 'sectors', query: sectors },
+    { label: '板块价格', visible: needsSectors.value, query: sectors },
     {
       label: '个股价格',
       visible: activeView.value === 'stocks' && stockDimension.value === 'price',
@@ -242,10 +305,40 @@ const refreshingSources = computed(() =>
     .map((item) => item.label),
 )
 const sectorOptions = computed(() =>
-  [...(sectors.isError.value ? [] : (sectors.data.value?.items ?? []))].sort((left, right) =>
+  [...(sectors.data.value?.items ?? [])].sort((left, right) =>
     sectorName(left.sector_id).localeCompare(sectorName(right.sector_id), 'zh-CN'),
   ),
 )
+const sectorOptionsNotice = computed(() => {
+  if (sectors.isPending.value) return '正在读取板块选项…'
+  if (sectors.isError.value)
+    return sectorOptions.value.length
+      ? '板块选项刷新失败，当前使用上次读取的选项。'
+      : '板块选项读取失败。'
+  if (sectors.data.value?.source_state !== 'available')
+    return `板块选项不可用：${formatSourceState(sectors.data.value?.source_state ?? 'empty')}。`
+  return sectorOptions.value.length ? '' : '已发布快照没有板块选项。'
+})
+const breadthNotices = computed(() => {
+  const data = breadth.data.value
+  const freshness = data?.freshness
+  if (!freshness) return ['宽度新鲜度信息不可用，无法确认价格或成员名单是否陈旧。']
+  const notices: string[] = []
+  const price = freshness.price
+  if (price?.state === 'stale')
+    notices.push(
+      `宽度价格陈旧：实际 ${price.actual_as_of_date ?? '—'}，目标 ${price.expected_as_of_date}，落后 ${formatNumber(price.lag_sessions, 0)} 个交易日。`,
+    )
+  else if (!price || price.state === 'unavailable')
+    notices.push('宽度价格新鲜度不可用，无法确认价格是否到达目标日期。')
+  if (freshness.membership_age_days > freshness.stale_after_days)
+    notices.push(
+      `SPY 持仓代理已超过 ${String(freshness.stale_after_days)} 个日历日未更新：成员日期 ${data.membership_date ?? '—'}，已过 ${String(freshness.membership_age_days)} 天。`,
+    )
+  return notices
+})
+const priceMetricExplanation =
+  '126–21 动量跳过最近 21 个交易日，比较 t−21 与 t−126 的收盘价，最低需要 127 根日线；年化波动率使用最近 20 个日收益（21 根日线），按 252 个交易日年化。可用历史长度不等于计算窗口，相对指标取两侧较短历史。'
 const breadthMetrics = computed<
   ReadonlyArray<{ id: string; label: string; description: string; metric: BreadthMetric | null }>
 >(() => [
@@ -476,6 +569,21 @@ async function retryStockDetail(): Promise<void> {
         <SegmentedTabs v-model="activeView" :tabs="tabs" label="市场雷达视图" />
       </header>
 
+      <MarketRadarSyncStatus
+        :data="syncStatus.isError.value ? undefined : syncStatus.data.value"
+        :loading="syncStatus.isPending.value"
+        :error="syncStatus.error.value?.message"
+        @retry="syncStatus.refetch()"
+      />
+      <p
+        v-if="!summary.isError.value && summary.data.value?.price_freshness?.state === 'stale'"
+        class="radar-read-status"
+        role="status"
+      >
+        价格数据陈旧：应更新至 {{ summary.data.value.price_freshness.expected_as_of_date }}，
+        当前截至 {{ summary.data.value.price_freshness.actual_as_of_date }}， 落后
+        {{ summary.data.value.price_freshness.lag_sessions }} 个交易日。
+      </p>
       <p v-if="refreshingSources.length" class="radar-read-status" role="status">
         正在重新读取：{{
           refreshingSources.join('、')
@@ -557,15 +665,27 @@ async function retryStockDetail(): Promise<void> {
             <div class="market-metric-grid">
               <article>
                 <span>SPY · 20 日收益</span>
-                <RadarMetricValue :metric="summary.data.value.market.spy_return_20" />
+                <RadarMetricValue
+                  :metric="summary.data.value.market.spy_return_20"
+                  unit="percent"
+                  color-mode="directional"
+                />
               </article>
               <article>
                 <span>SPY · 距 MA200</span>
-                <RadarMetricValue :metric="summary.data.value.market.spy_distance_ma_200" />
+                <RadarMetricValue
+                  :metric="summary.data.value.market.spy_distance_ma_200"
+                  unit="percent"
+                  color-mode="neutral"
+                />
               </article>
               <article>
-                <span>RSP / SPY · 20 日</span>
-                <RadarMetricValue :metric="summary.data.value.market.rsp_spy_return_20" />
+                <span>RSP − SPY 20 日收益差</span>
+                <RadarMetricValue
+                  :metric="summary.data.value.market.rsp_spy_return_20"
+                  unit="percentage_points"
+                  color-mode="directional"
+                />
               </article>
             </div>
           </section>
@@ -796,11 +916,11 @@ async function retryStockDetail(): Promise<void> {
                 </template>
               </article>
             </div>
-            <p v-if="breadth.data.value.validity === 'stale'" class="breadth-notice">
-              当前快照仍可追溯，但 SPY 持仓代理已超过 7 个日历日未更新，请先完成离线同步。
+            <p v-for="notice in breadthNotices" :key="notice" class="breadth-notice">
+              {{ notice }}
             </p>
             <p
-              v-else-if="breadth.data.value.validity === 'insufficient_coverage'"
+              v-if="breadth.data.value.validity === 'insufficient_coverage'"
               class="breadth-notice"
             >
               覆盖率低于 90% 的指标不会返回数值；页面不会使用零值或其他价格序列补齐。
@@ -924,6 +1044,7 @@ async function retryStockDetail(): Promise<void> {
           </template>
         </section>
         <MarketEventsPanel
+          :window="eventWindow"
           :data="events.data.value"
           :loading="events.isPending.value"
           :refreshing="events.isFetching.value"
@@ -933,6 +1054,7 @@ async function retryStockDetail(): Promise<void> {
           @retry="events.refetch()"
           @update:kind="setEventFilter($event, eventDate)"
           @update:date="setEventFilter(eventKind, $event)"
+          @update:window="setEventWindow"
         />
       </template>
 
@@ -1003,8 +1125,8 @@ async function retryStockDetail(): Promise<void> {
             <thead>
               <tr>
                 <th>板块 / ETF</th>
-                <th>20 日相对强弱</th>
-                <th>60 日相对强弱</th>
+                <th>相对 SPY 收益差（20 日）</th>
+                <th>相对 SPY 收益差（60 日）</th>
                 <th>EPS 修正宽度</th>
                 <th>EPS 中位幅度</th>
                 <th>盈利覆盖</th>
@@ -1023,10 +1145,20 @@ async function retryStockDetail(): Promise<void> {
                   </button>
                 </td>
                 <td :class="['heat-cell', metricCellTone(sector.relative_strength_20)]">
-                  <RadarMetricValue :metric="sector.relative_strength_20" compact />
+                  <RadarMetricValue
+                    :metric="sector.relative_strength_20"
+                    unit="percentage_points"
+                    color-mode="directional"
+                    compact
+                  />
                 </td>
                 <td :class="['heat-cell', metricCellTone(sector.relative_strength_60)]">
-                  <RadarMetricValue :metric="sector.relative_strength_60" compact />
+                  <RadarMetricValue
+                    :metric="sector.relative_strength_60"
+                    unit="percentage_points"
+                    color-mode="directional"
+                    compact
+                  />
                 </td>
                 <td class="earnings-table-cell tabular">
                   <template v-if="sectorEarnings(sector.sector_id)">
@@ -1113,8 +1245,23 @@ async function retryStockDetail(): Promise<void> {
             </label>
             <label>
               <span>板块</span>
-              <select :value="sectorFilter" @change="changeSectorFilter">
+              <select
+                :value="sectorFilter"
+                :disabled="sectorOptions.length === 0"
+                aria-label="板块筛选"
+                :aria-describedby="sectorOptionsNotice ? 'sector-options-status' : undefined"
+                @change="changeSectorFilter"
+              >
                 <option value="">全部板块</option>
+                <option
+                  v-if="
+                    sectorFilter &&
+                    !sectorOptions.some((sector) => sector.sector_id === sectorFilter)
+                  "
+                  :value="sectorFilter"
+                >
+                  {{ sectorName(sectorFilter) }}
+                </option>
                 <option
                   v-for="sector in sectorOptions"
                   :key="sector.sector_id"
@@ -1129,9 +1276,9 @@ async function retryStockDetail(): Promise<void> {
               <select :value="stockSort" @change="changeSort">
                 <option value="instrument">标的</option>
                 <option value="momentum">126–21 动量</option>
-                <option value="relative_momentum">板块相对动量</option>
-                <option value="volatility">20 日波动率</option>
-                <option value="drawdown">126 日回撤</option>
+                <option value="relative_momentum">相对板块动量差</option>
+                <option value="volatility">年化波动率（20 日估计）</option>
+                <option value="drawdown">126 日最大回撤</option>
               </select>
             </label>
             <label>
@@ -1154,11 +1301,24 @@ async function retryStockDetail(): Promise<void> {
             </button>
           </form>
 
+          <p
+            v-if="sectorOptionsNotice"
+            id="sector-options-status"
+            class="breadth-notice"
+            role="status"
+          >
+            {{ sectorOptionsNotice }}
+            <button v-if="sectors.isError.value" type="button" @click="retrySectors">
+              重新读取板块选项
+            </button>
+          </p>
+
           <div class="dimension-note">
             <ArrowDownUp :size="17" aria-hidden="true" />
             <p>
               当前展示价格趋势与风险；切换“财务与估值”查看独立基本面快照。个股 EPS 修正、ROIC
               和同行分位尚未提供。
+              {{ priceMetricExplanation }}
             </p>
           </div>
 
@@ -1192,9 +1352,9 @@ async function retryStockDetail(): Promise<void> {
                 <tr>
                   <th>标的 / 板块</th>
                   <th>126–21 动量</th>
-                  <th>相对板块</th>
+                  <th>相对板块动量差</th>
                   <th>距 MA200</th>
-                  <th>20 日波动率</th>
+                  <th>年化波动率（20 日估计）</th>
                   <th>126 日最大回撤</th>
                   <th>ATR20 / Price</th>
                   <th aria-label="详情"></th>
@@ -1217,14 +1377,54 @@ async function retryStockDetail(): Promise<void> {
                       </span>
                     </button>
                   </td>
-                  <td><RadarMetricValue :metric="stock.momentum_126_21" compact /></td>
                   <td>
-                    <RadarMetricValue :metric="stock.sector_relative_momentum_126_21" compact />
+                    <RadarMetricValue
+                      :metric="stock.momentum_126_21"
+                      unit="percent"
+                      color-mode="directional"
+                      compact
+                    />
                   </td>
-                  <td><RadarMetricValue :metric="stock.distance_ma_200" compact /></td>
-                  <td><RadarMetricValue :metric="stock.realized_volatility_20" compact /></td>
-                  <td><RadarMetricValue :metric="stock.max_drawdown_126" compact /></td>
-                  <td><RadarMetricValue :metric="stock.atr_20_ratio" compact /></td>
+                  <td>
+                    <RadarMetricValue
+                      :metric="stock.sector_relative_momentum_126_21"
+                      unit="percentage_points"
+                      color-mode="directional"
+                      compact
+                    />
+                  </td>
+                  <td>
+                    <RadarMetricValue
+                      :metric="stock.distance_ma_200"
+                      unit="percent"
+                      color-mode="neutral"
+                      compact
+                    />
+                  </td>
+                  <td>
+                    <RadarMetricValue
+                      :metric="stock.realized_volatility_20"
+                      unit="percent"
+                      color-mode="neutral"
+                      compact
+                    />
+                  </td>
+                  <td>
+                    <RadarMetricValue
+                      :metric="stock.max_drawdown_126"
+                      unit="percent"
+                      color-mode="neutral"
+                      compact
+                    />
+                  </td>
+                  <td>
+                    <RadarMetricValue
+                      :metric="stock.atr_20_ratio"
+                      unit="percent"
+                      color-mode="neutral"
+                      compact
+                    />
+                  </td>
                   <td class="align-right">
                     <button
                       class="row-action"
@@ -1300,12 +1500,20 @@ async function retryStockDetail(): Promise<void> {
         </div>
         <div class="drawer-metrics">
           <article>
-            <span>20 日相对强弱</span
-            ><RadarMetricValue :metric="sectorDetail.data.value.relative_strength_20" />
+            <span>相对 SPY 收益差（20 日）</span
+            ><RadarMetricValue
+              :metric="sectorDetail.data.value.relative_strength_20"
+              unit="percentage_points"
+              color-mode="directional"
+            />
           </article>
           <article>
-            <span>60 日相对强弱</span
-            ><RadarMetricValue :metric="sectorDetail.data.value.relative_strength_60" />
+            <span>相对 SPY 收益差（60 日）</span
+            ><RadarMetricValue
+              :metric="sectorDetail.data.value.relative_strength_60"
+              unit="percentage_points"
+              color-mode="directional"
+            />
           </article>
         </div>
       </template>
@@ -1386,33 +1594,58 @@ async function retryStockDetail(): Promise<void> {
           <strong class="mono">{{ stockDetail.data.value.instrument_id }}</strong>
         </div>
         <div class="drawer-section-title"><span>趋势</span><small>规范 INTERNAL 日线</small></div>
+        <p class="breadth-notice">{{ priceMetricExplanation }}</p>
         <div class="drawer-metrics three-columns">
           <article>
             <span>126–21 动量</span
-            ><RadarMetricValue :metric="stockDetail.data.value.momentum_126_21" />
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.momentum_126_21"
+              unit="percent"
+              color-mode="directional"
+            />
           </article>
           <article>
-            <span>相对板块</span
-            ><RadarMetricValue :metric="stockDetail.data.value.sector_relative_momentum_126_21" />
+            <span>相对板块动量差</span
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.sector_relative_momentum_126_21"
+              unit="percentage_points"
+              color-mode="directional"
+            />
           </article>
           <article>
             <span>距 MA200</span
-            ><RadarMetricValue :metric="stockDetail.data.value.distance_ma_200" />
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.distance_ma_200"
+              unit="percent"
+              color-mode="neutral"
+            />
           </article>
         </div>
         <div class="drawer-section-title"><span>风险</span><small>独立展示，不合成分数</small></div>
         <div class="drawer-metrics three-columns">
           <article>
-            <span>20 日波动率</span
-            ><RadarMetricValue :metric="stockDetail.data.value.realized_volatility_20" />
+            <span>年化波动率（20 日估计）</span
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.realized_volatility_20"
+              unit="percent"
+              color-mode="neutral"
+            />
           </article>
           <article>
-            <span>126 日回撤</span
-            ><RadarMetricValue :metric="stockDetail.data.value.max_drawdown_126" />
+            <span>126 日最大回撤</span
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.max_drawdown_126"
+              unit="percent"
+              color-mode="neutral"
+            />
           </article>
           <article>
             <span>ATR20 / Price</span
-            ><RadarMetricValue :metric="stockDetail.data.value.atr_20_ratio" />
+            ><RadarMetricValue
+              :metric="stockDetail.data.value.atr_20_ratio"
+              unit="percent"
+              color-mode="neutral"
+            />
           </article>
         </div>
       </template>

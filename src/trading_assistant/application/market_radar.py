@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -34,6 +34,7 @@ from trading_assistant.application.models import (
     MarketEventsView,
     MarketFundamentalsView,
     MarketRadarSummaryView,
+    MarketRadarSyncStatusView,
     QuerySourceError,
     RadarCoverageView,
     RadarFreshnessView,
@@ -41,6 +42,9 @@ from trading_assistant.application.models import (
     RadarMetricView,
     RadarModuleState,
     RadarModuleView,
+    RadarPriceFreshnessView,
+    RadarSyncJobView,
+    RecentEconomicEventsView,
     ResourceNotFoundError,
     SectorEarningsRevisionView,
     SectorRadarListView,
@@ -53,7 +57,10 @@ from trading_assistant.application.models import (
     StockRadarView,
 )
 from trading_assistant.market_radar.earnings import EarningsRevisionAggregate
-from trading_assistant.market_radar.economic_events import EconomicEventSnapshot
+from trading_assistant.market_radar.economic_events import (
+    ECONOMIC_EVENT_LOOKBACK_DAYS,
+    EconomicEventSnapshot,
+)
 from trading_assistant.market_radar.metrics import (
     BreadthMetric,
     CurrentBreadthSnapshot,
@@ -63,6 +70,16 @@ from trading_assistant.market_radar.metrics import (
 from trading_assistant.market_radar.regime import (
     ALIGNMENT_MAX_AGE_DAYS,
     MacroRegimePoint,
+)
+from trading_assistant.market_radar.schedule import (
+    DAILY_JOBS,
+    DAILY_SOURCES,
+    DEFAULT_RUN_AT_UTC,
+    PRICE_JOBS,
+    WORKER_STALE_SECONDS,
+    expected_price_date,
+    price_lag_sessions,
+    scheduled_at,
 )
 from trading_assistant.market_radar.storage import MarketRadarRepository, PublishedEarningsEvents
 
@@ -83,13 +100,16 @@ def _available_event_source(
     snapshot: EconomicEventSnapshot | PublishedEarningsEvents,
     observed_at: datetime,
     event_count: int,
+    *,
+    window_start: date,
+    window_end: date,
 ) -> EventSourceView:
     """两类事件共用日期交集与秒级检查线, 不改写快照数值。"""
     age = (observed_at - snapshot.captured_at_utc).total_seconds()
     if age < 0 or snapshot.as_of_date > observed_at.date():
         raise ValueError("event capture cannot be in the future")
-    start = max(observed_at.date(), snapshot.window_start)
-    end = min(observed_at.date() + timedelta(days=13), snapshot.window_end)
+    start = max(window_start, snapshot.window_start)
+    end = min(window_end, snapshot.window_end)
     covered_days = max(0, (end - start).days + 1)
     return EventSourceView(
         source="eodhd_economic_events"
@@ -106,7 +126,11 @@ def _available_event_source(
             state="stale" if age > _EVENT_STALE_AFTER_SECONDS else "fresh",
         ),
         coverage=EventWindowCoverageView(
-            state="covered" if covered_days == 14 else "partial" if covered_days else "uncovered",
+            state="covered"
+            if covered_days == (window_end - window_start).days + 1
+            else "partial"
+            if covered_days
+            else "uncovered",
             covered_start=start if covered_days else None,
             covered_end=end if covered_days else None,
             covered_days=covered_days,
@@ -206,6 +230,8 @@ def _module_state(metrics: tuple[MetricValue, ...]) -> RadarModuleState:
 def _module_detail(state: RadarModuleState, *, complete: str) -> str:
     if state == "complete":
         return complete
+    if state == "stale":
+        return "价格尚未更新到目标交易日; 下列数值保留原始数据日期。"
     if state == "partial":
         return "部分价格指标可用; 其余指标历史不足或缺失。"
     if state == "insufficient_history":
@@ -224,6 +250,161 @@ class MarketRadarQueryService:
     ) -> None:
         self._repository = repository
         self._clock = clock
+
+    def _price_freshness(
+        self, actual: date | None, observed_at: datetime
+    ) -> RadarPriceFreshnessView:
+        try:
+            worker = None if self._repository is None else self._repository.daily_worker()
+            run_at = DEFAULT_RUN_AT_UTC if worker is None else worker.run_at_utc
+            expected = expected_price_date(observed_at, run_at)
+            lag = None if actual is None else price_lag_sessions(actual, observed_at, run_at)
+            return RadarPriceFreshnessView(
+                expected,
+                actual,
+                lag,
+                "unavailable" if lag is None else "stale" if lag > 0 else "fresh",
+            )
+        except (RuntimeError, ValueError, SQLAlchemyError) as exc:
+            raise QuerySourceError(
+                "market_radar_database", "市场雷达价格日期无法安全读取。"
+            ) from exc
+
+    def sync_status(self) -> MarketRadarSyncStatusView:
+        """只读市场运行表, 每个来源独立报告错误。"""
+        now = self._clock()
+        if now.utcoffset() is None:
+            raise ValueError("Radar query clock must be timezone-aware")
+        now = now.astimezone(UTC)
+        try:
+            return self._sync_status_at(now)
+        except (RuntimeError, ValueError, SQLAlchemyError) as exc:
+            raise QuerySourceError("market_radar_database", "雷达更新状态无法安全读取。") from exc
+
+    def _sync_status_at(self, now: datetime) -> MarketRadarSyncStatusView:
+        repository = self._repository
+        worker = None if repository is None else repository.daily_worker()
+        run_at = DEFAULT_RUN_AT_UTC if worker is None else worker.run_at_utc
+        due = scheduled_at(now, run_at)
+        worker_state: Literal["not_configured", "running", "idle", "stopped", "stale"] = (
+            "not_configured"
+        )
+        if worker is not None:
+            age = (now - worker.heartbeat_at_utc).total_seconds()
+            if age < 0 or worker.started_at_utc > worker.heartbeat_at_utc:
+                raise ValueError("Radar worker clock is invalid")
+            worker_state = (
+                "stopped"
+                if worker.stopped_at_utc is not None
+                else "stale"
+                if age > WORKER_STALE_SECONDS
+                else "running"
+                if worker.active_job
+                else "idle"
+            )
+        jobs: list[RadarSyncJobView] = []
+        for job in DAILY_JOBS:
+            target = expected_price_date(now, run_at) if job in PRICE_JOBS else due.date()
+            try:
+                publication = None if repository is None else repository.daily_publication(job)
+                source_run = (
+                    None if repository is None else repository.latest_source_run(DAILY_SOURCES[job])
+                )
+                attempts = () if repository is None else repository.daily_attempts(job=job)
+                latest = attempts[0] if attempts else None
+                if latest is not None and latest.scheduled_at_utc == due and job not in PRICE_JOBS:
+                    target = max(target, latest.target_date)
+                used = sum(item.scheduled_at_utc == due for item in attempts)
+                satisfied = (
+                    publication is not None
+                    and publication.as_of_date >= target
+                    and publication.coverage_ready
+                )
+                if publication is not None and publication.published_at_utc > now:
+                    raise ValueError("Radar publication is in the future")
+                if publication is not None and (
+                    publication.as_of_date > now.date()
+                    or (job in PRICE_JOBS and publication.as_of_date == now.date())
+                ):
+                    raise ValueError("Radar data date is not yet available")
+                state = "complete" if satisfied else "pending"
+                reason = None
+                if latest is not None and (
+                    publication is None or latest.started_at_utc >= publication.published_at_utc
+                ):
+                    state = "pending" if latest.status == "complete" else latest.status
+                    reason = latest.error_code
+                if (
+                    source_run is not None
+                    and source_run.status == "FAILED"
+                    and (latest is None or source_run.started_at_utc > latest.started_at_utc)
+                ):
+                    state, reason = "failed", "source_failed"
+                if satisfied and state not in {"running", "failed"}:
+                    state, reason = "complete", None
+                if (
+                    job == "breadth"
+                    and state == "pending"
+                    and (
+                        not jobs
+                        or jobs[0].published_as_of_date is None
+                        or jobs[0].published_as_of_date < target
+                    )
+                ):
+                    state, reason = "waiting_dependency", "benchmark_not_ready"
+                if (
+                    latest is not None
+                    and latest.scheduled_at_utc == due
+                    and latest.status in {"failed", "waiting_source", "interrupted"}
+                    and latest.next_retry_at_utc is None
+                    and not satisfied
+                ):
+                    state = "blocked"
+                last_attempt = latest.started_at_utc if latest else None
+                if source_run is not None and (
+                    last_attempt is None or source_run.started_at_utc > last_attempt
+                ):
+                    last_attempt = source_run.started_at_utc
+                jobs.append(
+                    RadarSyncJobView(
+                        job,
+                        target,
+                        state,
+                        last_attempt,
+                        None if publication is None else publication.published_at_utc,
+                        None if publication is None else publication.as_of_date,
+                        used,
+                        None
+                        if latest is None or latest.scheduled_at_utc != due
+                        else latest.next_retry_at_utc,
+                        reason,
+                        satisfied,
+                        None if publication is None else publication.validity,
+                    )
+                )
+            except (RuntimeError, ValueError, SQLAlchemyError):
+                jobs.append(
+                    RadarSyncJobView(
+                        job,
+                        target,
+                        "invalid",
+                        None,
+                        None,
+                        None,
+                        0,
+                        None,
+                        "source_unreadable",
+                        False,
+                        None,
+                    )
+                )
+        return MarketRadarSyncStatusView(
+            now,
+            worker_state,
+            None if worker is None else worker.heartbeat_at_utc,
+            None if worker is None else worker.next_scheduled_at_utc,
+            tuple(jobs),
+        )
 
     def summary(self) -> MarketRadarSummaryView:
         """返回价格摘要和六个能力模块的真实可用状态。"""
@@ -253,6 +434,9 @@ class MarketRadarQueryService:
                 observed=snapshot.coverage.observed,
                 ratio=snapshot.coverage.ratio,
             )
+        price_freshness = self._price_freshness(
+            None if snapshot is None else snapshot.as_of_date, observed_at
+        )
         return MarketRadarSummaryView(
             source_state=source_state,
             observed_at_utc=observed_at,
@@ -260,7 +444,10 @@ class MarketRadarQueryService:
             calculated_at_utc=None if snapshot is None else snapshot.calculated_at_utc,
             coverage=coverage,
             market=market,
-            modules=self._modules(snapshot, source_state, breadth, macro, earnings),
+            modules=self._modules(
+                snapshot, source_state, breadth, macro, earnings, price_freshness
+            ),
+            price_freshness=price_freshness,
         )
 
     def breadth(self) -> MarketBreadthView:
@@ -282,10 +469,14 @@ class MarketRadarQueryService:
             raise ValueError("market radar query clock must be timezone-aware")
         observed_at = observed_at.astimezone(UTC)
         start, end = observed_at.date(), observed_at.date() + timedelta(days=13)
+        recent_start = start - timedelta(days=ECONOMIC_EVENT_LOOKBACK_DAYS)
+        recent_end = start - timedelta(days=1)
         state: SourceState = "missing" if self._repository is None else "empty"
         economic_source = EventSourceView("eodhd_economic_events", state)
+        recent_source = economic_source
         earnings_source = EventSourceView("eodhd_calendar", state)
         economic_events: tuple[EconomicEventView, ...] = ()
+        recent_events: tuple[EconomicEventView, ...] = ()
         earnings_events: tuple[EarningsEventView, ...] = ()
         if self._repository is not None:
             try:
@@ -306,14 +497,34 @@ class MarketRadarQueryService:
                             change_percentage=item.change_percentage,
                         )
                         for item in economic.batch.events
-                        if start <= item.event_date <= end
+                    )
+                    recent_events = tuple(
+                        item
+                        for item in economic_events
+                        if recent_start <= item.event_date <= recent_end
+                    )
+                    economic_events = tuple(
+                        item for item in economic_events if start <= item.event_date <= end
                     )
                     economic_source = _available_event_source(
-                        economic, observed_at, len(economic_events)
+                        economic,
+                        observed_at,
+                        len(economic_events),
+                        window_start=start,
+                        window_end=end,
+                    )
+                    recent_source = _available_event_source(
+                        economic,
+                        observed_at,
+                        len(recent_events),
+                        window_start=recent_start,
+                        window_end=recent_end,
                     )
             except (RuntimeError, SQLAlchemyError, TypeError, ValueError):
                 economic_source = EventSourceView("eodhd_economic_events", "invalid")
+                recent_source = economic_source
                 economic_events = ()
+                recent_events = ()
             try:
                 earnings = self._repository.latest_earnings_event_batch()
                 if earnings is not None:
@@ -331,7 +542,11 @@ class MarketRadarQueryService:
                         if start <= item.report_date <= end
                     )
                     earnings_source = _available_event_source(
-                        earnings, observed_at, len(earnings_events)
+                        earnings,
+                        observed_at,
+                        len(earnings_events),
+                        window_start=start,
+                        window_end=end,
                     )
             except (RuntimeError, SQLAlchemyError, TypeError, ValueError):
                 earnings_source = EventSourceView("eodhd_calendar", "invalid")
@@ -344,6 +559,23 @@ class MarketRadarQueryService:
             window_end=end,
             economic_source=economic_source,
             earnings_source=earnings_source,
+            recent_economic=RecentEconomicEventsView(
+                window_start=recent_start,
+                window_end=recent_end,
+                source=recent_source,
+                days=tuple(
+                    MarketEventDayView(
+                        day=recent_start + timedelta(days=index),
+                        economic_events=tuple(
+                            item
+                            for item in recent_events
+                            if item.event_date == recent_start + timedelta(days=index)
+                        ),
+                        earnings_events=(),
+                    )
+                    for index in range(ECONOMIC_EVENT_LOOKBACK_DAYS)
+                ),
+            ),
             days=tuple(
                 MarketEventDayView(
                     day=start + timedelta(days=index),
@@ -459,6 +691,9 @@ class MarketRadarQueryService:
             as_of_date=None if snapshot is None else snapshot.as_of_date,
             calculated_at_utc=None if snapshot is None else snapshot.calculated_at_utc,
             items=items,
+            price_freshness=self._price_freshness(
+                None if snapshot is None else snapshot.as_of_date, observed_at
+            ),
         )
 
     def sector(self, sector_id: str) -> SectorRadarView:
@@ -492,6 +727,7 @@ class MarketRadarQueryService:
                 offset=offset,
                 limit=limit,
                 has_more=False,
+                price_freshness=self._price_freshness(None, observed_at),
             )
         rows = list(self._stock_rows(snapshot))
         available_sectors = {item.sector_id for item in rows}
@@ -524,6 +760,7 @@ class MarketRadarQueryService:
             offset=offset,
             limit=limit,
             has_more=len(window) > limit,
+            price_freshness=self._price_freshness(snapshot.as_of_date, observed_at),
         )
 
     def stock(self, instrument_id: str) -> StockRadarView:
@@ -568,10 +805,13 @@ class MarketRadarQueryService:
                 "market_radar_database",
                 "市场雷达当前宽度快照无法安全读取。",
             )
+        price_freshness = self._price_freshness(snapshot.as_of_date, observed_at)
         return MarketBreadthView(
             source_state="available",
             observed_at_utc=observed_at,
-            validity=_breadth_validity(
+            validity="stale"
+            if price_freshness.state == "stale"
+            else _breadth_validity(
                 snapshot,
                 membership_age_days=membership_age_days,
             ),
@@ -582,6 +822,7 @@ class MarketRadarQueryService:
             freshness=RadarFreshnessView(
                 membership_age_days=membership_age_days,
                 stale_after_days=_BREADTH_STALE_AFTER_DAYS,
+                price=price_freshness,
             ),
             b50=_breadth_metric(snapshot.b50),
             b200=_breadth_metric(snapshot.b200),
@@ -776,6 +1017,7 @@ class MarketRadarQueryService:
         breadth: MarketBreadthView | None,
         macro: MacroRegimeView | None,
         earnings: MarketEarningsView | None,
+        price_freshness: RadarPriceFreshnessView,
     ) -> tuple[RadarModuleView, ...]:
         if snapshot is None:
             price_state: RadarModuleState = "unavailable"
@@ -796,6 +1038,9 @@ class MarketRadarQueryService:
                 (snapshot.market.spy_return_20, snapshot.market.spy_distance_ma_200)
             )
             equal_weight_state = _module_state((snapshot.market.rsp_spy_return_20,))
+            if price_freshness.state == "stale":
+                spy_state = "stale"
+                equal_weight_state = "stale"
             spy_module = RadarModuleView(
                 "spy_trend",
                 "SPY 趋势",
@@ -806,7 +1051,7 @@ class MarketRadarQueryService:
                 "equal_weight",
                 "等权确认",
                 equal_weight_state,
-                _module_detail(equal_weight_state, complete="RSP/SPY 20 日相对表现可用。"),
+                _module_detail(equal_weight_state, complete="RSP 减 SPY 的 20 日收益差可用。"),
             )
         if breadth is None:
             breadth_module = RadarModuleView(
@@ -831,7 +1076,7 @@ class MarketRadarQueryService:
             breadth_details = {
                 "complete": "SPY 当前持仓代理的四项宽度指标完整。",
                 "partial": "部分宽度指标覆盖率为 90%-95%。当前仅展示原始值。",
-                "stale": "SPY 当前持仓代理已超过 7 个日历日未更新。",
+                "stale": "宽度价格落后于目标交易日, 或成员超过七日未更新。",
                 "insufficient_coverage": ("至少一项宽度指标覆盖率低于 90%。该项不展示数值。"),
             }
             breadth_module = RadarModuleView(

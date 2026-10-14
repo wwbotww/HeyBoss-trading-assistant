@@ -465,11 +465,50 @@ class RadarCoverageView:
 
 
 @dataclass(frozen=True)
+class RadarPriceFreshnessView:
+    """价格观测相对已经到期的交易日, 独立于指标完整性。"""
+
+    expected_as_of_date: date
+    actual_as_of_date: date | None
+    lag_sessions: int | None
+    state: Literal["fresh", "stale", "unavailable"]
+
+
+@dataclass(frozen=True)
+class RadarSyncJobView:
+    """单个来源的最新尝试与已发布事实。"""
+
+    job: str
+    target_date: date
+    state: str
+    last_attempt_at_utc: datetime | None
+    last_success_at_utc: datetime | None
+    published_as_of_date: date | None
+    attempts_used: int
+    next_retry_at_utc: datetime | None
+    error_code: str | None
+    target_satisfied: bool
+    data_validity: str | None
+
+
+@dataclass(frozen=True)
+class MarketRadarSyncStatusView:
+    """雷达进程状态不能替代来源更新成功。"""
+
+    observed_at_utc: datetime
+    worker_state: Literal["not_configured", "running", "idle", "stopped", "stale"]
+    last_heartbeat_at_utc: datetime | None
+    next_scheduled_at_utc: datetime | None
+    jobs: tuple[RadarSyncJobView, ...]
+
+
+@dataclass(frozen=True)
 class RadarFreshnessView:
     """当前成员代理相对查询时点的新鲜度。"""
 
     membership_age_days: int
     stale_after_days: int
+    price: RadarPriceFreshnessView | None = None
 
 
 @dataclass(frozen=True)
@@ -718,8 +757,18 @@ class MarketEventDayView:
 
 
 @dataclass(frozen=True)
+class RecentEconomicEventsView:
+    """最近七日经济事件, 与未来窗口共用批次但独立披露覆盖。"""
+
+    window_start: date
+    window_end: date
+    source: EventSourceView
+    days: tuple[MarketEventDayView, ...]
+
+
+@dataclass(frozen=True)
 class MarketEventsView:
-    """固定十四日事件窗口, 两类来源状态相互独立。"""
+    """未来十四日与最近七日经济事件, 两类来源状态相互独立。"""
 
     observed_at_utc: datetime
     window_start: date
@@ -727,6 +776,7 @@ class MarketEventsView:
     economic_source: EventSourceView
     earnings_source: EventSourceView
     days: tuple[MarketEventDayView, ...]
+    recent_economic: RecentEconomicEventsView
 
 
 @dataclass(frozen=True)
@@ -810,6 +860,8 @@ class MarketRadarSummaryView:
     market: RadarMarketView | None
     modules: tuple[RadarModuleView, ...]
 
+    price_freshness: RadarPriceFreshnessView | None = None
+
 
 @dataclass(frozen=True)
 class SectorRadarView:
@@ -830,6 +882,8 @@ class SectorRadarListView:
     as_of_date: date | None
     calculated_at_utc: datetime | None
     items: tuple[SectorRadarView, ...]
+
+    price_freshness: RadarPriceFreshnessView | None = None
 
 
 @dataclass(frozen=True)
@@ -859,6 +913,8 @@ class StockRadarPageView:
     offset: int
     limit: int
     has_more: bool
+
+    price_freshness: RadarPriceFreshnessView | None = None
 
 
 @dataclass(frozen=True)

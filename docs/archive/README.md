@@ -11,6 +11,8 @@
 | 早期 Web 阶段            | [Web 重构 F0–F4](web-rebuild.md)                                         | Streamlit 移除、Vue/API 建设；现行[Web 架构](../reference/technical-reference.md#存储与-web-边界) |
 | 2026-09-02 原始设想      | [市场雷达产品设想](HeyBoss_market_radar_implementation_plan.md)          | 保留已调整设想的来由；现行[市场参考](../reference/market-radar.md)                                |
 | 截至 2026-09-06          | [市场雷达 R0–R7](market-radar-implementation-plan.md)                    | 阶段契约、初始化、部署与浏览器证据；[当前同步操作](../operations/market-radar.md)                 |
+| 2026-09-30               | [雷达每日更新首次验收](market-radar-daily-acceptance-20260930.md)        | 独立目录迁移、六来源真实发布、FRED 恢复、网页与质量检查；[连续验收待办](../plans/market-radar-daily-update.md) |
+| 2026-10-08               | [服务恢复检查](restart-check-20261008.md)                              | 当时连接、核对与网页恢复；宽度及新因子待完成，断连和数据库锁问题未完成根因修复；不替代连续生产验收 |
 | 2026-09-16，补充至 09-19 | [两仓日历及缺分保护实施](facdigger-heyboss-joint-implementation-plan.md) | 获批文件清单和实现验收；现行[因子契约](../reference/factor-integration.md)                        |
 | 2026-09-19               | [826 正式本地回测](local-backtest-826.md)                                | 原始输入、旧 500e 网页目录和结果；[当前回测操作](../operations/data-and-backtest.md)              |
 | 2026-09-19 至 09-25      | [826 每日自动交易获批方案](826-ibkr-paper-daily-implementation-plan.md)  | 原 A/B/C/D 范围及 R1–R3、14.8 修复；[剩余验收](../plans/826-paper-production-acceptance.md)       |

@@ -313,7 +313,10 @@ def seed_market_radar_data(
         bars_fetched=5_000,
         bars_written=5_000,
     )
+    from trading_assistant.market_radar.schedule import expected_price_date
+
     today = datetime.now(UTC).date()
+    price_date = expected_price_date(datetime.now(UTC))
     membership_date = today - timedelta(days=membership_age_days)
     complete_breadth = breadth_metric or BreadthMetric(0.5, "complete", 20, 20, 1, 50)
     membership = CurrentMarketMembership(
@@ -329,7 +332,7 @@ def seed_market_radar_data(
         ),
     )
     breadth = CurrentBreadthSnapshot(
-        as_of_date=today,
+        as_of_date=price_date,
         membership_date=membership_date,
         membership_source=membership.source,
         calculated_at_utc=timestamp,
@@ -340,7 +343,7 @@ def seed_market_radar_data(
     )
     repository.start_sync_run(
         run_id="web-breadth-run",
-        source="spy_current_members",
+        source="current_breadth",
         started_at_utc=timestamp,
         requested_start_date=today - timedelta(days=400),
         requested_end_date=today,

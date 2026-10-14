@@ -11,6 +11,10 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from trading_assistant.market_radar.runtime import (
+    load_market_radar_runtime,
+    market_radar_writer_lock,
+)
 from trading_assistant.market_radar.service import sync_market_economic_events
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,16 +39,15 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     try:
-        summary = asyncio.run(
-            sync_market_economic_events(
-                database_url=os.getenv(
-                    "MARKET_RADAR_DATABASE_URL",
-                    f"sqlite:///{PROJECT_ROOT / 'data' / 'market-radar.db'}",
-                ),
-                data_config_path=args.data_config,
-                eodhd_api_token=os.getenv("EODHD_API_TOKEN", "").strip(),
+        runtime = load_market_radar_runtime(PROJECT_ROOT, os.environ)
+        with market_radar_writer_lock(runtime):
+            summary = asyncio.run(
+                sync_market_economic_events(
+                    database_url=runtime.database_url,
+                    data_config_path=args.data_config,
+                    eodhd_api_token=os.getenv("EODHD_API_TOKEN", "").strip(),
+                )
             )
-        )
     except (ValueError, OSError, RuntimeError, SQLAlchemyError) as exc:
         # 异常可能携带原始输入, 只输出类型。
         print(f"Market economic events sync failed: {type(exc).__name__}")

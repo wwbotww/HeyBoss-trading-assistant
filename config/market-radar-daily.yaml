@@ -1,0 +1,5 @@
+# 只配置六条固定雷达任务的日常运行, 不改变指标或交易行为。
+run_at_utc: "06:00"
+poll_interval_seconds: 60
+retry_interval_seconds: 3600
+max_attempts_per_day: 4

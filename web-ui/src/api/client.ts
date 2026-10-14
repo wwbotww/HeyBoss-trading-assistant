@@ -19,6 +19,7 @@ import type {
   MarketFundamentals,
   MarketEvents,
   MarketRadarSummary,
+  MarketRadarSyncStatus,
   OrderDetail,
   OrderQuery,
   OrderPage,
@@ -227,6 +228,10 @@ export function fetchLatestDataQuality(): Promise<DataQuality> {
 
 export function fetchSystemStatus(): Promise<SystemStatus> {
   return read(http.GET('/api/system/status'))
+}
+
+export function fetchMarketRadarSyncStatus(): Promise<MarketRadarSyncStatus> {
+  return read(http.GET('/api/market-radar/sync-status'))
 }
 
 export function fetchMarketRadarSummary(): Promise<MarketRadarSummary> {

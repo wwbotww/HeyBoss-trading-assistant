@@ -60,7 +60,7 @@ class WebApiSettings:
         backtest_url = values.get("BACKTEST_DATABASE_URL", "sqlite:///./data/backtest.db")
         market_radar_url = values.get(
             "MARKET_RADAR_DATABASE_URL",
-            "sqlite:///./data/market-radar.db",
+            "sqlite:///./runtime/market-radar/data/market-radar.db",
         )
         stale_seconds = int(values.get("PORTFOLIO_SNAPSHOT_STALE_SECONDS", "90"))
         if stale_seconds < 1:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -35,6 +35,8 @@ from trading_assistant.market_radar.metrics import CurrentBreadthSnapshot, Price
 from trading_assistant.market_radar.models import (
     CurrentBreadthSnapshotRecord,
     CurrentMarketMemberRecord,
+    DailySyncAttemptRecord,
+    DailySyncWorkerRecord,
     EarningsCalendarEventRecord,
     EarningsMarketMemberRecord,
     EarningsRevisionSnapshotRecord,
@@ -50,9 +52,54 @@ from trading_assistant.market_radar.models import (
     RiskAppetiteSnapshotRecord,
 )
 from trading_assistant.market_radar.regime import MacroRegimeSnapshot
+from trading_assistant.market_radar.schedule import DAILY_JOBS, DAILY_SOURCES, DailyJob
 
 SyncRunStatus = Literal["RUNNING", "COMPLETE", "FAILED"]
 _SYNC_RUN_STATUSES = frozenset({"RUNNING", "COMPLETE", "FAILED"})
+DailyAttemptStatus = Literal["running", "complete", "waiting_source", "failed", "interrupted"]
+_ATTEMPT_STATUSES = {"running", "complete", "waiting_source", "failed", "interrupted"}
+
+
+@dataclass(frozen=True)
+class DailySyncAttempt:
+    """进程重启后仍可恢复的调度尝试。"""
+
+    run_id: str
+    job: DailyJob
+    scheduled_at_utc: datetime
+    target_date: date
+    attempt_number: int
+    started_at_utc: datetime
+    completed_at_utc: datetime | None
+    status: DailyAttemptStatus
+    error_code: str | None
+    next_retry_at_utc: datetime | None
+
+
+@dataclass(frozen=True)
+class DailySyncWorker:
+    """只读进程状态与实际使用的调度设置。"""
+
+    started_at_utc: datetime
+    heartbeat_at_utc: datetime
+    stopped_at_utc: datetime | None
+    active_job: DailyJob | None
+    next_scheduled_at_utc: datetime
+    run_at_utc: time
+    poll_interval_seconds: int
+    retry_interval_seconds: int
+    max_attempts_per_day: int
+
+
+@dataclass(frozen=True)
+class DailyPublication:
+    """一次已发布快照与来源审计的同次读取结果。"""
+
+    run_id: str
+    as_of_date: date
+    published_at_utc: datetime
+    coverage_ready: bool
+    validity: str
 
 
 @dataclass(frozen=True)
@@ -1179,3 +1226,254 @@ class MarketRadarRepository:
             bars_written=record.bars_written,
             error_summary=record.error_summary,
         )
+
+    def daily_schema_available(self) -> bool:
+        """旧库只返回未配置; 半套运行表表示损坏而非正常旧库。"""
+        tables = set(inspect(self._engine).get_table_names())
+        found = tables & {"daily_sync_attempts", "daily_sync_worker"}
+        if len(found) == 1:
+            raise RuntimeError("Market radar daily schema is incomplete")
+        return len(found) == 2
+
+    def start_daily_attempt(self, attempt: DailySyncAttempt) -> None:
+        """先写调度尝试, 再允许开始任何远端操作。"""
+        if (
+            attempt.status != "running"
+            or attempt.job not in DAILY_JOBS
+            or attempt.attempt_number < 1
+        ):
+            raise ValueError("Invalid daily attempt")
+        if attempt.started_at_utc < attempt.scheduled_at_utc:
+            raise ValueError("Daily attempt must not start before its schedule")
+        with self._sessions.begin() as session:
+            session.add(
+                DailySyncAttemptRecord(
+                    run_id=attempt.run_id,
+                    job=attempt.job,
+                    scheduled_at_utc=_utc(attempt.scheduled_at_utc),
+                    target_date=attempt.target_date,
+                    attempt_number=attempt.attempt_number,
+                    started_at_utc=_utc(attempt.started_at_utc),
+                    status="running",
+                )
+            )
+
+    def finish_daily_attempt(
+        self,
+        run_id: str,
+        *,
+        status: DailyAttemptStatus,
+        completed_at_utc: datetime,
+        error_code: str | None = None,
+        next_retry_at_utc: datetime | None = None,
+    ) -> None:
+        """仅收尾进行中的尝试, 不覆盖旧的成功或失败审计。"""
+        if status == "running" or status not in _ATTEMPT_STATUSES:
+            raise ValueError("Invalid terminal daily status")
+        with self._sessions.begin() as session:
+            record = session.get(DailySyncAttemptRecord, run_id)
+            if record is None or record.status != "running":
+                raise LookupError("Running daily attempt was not found")
+            if _utc(completed_at_utc) < cast(datetime, _loaded_utc(record.started_at_utc)):
+                raise ValueError("Daily clock moved backwards")
+            record.status = status
+            record.completed_at_utc = _utc(completed_at_utc)
+            record.error_code = error_code
+            record.next_retry_at_utc = (
+                None if next_retry_at_utc is None else _utc(next_retry_at_utc)
+            )
+
+    def daily_attempts(
+        self,
+        *,
+        job: DailyJob | None = None,
+        scheduled_at_utc: datetime | None = None,
+        running_only: bool = False,
+    ) -> tuple[DailySyncAttempt, ...]:
+        """读取最近尝试或待恢复记录; 不在查询端自动迁移。"""
+        if not self.daily_schema_available():
+            return ()
+        query = select(DailySyncAttemptRecord)
+        if job is not None:
+            query = query.where(DailySyncAttemptRecord.job == job)
+        if scheduled_at_utc is not None:
+            query = query.where(DailySyncAttemptRecord.scheduled_at_utc == _utc(scheduled_at_utc))
+        if running_only:
+            query = query.where(DailySyncAttemptRecord.status == "running")
+        query = query.order_by(
+            DailySyncAttemptRecord.started_at_utc.desc(),
+            DailySyncAttemptRecord.attempt_number.desc(),
+        )
+        with self._sessions() as session:
+            results = []
+            for row in session.scalars(query):
+                if row.job not in DAILY_JOBS or row.status not in _ATTEMPT_STATUSES:
+                    raise RuntimeError("Invalid persisted daily attempt")
+                results.append(
+                    DailySyncAttempt(
+                        row.run_id,
+                        row.job,
+                        cast(datetime, _loaded_utc(row.scheduled_at_utc)),
+                        row.target_date,
+                        row.attempt_number,
+                        cast(datetime, _loaded_utc(row.started_at_utc)),
+                        _loaded_utc(row.completed_at_utc),
+                        cast(DailyAttemptStatus, row.status),
+                        row.error_code,
+                        _loaded_utc(row.next_retry_at_utc),
+                    )
+                )
+            return tuple(results)
+
+    def update_daily_worker(self, worker: DailySyncWorker) -> None:
+        """单行短事务心跳, 不把请求或计算包含在 SQLite 写事务中。"""
+        if worker.active_job is not None and worker.active_job not in DAILY_JOBS:
+            raise ValueError("Invalid active radar job")
+        with self._sessions.begin() as session:
+            session.merge(
+                DailySyncWorkerRecord(
+                    worker_id="radar",
+                    started_at_utc=_utc(worker.started_at_utc),
+                    heartbeat_at_utc=_utc(worker.heartbeat_at_utc),
+                    stopped_at_utc=None
+                    if worker.stopped_at_utc is None
+                    else _utc(worker.stopped_at_utc),
+                    active_job=worker.active_job,
+                    next_scheduled_at_utc=_utc(worker.next_scheduled_at_utc),
+                    run_at_utc=worker.run_at_utc.strftime("%H:%M"),
+                    poll_interval_seconds=worker.poll_interval_seconds,
+                    retry_interval_seconds=worker.retry_interval_seconds,
+                    max_attempts_per_day=worker.max_attempts_per_day,
+                )
+            )
+
+    def daily_worker(self) -> DailySyncWorker | None:
+        """无运行表或无启动记录表示未配置。"""
+        if not self.daily_schema_available():
+            return None
+        with self._sessions() as session:
+            row = session.get(DailySyncWorkerRecord, "radar")
+            if row is None:
+                return None
+            if row.active_job is not None and row.active_job not in DAILY_JOBS:
+                raise RuntimeError("Invalid persisted radar worker")
+            return DailySyncWorker(
+                cast(datetime, _loaded_utc(row.started_at_utc)),
+                cast(datetime, _loaded_utc(row.heartbeat_at_utc)),
+                _loaded_utc(row.stopped_at_utc),
+                row.active_job,
+                cast(datetime, _loaded_utc(row.next_scheduled_at_utc)),
+                time.fromisoformat(row.run_at_utc),
+                row.poll_interval_seconds,
+                row.retry_interval_seconds,
+                row.max_attempts_per_day,
+            )
+
+    def latest_source_run(self, source: str) -> MarketRadarSyncRun | None:
+        """来源最近一次运行, 包括失败, 不用其他来源的成功掩盖它。"""
+        with self._sessions() as session:
+            row = session.scalar(
+                select(MarketRadarSyncRunRecord)
+                .where(MarketRadarSyncRunRecord.source == source)
+                .order_by(MarketRadarSyncRunRecord.started_at_utc.desc())
+                .limit(1)
+            )
+            return None if row is None else self._to_sync_run(row)
+
+    def daily_publication(self, job: DailyJob) -> DailyPublication | None:
+        """在一个查询中读取快照及其成功来源, 供恢复和状态查询共同使用。"""
+        record_types: dict[
+            DailyJob,
+            type[
+                PriceSnapshotRecord
+                | MacroRegimeSnapshotRecord
+                | EconomicEventSnapshotRecord
+                | FundamentalSnapshotRecord
+                | EarningsRevisionSnapshotRecord
+                | CurrentBreadthSnapshotRecord
+            ],
+        ] = {
+            "prices": PriceSnapshotRecord,
+            "macro": MacroRegimeSnapshotRecord,
+            "economic_events": EconomicEventSnapshotRecord,
+            "fundamentals": FundamentalSnapshotRecord,
+            "earnings": EarningsRevisionSnapshotRecord,
+            "breadth": CurrentBreadthSnapshotRecord,
+        }
+        record_type = record_types[job]
+        with self._sessions() as session:
+            # 缺旧快照表与损坏不同, 旧的合法市场库允许尚未采集某个来源。
+            if not inspect(self._engine).has_table(record_type.__tablename__):
+                return None
+            result = session.execute(
+                select(record_type, MarketRadarSyncRunRecord)
+                .join(
+                    MarketRadarSyncRunRecord,
+                    MarketRadarSyncRunRecord.run_id == record_type.run_id,
+                    isouter=True,
+                )
+                .order_by(record_type.as_of_date.desc())
+                .limit(1)
+            ).first()
+            if result is None:
+                return None
+            row, run = result
+            if run is None or run.status != "COMPLETE" or run.source != DAILY_SOURCES[job]:
+                raise RuntimeError("Published radar source audit is inconsistent")
+            payload = row.payload_json
+            snapshot: (
+                PriceRadarSnapshot
+                | MacroRegimeSnapshot
+                | EconomicEventSnapshot
+                | FundamentalSnapshot
+                | EarningsRevisionSnapshot
+                | CurrentBreadthSnapshot
+            )
+            ready = True
+            validity = "complete"
+            if job == "prices":
+                snapshot = PriceRadarSnapshot.from_payload(payload)
+                ready = snapshot.coverage.observed == snapshot.coverage.eligible
+                validity = "complete" if ready else "partial"
+            elif job == "macro":
+                snapshot = MacroRegimeSnapshot.from_payload(payload)
+                ready = (
+                    0
+                    <= (snapshot.as_of_date - snapshot.real_rate.latest_observation_date).days
+                    <= snapshot.alignment_max_age_days
+                )
+                validity = snapshot.validity
+            elif job == "economic_events":
+                snapshot = EconomicEventSnapshot.from_payload(payload)
+            elif job == "fundamentals":
+                snapshot = FundamentalSnapshot.from_payload(payload)
+                validity = snapshot.validity
+            elif job == "earnings":
+                snapshot = EarningsRevisionSnapshot.from_payload(payload)
+                validity = snapshot.market.validity
+            else:
+                snapshot = CurrentBreadthSnapshot.from_payload(payload)
+                validity = (
+                    "complete"
+                    if all(
+                        metric.validity == "complete"
+                        for metric in (snapshot.b50, snapshot.b200, snapshot.ad10, snapshot.nhnl)
+                    )
+                    else "partial"
+                )
+            timestamp = (
+                snapshot.captured_at_utc
+                if isinstance(snapshot, EconomicEventSnapshot)
+                else snapshot.calculated_at_utc
+            )
+            row_timestamp = (
+                row.captured_at_utc if job == "economic_events" else row.calculated_at_utc
+            )
+            if (
+                snapshot.as_of_date != row.as_of_date
+                or timestamp != _loaded_utc(row_timestamp)
+                or run.completed_at_utc is None
+                or timestamp > cast(datetime, _loaded_utc(run.completed_at_utc))
+            ):
+                raise RuntimeError("Published radar date metadata is inconsistent")
+            return DailyPublication(run.run_id, snapshot.as_of_date, timestamp, ready, validity)

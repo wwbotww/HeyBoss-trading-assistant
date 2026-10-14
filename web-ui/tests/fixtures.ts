@@ -16,6 +16,7 @@ import type {
   MarketFundamentals,
   FundamentalMetric,
   MarketRadarSummary,
+  MarketRadarSyncStatus,
   OrderDetail,
   OrderPage,
   Overview,
@@ -449,7 +450,7 @@ export const marketEventsFixture: MarketEvents = {
     source_state: 'available',
     as_of_date: '2026-09-05',
     captured_at_utc: '2026-09-05T01:00:00Z',
-    window_start: '2026-09-05',
+    window_start: '2026-08-29',
     window_end: '2026-10-05',
     freshness: { age_seconds: 3600, stale_after_seconds: 86400, state: 'fresh' },
     coverage: {
@@ -477,6 +478,52 @@ export const marketEventsFixture: MarketEvents = {
     },
     watchlist_count: 10,
     window_event_count: 2,
+  },
+  recent_economic: {
+    window_start: '2026-08-29',
+    window_end: '2026-09-04',
+    source: {
+      source: 'eodhd_economic_events',
+      source_state: 'available',
+      as_of_date: '2026-09-05',
+      captured_at_utc: '2026-09-05T01:00:00Z',
+      window_start: '2026-08-29',
+      window_end: '2026-10-05',
+      freshness: { age_seconds: 3600, stale_after_seconds: 86400, state: 'fresh' },
+      coverage: {
+        state: 'covered',
+        covered_start: '2026-08-29',
+        covered_end: '2026-09-04',
+        covered_days: 7,
+      },
+      watchlist_count: null,
+      window_event_count: 3,
+    },
+    days: Array.from({ length: 7 }, (_, index) => {
+      const day = new Date(Date.UTC(2026, 7, 29 + index)).toISOString().slice(0, 10)
+      return {
+        day,
+        earnings_events: [],
+        economic_events:
+          index < 3
+            ? [
+                {
+                  country: 'US',
+                  event_type: `Synthetic Recent ${String(index)}`,
+                  event_date: day,
+                  source_time: null,
+                  comparison: null,
+                  period: null,
+                  actual: index === 1 ? null : index === 0 ? 0 : -index,
+                  estimate: 1.5,
+                  previous: null,
+                  change: null,
+                  change_percentage: null,
+                },
+              ]
+            : [],
+      }
+    }),
   },
   days: Array.from({ length: 14 }, (_, index) => {
     const day = `2026-09-${String(5 + index).padStart(2, '0')}`
@@ -517,6 +564,28 @@ export const marketEventsFixture: MarketEvents = {
     }
   }),
 }
+
+export const marketRadarSyncStatusFixture = {
+  observed_at_utc: '2026-09-30T12:00:00Z',
+  worker_state: 'idle',
+  last_heartbeat_at_utc: '2026-09-30T11:59:30Z',
+  next_scheduled_at_utc: '2026-10-01T06:00:00Z',
+  jobs: ['prices', 'macro', 'economic_events', 'fundamentals', 'earnings', 'breadth'].map(
+    (job) => ({
+      job,
+      target_date: '2026-09-29',
+      state: 'complete',
+      last_attempt_at_utc: '2026-09-30T06:00:00Z',
+      last_success_at_utc: '2026-09-30T06:10:00Z',
+      published_as_of_date: '2026-09-29',
+      attempts_used: 1,
+      next_retry_at_utc: null,
+      error_code: null,
+      target_satisfied: true,
+      data_validity: 'complete',
+    }),
+  ),
+} satisfies MarketRadarSyncStatus
 
 export const marketRadarSummaryFixture = {
   source_state: 'available',
@@ -870,6 +939,7 @@ const defaultResponses: Readonly<Record<string, unknown>> = {
   '/api/data/catalog': catalogFixture,
   '/api/data/quality/latest': qualityFixture,
   '/api/system/status': systemFixture,
+  '/api/market-radar/sync-status': marketRadarSyncStatusFixture,
   '/api/market-radar/summary': marketRadarSummaryFixture,
   '/api/market-radar/breadth': marketBreadthFixture,
   '/api/market-radar/earnings': marketEarningsFixture,

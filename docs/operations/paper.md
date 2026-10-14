@@ -11,12 +11,12 @@
 | 运行根目录             | `HEYBOSS_RUNTIME_ROOT=./runtime`                                                      | 按以下目录分别挂载            |
 | 交易审计               | `LIVE_DATABASE_URL=sqlite:///./runtime/data/live.db`                                  | `/app/data/live.db`           |
 | 回测审计               | `BACKTEST_DATABASE_URL=sqlite:///./runtime/data/backtest.db`                          | `/app/data/backtest.db`       |
-| 市场库                 | `MARKET_RADAR_DATABASE_URL=sqlite:///./runtime/data/market-radar.db`                  | `/app/data/market-radar.db`   |
 | 行情 Catalog           | `CATALOG_PATH=./runtime/catalog/eodhd`                                                | `/app/catalog/eodhd`          |
 | Web 回测报告读取根目录 | `REPORT_ROOT=./runtime/reports/backtests`                                             | `/app/reports/backtests`      |
 | 质量报告               | `DATA_QUALITY_REPORT_ROOT=./runtime/reports/data-quality`                             | `/app/reports/data-quality`   |
-| 市场报告               | `MARKET_RADAR_REPORT_ROOT=./runtime/reports/market-radar`                             | `/app/reports/market-radar`   |
 | 完成的因子交付         | `FACDIGGER_FACTOR_BATCH_ROOT` 指向实际发布根目录；模板为 `./runtime/incoming/factors` | `/app/incoming/factors`，只读 |
+
+市场雷达的独立 Catalog、数据库和报告路径统一见[雷达目录说明](market-radar.md#每日运行)，不使用上表的交易 Catalog 或报告目录；Web 只读挂载雷达 data。
 
 `HEYBOSS_RUNTIME_ROOT` 控制 Compose 宿主挂载，不会自动重写宿主 CLI 的其他变量；改变根目录时需同步核对路径。宿主 CLI 使用 `FACTOR_BATCH_PATH`，Compose 数据服务固定使用 `/app/incoming/factors`。两者必须能看到同一组完整交付。
 
@@ -139,14 +139,14 @@ manual 需要 Telegram 凭据及确认后的 chat ID，批准后仍重算仓位�
 
 ## 停止服务
 
-整套 HeyBoss 维护停机前先核对在途订单；停止交易和所有数据写者，再停止其余服务：
+整套 HeyBoss 常驻服务维护停机前先核对在途订单；停止交易和常驻数据写者，再停止其余服务：
 
 ```bash
-docker compose stop trading-node approval-bot paper-data-sync
+docker compose stop trading-node approval-bot paper-data-sync market-radar-daily
 docker compose stop web-ui web-api ib-gateway
 ```
 
-若还有一次性市场同步或宿主 CLI，须等待其结束或按维护方案停止；它们不会因停止常驻服务而自动结束。仅 Web 维护使用[定向 Web 命令](web.md#停止与恢复)，不用无目标的 `down`、prune 或 `--remove-orphans`。
+若还有一次性市场同步或宿主 CLI，须等待其结束或按维护方案停止；它们不会因停止常驻服务而自动结束。FacDigger 属于另一项目，不在上述命令范围内。仅 Web 维护使用[定向 Web 命令](web.md#停止与恢复)，不用无目标的 `down`、prune 或 `--remove-orphans`。
 
 ## 常见定位入口
 

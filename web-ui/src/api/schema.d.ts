@@ -293,7 +293,7 @@ export interface paths {
         };
         /**
          * Get Events
-         * @description 返回固定十四日事件轴, 两类已发布来源独立降级。
+         * @description 返回未来十四日及最近七日经济事件, 两类已发布来源独立降级。
          */
         get: operations["getMarketRadarEvents"];
         put?: never;
@@ -436,6 +436,26 @@ export interface paths {
          * @description 返回最近完整价格快照和六个雷达能力状态。
          */
         get: operations["getMarketRadarSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/market-radar/sync-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sync Status
+         * @description 只读采集进程和各来源事实, 不启动或重试采集。
+         */
+        get: operations["getMarketRadarSyncStatus"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1390,6 +1410,7 @@ export interface components {
              * Format: date-time
              */
             observed_at_utc: string;
+            recent_economic: components["schemas"]["RecentEconomicEventsResponse"];
             /**
              * Window End
              * Format: date
@@ -1443,11 +1464,31 @@ export interface components {
              * Format: date-time
              */
             observed_at_utc: string;
+            price_freshness?: components["schemas"]["RadarPriceFreshnessResponse"] | null;
             /**
              * Source State
              * @enum {string}
              */
             source_state: "available" | "empty" | "missing" | "invalid" | "unconfigured" | "unobserved";
+        };
+        /** MarketRadarSyncStatusResponse */
+        MarketRadarSyncStatusResponse: {
+            /** Jobs */
+            jobs: components["schemas"]["RadarSyncJobResponse"][];
+            /** Last Heartbeat At Utc */
+            last_heartbeat_at_utc: string | null;
+            /** Next Scheduled At Utc */
+            next_scheduled_at_utc: string | null;
+            /**
+             * Observed At Utc
+             * Format: date-time
+             */
+            observed_at_utc: string;
+            /**
+             * Worker State
+             * @enum {string}
+             */
+            worker_state: "not_configured" | "running" | "idle" | "stopped" | "stale";
         };
         /** OrderDetailResponse */
         OrderDetailResponse: {
@@ -1664,6 +1705,7 @@ export interface components {
         RadarFreshnessResponse: {
             /** Membership Age Days */
             membership_age_days: number;
+            price?: components["schemas"]["RadarPriceFreshnessResponse"] | null;
             /** Stale After Days */
             stale_after_days: number;
         };
@@ -1701,6 +1743,67 @@ export interface components {
              */
             state: "complete" | "partial" | "stale" | "insufficient_history" | "insufficient_coverage" | "unavailable";
         };
+        /** RadarPriceFreshnessResponse */
+        RadarPriceFreshnessResponse: {
+            /** Actual As Of Date */
+            actual_as_of_date: string | null;
+            /**
+             * Expected As Of Date
+             * Format: date
+             */
+            expected_as_of_date: string;
+            /** Lag Sessions */
+            lag_sessions: number | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "fresh" | "stale" | "unavailable";
+        };
+        /** RadarSyncJobResponse */
+        RadarSyncJobResponse: {
+            /** Attempts Used */
+            attempts_used: number;
+            /** Data Validity */
+            data_validity: string | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Job */
+            job: string;
+            /** Last Attempt At Utc */
+            last_attempt_at_utc: string | null;
+            /** Last Success At Utc */
+            last_success_at_utc: string | null;
+            /** Next Retry At Utc */
+            next_retry_at_utc: string | null;
+            /** Published As Of Date */
+            published_as_of_date: string | null;
+            /** State */
+            state: string;
+            /**
+             * Target Date
+             * Format: date
+             */
+            target_date: string;
+            /** Target Satisfied */
+            target_satisfied: boolean;
+        };
+        /** RecentEconomicEventsResponse */
+        RecentEconomicEventsResponse: {
+            /** Days */
+            days: components["schemas"]["MarketEventDayResponse"][];
+            source: components["schemas"]["EventSourceResponse"];
+            /**
+             * Window End
+             * Format: date
+             */
+            window_end: string;
+            /**
+             * Window Start
+             * Format: date
+             */
+            window_start: string;
+        };
         /** ReportTableResponse */
         ReportTableResponse: {
             /** Columns */
@@ -1735,6 +1838,7 @@ export interface components {
              * Format: date-time
              */
             observed_at_utc: string;
+            price_freshness?: components["schemas"]["RadarPriceFreshnessResponse"] | null;
             /**
              * Source State
              * @enum {string}
@@ -1850,6 +1954,7 @@ export interface components {
             observed_at_utc: string;
             /** Offset */
             offset: number;
+            price_freshness?: components["schemas"]["RadarPriceFreshnessResponse"] | null;
             /**
              * Source State
              * @enum {string}
@@ -3057,6 +3162,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarketRadarSummaryResponse"];
+                };
+            };
+            /** @description 查询对象不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 请求参数无效 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description 只读数据源无法读取 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    getMarketRadarSyncStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketRadarSyncStatusResponse"];
                 };
             };
             /** @description 查询对象不存在 */

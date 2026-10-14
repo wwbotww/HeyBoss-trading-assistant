@@ -24,10 +24,11 @@ _SPEC.loader.exec_module(cli)
 def test_cli_prints_only_summary_and_uses_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     async def sync(**kwargs: object) -> MarketFundamentalsSyncSummary:
         assert kwargs["eodhd_api_token"] == "test-token"  # noqa: S105
-        assert kwargs["database_url"] == "sqlite:////tmp/isolated.db"
+        assert kwargs["database_url"] == f"sqlite:///{tmp_path / 'isolated.db'}"
         return MarketFundamentalsSyncSummary(
             run_id="test-run",
             status="COMPLETE",
@@ -41,7 +42,7 @@ def test_cli_prints_only_summary_and_uses_environment(
         )
 
     monkeypatch.setenv("EODHD_API_TOKEN", "test-token")
-    monkeypatch.setenv("MARKET_RADAR_DATABASE_URL", "sqlite:////tmp/isolated.db")
+    monkeypatch.setenv("MARKET_RADAR_DATABASE_URL", f"sqlite:///{tmp_path / 'isolated.db'}")
     monkeypatch.setattr(sys, "argv", ["sync_market_fundamentals.py"])
     monkeypatch.setattr(cli, "sync_market_fundamentals", sync)
     assert cli.main() == 0

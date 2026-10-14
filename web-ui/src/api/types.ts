@@ -66,3 +66,5 @@ export type StockRadarQuery = NonNullable<
 >
 
 export type BacktestTableName = 'equity' | 'orders' | 'fills' | 'positions' | 'account'
+
+export type MarketRadarSyncStatus = components['schemas']['MarketRadarSyncStatusResponse']

@@ -8,7 +8,7 @@ import math
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -94,6 +94,68 @@ def _spy_bars() -> tuple[PriceBar, ...]:
         )
         for index in range(21)
     )
+
+
+def test_daily_old_price_cannot_replace_published_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def sync(**_kwargs: object) -> PipelineSummary:
+        return _pipeline_summary(tmp_path / "report.json")
+
+    monkeypatch.setattr(service, "sync_historical_specs", sync)
+    monkeypatch.setattr(service, "load_internal_price_bars", lambda *_: {"SPY.US": _spy_bars()})
+    arguments = _paths(tmp_path)
+    asyncio.run(
+        service.sync_market_radar_prices(
+            **arguments,  # type: ignore[arg-type]
+            clock=lambda: STARTED,
+            run_id_factory=lambda: "old",
+        )
+    )
+    with pytest.raises(service.MarketRadarSyncError, match="price_not_ready"):
+        asyncio.run(
+            service.sync_market_radar_prices(
+                **arguments,  # type: ignore[arg-type]
+                clock=lambda: STARTED + timedelta(hours=1),
+                run_id_factory=lambda: "new",
+                expected_price_date=date(2026, 9, 1),
+            )
+        )
+    repository = MarketRadarRepository(str(arguments["database_url"]), read_only=True)
+    snapshot = repository.latest_price_snapshot()
+    assert snapshot is not None
+    assert snapshot.calculated_at_utc == STARTED
+    assert repository.get_sync_run("new").status == "FAILED"  # type: ignore[union-attr]
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    ("code", "kinds", "expected", "retryable"),
+    [
+        ("no_data", (), "price_not_ready", True),
+        ("fetch_failed", ("temporary",), "temporary_source", True),
+        ("fetch_failed", ("rate_limited",), "rate_limited", True),
+        ("fetch_failed", ("permanent",), "data_quality", False),
+        ("split_adjustment_mismatch", ("temporary",), "data_quality", False),
+    ],
+)
+def test_daily_pipeline_failure_classification_preserves_quality_gate(
+    tmp_path: Path,
+    code: str,
+    kinds: tuple[Literal["temporary", "rate_limited", "permanent"], ...],
+    expected: str,
+    retryable: bool,
+) -> None:
+    summary = replace(
+        _pipeline_summary(tmp_path / "report.json"),
+        issues=(QualityIssue(code, "error", "SPY.US", None, "private vendor body"),),
+        failure_kinds=kinds,
+    )
+    with pytest.raises(service.MarketRadarSyncError) as captured:
+        service._check_daily_pipeline(summary)
+    assert captured.value.code == expected
+    assert captured.value.retryable is retryable
+    assert "private" not in str(captured.value)
 
 
 def _calendar_response(url: str, timeout: int) -> bytes:
@@ -1326,7 +1388,7 @@ def test_economic_sync_is_independent_and_uses_a_single_utc_capture_window(
         query = parse_qs(urlparse(url).query)
         calls.append(query)
         assert timeout == 120
-        assert query["from"] == ["2026-09-05"]
+        assert query["from"] == ["2026-08-29"]
         assert query["to"] == ["2026-10-05"]
         assert query["country"] == ["US"]
         assert "symbols" not in query
@@ -1377,8 +1439,13 @@ def test_economic_sync_is_independent_and_uses_a_single_utc_capture_window(
     snapshot = repository.latest_economic_event_snapshot()
     assert snapshot is not None
     assert len(snapshot.batch.events) == summary.event_count
-    assert snapshot.window_start == summary.window_start
-    assert snapshot.window_end == summary.window_end
+    assert (
+        snapshot.window_start
+        == summary.window_start
+        == run.requested_start_date
+        == date(2026, 8, 29)
+    )
+    assert snapshot.window_end == summary.window_end == run.requested_end_date == date(2026, 10, 5)
     repository.close()
     assert sorted(path.name for path in tmp_path.iterdir()) == ["radar.db"]
 

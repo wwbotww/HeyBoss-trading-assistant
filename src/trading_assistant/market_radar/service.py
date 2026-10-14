@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from trading_assistant.data.config import load_data_config, load_instruments
 from trading_assistant.data.eodhd_http import HttpTransport, download
-from trading_assistant.data.pipeline import CatalogWriteMode
+from trading_assistant.data.pipeline import CatalogWriteMode, PipelineSummary
 from trading_assistant.data.service import (
     select_instruments,
     sync_historical_specs,
@@ -22,7 +22,11 @@ from trading_assistant.market_radar.earnings import (
     EarningsRevisionValidity,
     calculate_earnings_revision_snapshot,
 )
-from trading_assistant.market_radar.economic_events import EconomicEventSnapshot
+from trading_assistant.market_radar.economic_events import (
+    ECONOMIC_EVENT_FORWARD_DAYS,
+    ECONOMIC_EVENT_LOOKBACK_DAYS,
+    EconomicEventSnapshot,
+)
 from trading_assistant.market_radar.eodhd_calendar import EodhdCalendarSource
 from trading_assistant.market_radar.eodhd_economic_events import EodhdEconomicEventsSource
 from trading_assistant.market_radar.eodhd_fundamentals import EodhdFundamentalsSource
@@ -198,6 +202,44 @@ class MarketEconomicEventsSyncSummary:
     source_time_present_count: int
 
 
+class MarketRadarSyncError(RuntimeError):
+    """自动同步可判断的脱敏原因; 不包含供应商响应或认证 URL。"""
+
+    def __init__(self, code: str, *, retryable: bool, waiting: bool = False) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+        self.waiting = waiting
+
+
+def _check_daily_pipeline(pipeline: PipelineSummary) -> None:
+    """保留既有质量判定, 仅为每日调用方分类已经发生的失败。"""
+    issues = [
+        *pipeline.issues,
+        *(issue for report in pipeline.instrument_reports for issue in report.issues),
+    ]
+    codes = {issue.code for issue in issues if issue.severity == "error"}
+    if codes and codes <= {"no_data", "stale_data"}:
+        raise MarketRadarSyncError("price_not_ready", retryable=True, waiting=True)
+    temporary = (
+        bool(pipeline.failure_kinds)
+        and set(pipeline.failure_kinds) <= {"temporary", "rate_limited"}
+        and codes <= {"fetch_failed"}
+    )
+    raise MarketRadarSyncError(
+        ("rate_limited" if "rate_limited" in pipeline.failure_kinds else "temporary_source")
+        if temporary
+        else "data_quality",
+        retryable=temporary,
+    )
+
+
+def _require_price_date(actual: date, expected: date | None) -> None:
+    """价格没有跟上目标时保留旧快照, 不改变维护入口的历史语义。"""
+    if expected is not None and actual != expected:
+        raise MarketRadarSyncError("price_not_ready", retryable=True, waiting=True)
+
+
 def _utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -215,7 +257,7 @@ async def sync_market_economic_events(
     clock: Callable[[], datetime] = _utc_now,
     run_id_factory: Callable[[], str] = _run_id,
 ) -> MarketEconomicEventsSyncSummary:
-    """采集固定美国 31 日窗口, 不读取股票池、Catalog 或其他雷达来源。"""
+    """采集美国过去七日、当天及未来三十日, 不读取其他雷达来源。"""
     settings = load_data_config(data_config_path).historical_data
     source = EodhdEconomicEventsSource(
         api_token=eodhd_api_token or "",
@@ -229,7 +271,8 @@ async def sync_market_economic_events(
         raise ValueError("market radar clock must return a timezone-aware timestamp")
     started_at = started_at.astimezone(UTC)
     capture_date = started_at.date()
-    window_end = capture_date + timedelta(days=30)
+    window_start = capture_date - timedelta(days=ECONOMIC_EVENT_LOOKBACK_DAYS)
+    window_end = capture_date + timedelta(days=ECONOMIC_EVENT_FORWARD_DAYS)
     run_id = run_id_factory()
     repository = MarketRadarRepository(database_url)
     run_started = False
@@ -239,19 +282,19 @@ async def sync_market_economic_events(
             run_id=run_id,
             source="eodhd_economic_events",
             started_at_utc=started_at,
-            requested_start_date=capture_date,
+            requested_start_date=window_start,
             requested_end_date=window_end,
             instrument_count=0,
         )
         run_started = True
-        batch = await source.request_events(start=capture_date, end=window_end)
+        batch = await source.request_events(start=window_start, end=window_end)
         completed_at = clock()
         snapshot = EconomicEventSnapshot(
             as_of_date=capture_date,
             captured_at_utc=completed_at,
             source="eodhd_economic_events",
             country="US",
-            window_start=capture_date,
+            window_start=window_start,
             window_end=window_end,
             batch=batch,
         )
@@ -262,7 +305,7 @@ async def sync_market_economic_events(
             source=snapshot.source,
             snapshot_date=capture_date,
             captured_at_utc=snapshot.captured_at_utc,
-            window_start=capture_date,
+            window_start=window_start,
             window_end=window_end,
             request_count=batch.request_count,
             raw_record_count=batch.raw_record_count,
@@ -557,6 +600,7 @@ async def sync_market_radar_prices(
     eodhd_api_token: str | None = None,
     clock: Callable[[], datetime] = _utc_now,
     run_id_factory: Callable[[], str] = _run_id,
+    expected_price_date: date | None = None,
 ) -> MarketRadarPriceSyncSummary:
     """经共享管道同步价格, 并仅在指标快照完成后发布成功状态。"""
     if mode not in _WRITE_MODES:
@@ -607,6 +651,8 @@ async def sync_market_radar_prices(
                 bars_fetched=pipeline.bars_fetched,
                 bars_written=pipeline.bars_written,
             )
+            if expected_price_date is not None:
+                _check_daily_pipeline(pipeline)
             snapshot_date = None
         else:
             status = "COMPLETE"
@@ -614,11 +660,17 @@ async def sync_market_radar_prices(
                 catalog_path,
                 market_config.price_instrument_ids,
             )
+            if expected_price_date is not None:
+                bars_by_instrument = {
+                    key: tuple(bar for bar in bars if bar.day <= expected_price_date)
+                    for key, bars in bars_by_instrument.items()
+                }
             snapshot = calculate_price_snapshot(
                 market_config,
                 bars_by_instrument,
                 calculated_at_utc=completed_at,
             )
+            _require_price_date(snapshot.as_of_date, expected_price_date)
             repository.publish_price_snapshot_and_complete(
                 run_id,
                 snapshot=snapshot,
@@ -676,6 +728,7 @@ async def sync_market_macro(
     fred_source: FredObservationSource | None = None,
     clock: Callable[[], datetime] = _utc_now,
     run_id_factory: Callable[[], str] = _run_id,
+    expected_price_date: date | None = None,
 ) -> MarketMacroSyncSummary:
     """同步两类宏观来源并原子发布风险偏好与四象限快照。"""
     if mode not in _WRITE_MODES:
@@ -738,6 +791,8 @@ async def sync_market_macro(
                 bars_fetched=pipeline.bars_fetched,
                 bars_written=pipeline.bars_written,
             )
+            if expected_price_date is not None:
+                _check_daily_pipeline(pipeline)
             snapshot_date = None
             risk_appetite_validity = None
             regime_validity = None
@@ -753,6 +808,11 @@ async def sync_market_macro(
                 )
                 for instrument_id, instrument_bars in bars.items()
             }
+            if expected_price_date is not None:
+                for instrument_bars in bounded_bars.values():
+                    if not instrument_bars:
+                        raise MarketRadarSyncError("price_not_ready", retryable=True, waiting=True)
+                    _require_price_date(instrument_bars[-1].day, expected_price_date)
             real_rates = await real_rate_source.request_observations(
                 market_config.real_rate_series,
                 resolved_start,
@@ -773,6 +833,13 @@ async def sync_market_macro(
                 risk_appetite=risk_snapshot,
                 calculated_at_utc=completed_at,
             )
+            _require_price_date(regime_snapshot.as_of_date, expected_price_date)
+            if (
+                expected_price_date is not None
+                and (expected_price_date - regime_snapshot.real_rate.latest_observation_date).days
+                > regime_snapshot.alignment_max_age_days
+            ):
+                raise MarketRadarSyncError("real_rate_not_ready", retryable=True, waiting=True)
             repository.publish_macro_bundle_and_complete(
                 run_id,
                 risk_snapshot=risk_snapshot,
@@ -839,6 +906,7 @@ async def sync_current_market_breadth(
     eodhd_api_token: str | None = None,
     clock: Callable[[], datetime] = _utc_now,
     run_id_factory: Callable[[], str] = _run_id,
+    expected_price_date: date | None = None,
 ) -> MarketBreadthSyncSummary:
     """通过可替换成员源和既有价格管道发布当前宽度快照。"""
     if mode not in _BREADTH_WRITE_MODES:
@@ -857,6 +925,11 @@ async def sync_current_market_breadth(
     resolved_start = start_date or resolved_end - timedelta(days=400)
     if resolved_start >= resolved_end:
         raise ValueError("start date must be earlier than end date")
+    if expected_price_date is not None and (
+        membership.membership_date > expected_price_date
+        or (expected_price_date - membership.membership_date).days > 7
+    ):
+        raise MarketRadarSyncError("membership_not_aligned", retryable=True, waiting=True)
     if membership.membership_date > resolved_end:
         raise ValueError("market membership date cannot be later than the requested end date")
     if (resolved_end - membership.membership_date).days > 7:
@@ -902,6 +975,8 @@ async def sync_current_market_breadth(
                 bars_fetched=pipeline.bars_fetched,
                 bars_written=pipeline.bars_written,
             )
+            if expected_price_date is not None:
+                _check_daily_pipeline(pipeline)
             snapshot_date = None
         else:
             status = "COMPLETE"
@@ -914,6 +989,7 @@ async def sync_current_market_breadth(
                 loaded[market_config.benchmark],
                 calculated_at_utc=completed_at,
             )
+            _require_price_date(snapshot.as_of_date, expected_price_date)
             repository.publish_current_breadth_and_complete(
                 run_id,
                 membership=membership,

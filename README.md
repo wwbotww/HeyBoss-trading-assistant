@@ -10,7 +10,7 @@
 - 双动量和通用因子策略，一次运行一个活动策略；因子完整候选、日期身份映射和缺分持仓保护。
 - 共享回测与 paper 执行、提交前风控和审批、订单/成交审计、券商核对与持仓恢复。
 - 独立只读 Web，提供账户、策略、决策、订单、市场雷达、回测和系统查询。
-- 市场雷达的价格、宽度、宏观、盈利、基本面和事件轴，由六个显式一次性入口同步。
+- 市场雷达的价格、宽度、宏观、盈利、基本面和事件轴，由独立每日服务自动更新；六个一次性入口保留作维护。
 
 不支持真实账户、盘中实时行情、多策略混合或通用常驻调度；每日因子消费者和轮询已经实现。正式输入须为 FacDigger 的真实 `signal_inference`，仓库内非交易 fixture 只用于测试，历史 evaluation 只用于隔离回测。
 
@@ -44,7 +44,13 @@ macOS 安装 uv 和 Python 依赖：
 ```bash
 brew install uv
 uv python install 3.12
-uv sync --all-groups
+uv sync --frozen --all-groups
+```
+
+宿主前端开发按 [package.json](web-ui/package.json) 选择 Node.js / pnpm 版本，再安装锁定依赖：
+
+```bash
+pnpm --dir web-ui install --frozen-lockfile
 ```
 
 首次配置时复制环境模板，已有 `.env` 则保留并逐项核对：
@@ -53,7 +59,7 @@ uv sync --all-groups
 cp .env.example .env
 ```
 
-凭据仅填写在本地 `.env` 或环境变量，不写入 YAML、Python、Compose、notebook 或 Git。变量说明以[模板](.env.example)为准；正式配置保持 `TRADING_MODE=paper`。
+凭据仅填写在本地 `.env` 或环境变量，不写入 YAML、Python、Compose、notebook 或 Git。变量说明以[模板](.env.example)为准；正式配置保持 `TRADING_MODE=paper`。共享文档、日志摘录和截图前先脱敏凭据与账户信息；数据库、Catalog、原始运行报告留在私有目录。正式数据保护见[恢复边界](docs/operations/paper.md#故障与恢复)，本地访问边界见[Web 指引](docs/operations/web.md#构建与启动)。
 
 Compose 统一宿主运行根目录为 `HEYBOSS_RUNTIME_ROOT=./runtime`，模板中的宿主数据库、Catalog 和报告读取路径也指向 `runtime/`。宿主 CLI 显式使用 `uv run --frozen --env-file .env`；详细宿主/容器映射和回测报告写入区别见[路径说明](docs/operations/paper.md#配置与路径)。live、backtest 和 market 三个数据库必须分离。
 
@@ -68,18 +74,20 @@ docker compose build trading-node
 
 ## 开发检查
 
-Python 代码修改执行：
+以下从仓库根目录执行，先完成上面的依赖安装；`uv run --no-sync` 使用既有环境，不自动安装或更新依赖。测试使用隔离目录，不加载生产 `.env` 或指向正式数据库、Catalog。
+
+Python 变更的验证命令不自动修复源码：
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src scripts tests
-uv run pytest
-uv run pre-commit run --all-files
-docker compose config --quiet
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync mypy --explicit-package-bases src scripts tests
+uv run --no-sync pytest
 ```
 
-前端修改在已安装依赖后执行：
+全量 strict 目前未通过。原命令 `uv run --no-sync mypy src scripts tests` 会因脚本模块重复识别而中止；`--explicit-package-bases` 解决模块识别，不降低 strict，随后仍报告 9 个测试文件的 88 项既存错误。复核日期、范围与历史依据见[进度页](docs/status.md#未完成事项)。不能通过只检查 `src`、放宽 strict、排除测试或新增忽略规则宣称全仓通过；应分别报告既存诊断和新增失败。
+
+前端变更执行：
 
 ```bash
 pnpm --dir web-ui typecheck
@@ -89,4 +97,19 @@ pnpm --dir web-ui format:check
 pnpm --dir web-ui build
 ```
 
-只修改文档时，核对描述与现有代码/配置、相对链接、标题锚点和 `git diff --check`；不为验证文档执行启动交易、数据导入或迁移命令。协作与实施约束见 [AGENTS.md](AGENTS.md)。
+上述验证不主动改源码，但会产生类型检查缓存、覆盖率或 `dist/` 等构建产物。修改 Compose 时另用 `docker compose config --quiet` 检查配置渲染；它不启动服务，也不证明运行验收通过。
+
+API 契约变更还须更新前端生成类型，再执行相关 Python 与前端检查。下面的生成命令会写入 `web-ui/.generated/openapi.json` 和 `web-ui/src/api/schema.d.ts`，不是只读验证；生成前保留已有差异，生成后审阅增量，避免把原有改动误归为本轮：
+
+```bash
+pnpm --dir web-ui api:generate
+git diff -- web-ui/src/api/schema.d.ts
+```
+
+生成入口为 [export_openapi.py](scripts/export_openapi.py)，不需要启动 Web 服务；不要手写生成类型。API 与生成结果应同步，未改契约时生成不应引入新差异。
+
+`ruff check --fix`、`ruff format` 和 `pnpm --dir web-ui format` 会修改源码，仅在授权改动范围内使用并复核差异。`uv run --no-sync pre-commit run --all-files` 也会执行自动修复、格式化和类型生成，不能当作只读检查。
+
+仓库存在 [.pre-commit-config.yaml](.pre-commit-config.yaml) 不代表 hook 已安装；本地提交钩子需另行安装，例如 `uv run --no-sync pre-commit install`，也不代表 CI 门禁。当前 hook 的 mypy 入口仍使用有模块识别冲突的原命令，需要单独修复配置，不能宣称已具备全量自动门禁。
+
+纯文档变更只核对描述与现有代码/配置、相对链接、修改过的标题锚点、命令语义和 `git diff --check`；不必重跑业务测试，也不执行修复、生成、服务启停、采集、导入或迁移。协作与实施约束见 [AGENTS.md](AGENTS.md)。

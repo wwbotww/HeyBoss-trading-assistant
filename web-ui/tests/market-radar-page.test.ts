@@ -1,3 +1,4 @@
+import { focusManager, onlineManager } from '@tanstack/vue-query'
 import { flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -10,11 +11,324 @@ import {
   marketFundamentalsFixture,
   marketMacroFixture,
   marketRadarSummaryFixture,
+  marketRadarSyncStatusFixture,
   marketRadarStocksFixture,
+  marketRadarSectorsFixture,
 } from './fixtures'
 import { mountPage } from './helpers'
 
 describe('市场雷达页面', () => {
+  it('最近事件深链校验日期，切换窗口清除冲突筛选并保留其他参数', async () => {
+    const fetchMock = installApiMock()
+    const { wrapper, router } = await mountPage(
+      MarketRadarPage,
+      '/market-radar?event_window=recent&event_kind=earnings&event_date=2026-08-29&keep=context',
+    )
+    await flushPromises()
+    expect(wrapper.findAll('.event-day')).toHaveLength(1)
+    expect(wrapper.get('.events-panel').text()).toContain('Synthetic Recent 0')
+    expect(wrapper.get('.events-panel').text()).not.toContain('AAPL.US')
+    await wrapper.get('[aria-label="事件窗口筛选"] button:first-child').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.event_window).toBeUndefined()
+    expect(router.currentRoute.value.query.event_date).toBeUndefined()
+    expect(router.currentRoute.value.query.keep).toBe('context')
+    expect(wrapper.findAll('.event-day')).toHaveLength(14)
+    await wrapper.get('[aria-label="事件窗口筛选"] button:last-child').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.event_window).toBe('recent')
+    expect(router.currentRoute.value.query.event_kind).toBeUndefined()
+    await wrapper.get('[aria-label="筛选 2026-08-30"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.event_date).toBe('2026-08-30')
+    expect(wrapper.get('.event-day').text()).toContain('未取得实际值')
+    await router.replace({ query: { event_window: 'recent', event_date: '2026-09-05' } })
+    await flushPromises()
+    expect(wrapper.findAll('.event-day')).toHaveLength(7)
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input]) => input instanceof Request && new URL(input.url).pathname.endsWith('/events'),
+      ),
+    ).toHaveLength(1)
+    wrapper.unmount()
+  })
+  it.each([
+    '/market-radar',
+    '/market-radar?view=stocks',
+    '/market-radar?view=stocks&sector=information_technology',
+  ])('冷缓存从 %s 进入个股可独立使用板块筛选', async (path) => {
+    const fetchMock = installApiMock()
+    const { wrapper, router } = await mountPage(MarketRadarPage, path)
+    if (path === '/market-radar') await router.push('/market-radar?view=stocks')
+    await flushPromises()
+    const select = wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]')
+    expect(select.element.disabled).toBe(false)
+    expect(select.findAll('option')).toHaveLength(marketRadarSectorsFixture.items.length + 1)
+    await select.setValue('information_technology')
+    await flushPromises()
+    expect(router.currentRoute.value.query.sector).toBe('information_technology')
+    expect(
+      fetchMock.mock.calls.some(
+        ([input]) =>
+          input instanceof Request &&
+          new URL(input.url).pathname.endsWith('/stocks') &&
+          new URL(input.url).searchParams.get('sector') === 'information_technology',
+      ),
+    ).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('板块失败可重试并保留选择，已有缓存=%s', async (cached) => {
+    let fail = !cached
+    const fetchMock = installApiMock()
+    const normal = fetchMock.getMockImplementation()
+    if (!normal) throw new Error('缺少 API fixture')
+    fetchMock.mockImplementation((input, init) => {
+      if (fail && input instanceof Request && new URL(input.url).pathname.endsWith('/sectors'))
+        return Promise.resolve(
+          new Response('{}', { status: 503, headers: { 'Content-Type': 'application/json' } }),
+        )
+      return normal(input, init)
+    })
+    const { wrapper, router, queryClient } = await mountPage(
+      MarketRadarPage,
+      '/market-radar?view=stocks&sector=information_technology',
+    )
+    await flushPromises()
+    if (cached) {
+      fail = true
+      await queryClient.invalidateQueries({ queryKey: ['market-radar', 'sectors'] })
+      await flushPromises()
+    }
+    expect(wrapper.get('[role="status"]#sector-options-status').text()).toContain(
+      cached ? '使用上次读取的选项' : '板块选项读取失败',
+    )
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]').element.value).toBe(
+      'information_technology',
+    )
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]').element.disabled).toBe(!cached)
+    expect(wrapper.get('tbody').text()).toContain('AAPL')
+    fail = false
+    await wrapper.get('#sector-options-status button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('#sector-options-status').exists()).toBe(false)
+    expect(router.currentRoute.value.query.sector).toBe('information_technology')
+    wrapper.unmount()
+  })
+
+  it('选项加载期间保留深链选择和个股结果', async () => {
+    const fetchMock = installApiMock()
+    const normal = fetchMock.getMockImplementation()
+    if (!normal) throw new Error('缺少 API fixture')
+    let finish: (() => void) | undefined
+    fetchMock.mockImplementation((input, init) => {
+      if (input instanceof Request && new URL(input.url).pathname.endsWith('/sectors'))
+        return new Promise<Response>((resolve) => {
+          finish = () => {
+            void normal(input, init).then(resolve)
+          }
+        })
+      return normal(input, init)
+    })
+    const { wrapper } = await mountPage(
+      MarketRadarPage,
+      '/market-radar?view=stocks&sector=information_technology',
+    )
+    await flushPromises()
+    expect(wrapper.get('#sector-options-status').text()).toContain('正在读取')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]').element.value).toBe(
+      'information_technology',
+    )
+    expect(wrapper.get('tbody').text()).toContain('AAPL')
+    finish?.()
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]').element.disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['missing', 'empty', 'available'] as const)(
+    '板块来源 %s 不伪装为只有全部板块',
+    async (state) => {
+      installApiMock({
+        '/api/market-radar/sectors': {
+          ...marketRadarSectorsFixture,
+          source_state: state,
+          items: [],
+        },
+      })
+      const { wrapper } = await mountPage(MarketRadarPage, '/market-radar?view=stocks')
+      await flushPromises()
+      expect(wrapper.get('#sector-options-status').text()).toContain(
+        state === 'available' ? '没有板块选项' : '板块选项不可用',
+      )
+      expect(wrapper.get<HTMLSelectElement>('[aria-label="板块筛选"]').element.disabled).toBe(true)
+      wrapper.unmount()
+    },
+  )
+
+  it.each([
+    [false, false, 1],
+    [true, false, 1],
+    [false, true, 8],
+    [true, true, 8],
+    [false, false, 7],
+  ] as const)(
+    '宽度陈旧原因独立：价格=%s，成员=%s，成员年龄=%s',
+    async (priceStale, memberStale, age) => {
+      installApiMock({
+        '/api/market-radar/breadth': {
+          ...marketBreadthFixture,
+          validity: priceStale || memberStale ? 'stale' : 'complete',
+          freshness: {
+            membership_age_days: age,
+            stale_after_days: 7,
+            price: {
+              state: priceStale ? 'stale' : 'fresh',
+              actual_as_of_date: '2026-09-02',
+              expected_as_of_date: priceStale ? '2026-09-03' : '2026-09-02',
+              lag_sessions: priceStale ? 1 : 0,
+            },
+          },
+        },
+      })
+      const { wrapper } = await mountPage(MarketRadarPage, '/market-radar')
+      await flushPromises()
+      expect(
+        wrapper.text().includes('宽度价格陈旧：实际 2026-09-02，目标 2026-09-03，落后 1 个交易日'),
+      ).toBe(priceStale)
+      expect(wrapper.text().includes('SPY 持仓代理已超过')).toBe(memberStale)
+      wrapper.unmount()
+    },
+  )
+
+  it('总体陈旧但新鲜度事实缺失时不推造成员超期', async () => {
+    installApiMock({
+      '/api/market-radar/breadth': { ...marketBreadthFixture, validity: 'stale', freshness: null },
+    })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar')
+    await flushPromises()
+    expect(wrapper.text()).toContain('宽度新鲜度信息不可用')
+    expect(wrapper.text()).not.toContain('SPY 持仓代理已超过')
+    wrapper.unmount()
+  })
+
+  it('个股表与详情明确单位、窗口和风险中性色', async () => {
+    installApiMock()
+    const { wrapper } = await mountPage(
+      MarketRadarPage,
+      '/market-radar?view=stocks&instrument=AAPL.US',
+    )
+    await flushPromises()
+    expect(wrapper.text()).toContain('年化波动率（20 日估计）')
+    expect(wrapper.text()).toContain('跳过最近 21 个交易日')
+    expect(wrapper.text()).toContain('最低需要 127 根日线')
+    const cells = wrapper.findAll('tbody tr:first-child td')
+    expect(cells[2]?.text()).toContain('个百分点')
+    for (const index of [3, 4, 5, 6])
+      expect(cells[index]?.find('.radar-metric--neutral').exists()).toBe(true)
+    expect(wrapper.get('[role="dialog"]').findAll('.radar-metric--neutral')).toHaveLength(4)
+    wrapper.unmount()
+  })
+  it('更新故障与陈旧数据分别展示，错误代码不直接暴露给用户', async () => {
+    installApiMock({
+      '/api/market-radar/sync-status': {
+        ...marketRadarSyncStatusFixture,
+        worker_state: 'stale',
+        jobs: marketRadarSyncStatusFixture.jobs.map((job) => ({
+          ...job,
+          state: 'failed',
+          target_satisfied: false,
+          error_code: 'InternalSecretError',
+        })),
+      },
+      '/api/market-radar/summary': {
+        ...marketRadarSummaryFixture,
+        price_freshness: {
+          state: 'stale',
+          expected_as_of_date: '2026-09-29',
+          actual_as_of_date: '2026-09-02',
+          lag_sessions: 18,
+        },
+      },
+    })
+    const { wrapper } = await mountPage(MarketRadarPage, '/market-radar')
+    await flushPromises()
+    expect(wrapper.text()).toContain('采集服务心跳过期')
+    expect(wrapper.text()).toContain('0/6 来源满足目标日期')
+    expect(wrapper.text()).toContain('落后 18 个交易日')
+    expect(wrapper.text()).not.toContain('InternalSecretError')
+    expect(wrapper.get('.radar-sync details').attributes()).toHaveProperty('open')
+    expect(wrapper.find('.price-summary').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('每分钟只重读当前视图；隐藏时暂停，恢复、联网、焦点与午夜重读，卸载后停止', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    })
+    vi.setSystemTime(new Date('2026-09-30T23:58:30Z'))
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    focusManager.setFocused(true)
+    const fetchMock = installApiMock()
+    const { wrapper, queryClient } = await mountPage(MarketRadarPage, '/market-radar')
+    const count = (suffix: string) =>
+      fetchMock.mock.calls.filter(
+        ([input]) => input instanceof Request && new URL(input.url).pathname.endsWith(suffix),
+      ).length
+    try {
+      await flushPromises()
+      expect(count('/summary')).toBe(1)
+      expect(count('/stocks')).toBe(0)
+      expect(count('/sectors')).toBe(0)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushPromises()
+      expect(count('/summary')).toBe(2)
+      visibility.mockReturnValue('hidden')
+      focusManager.setFocused(false)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(count('/summary')).toBe(2)
+      visibility.mockReturnValue('visible')
+      focusManager.setFocused(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+      const recovered = count('/summary')
+      expect(recovered).toBeGreaterThan(2)
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(count('/summary')).toBeGreaterThan(recovered)
+      const beforeNetwork = count('/summary')
+      onlineManager.setOnline(false)
+      onlineManager.setOnline(true)
+      await flushPromises()
+      expect(count('/summary')).toBeGreaterThan(beforeNetwork)
+      vi.setSystemTime(new Date('2026-10-01T23:59:59Z'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+      const beforeMidnight = count('/events')
+      await vi.advanceTimersByTimeAsync(1_101)
+      await flushPromises()
+      expect(count('/events')).toBeGreaterThan(beforeMidnight)
+      wrapper.unmount()
+      const stopped = fetchMock.mock.calls.length
+      await vi.advanceTimersByTimeAsync(120_000)
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(fetchMock.mock.calls).toHaveLength(stopped)
+      expect(
+        fetchMock.mock.calls.every(([input]) => input instanceof Request && input.method === 'GET'),
+      ).toBe(true)
+    } finally {
+      wrapper.unmount()
+      queryClient.clear()
+      visibility.mockRestore()
+      focusManager.setFocused(undefined)
+      onlineManager.setOnline(true)
+      vi.useRealTimers()
+    }
+  })
+
   it.each(['missing', 'empty', 'error'] as const)(
     '板块盈利首次 %s 不影响价格且无旧数值',
     async (state) => {

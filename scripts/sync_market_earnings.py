@@ -13,6 +13,10 @@ from typing import NoReturn
 from trading_assistant.data.config import load_data_config
 from trading_assistant.market_radar.config import load_market_radar_config
 from trading_assistant.market_radar.eodhd_components import EodhdIndexComponentsSource
+from trading_assistant.market_radar.runtime import (
+    load_market_radar_runtime,
+    market_radar_writer_lock,
+)
 from trading_assistant.market_radar.service import (
     MarketEarningsSyncSummary,
     sync_market_earnings,
@@ -49,6 +53,7 @@ async def _run(
 ) -> MarketEarningsSyncSummary:
     """从环境变量和非敏感配置装配盈利同步。"""
     try:
+        runtime = load_market_radar_runtime(PROJECT_ROOT, os.environ)
         token = os.getenv("EODHD_API_TOKEN", "").strip()
         data_config = load_data_config(args.data_config)
         market_config = load_market_radar_config(args.market_config)
@@ -64,10 +69,7 @@ async def _run(
                 max_attempts=source_settings.max_attempts,
                 retry_backoff_seconds=source_settings.retry_backoff_seconds,
             ),
-            database_url=os.getenv(
-                "MARKET_RADAR_DATABASE_URL",
-                f"sqlite:///{PROJECT_ROOT / 'data' / 'market-radar.db'}",
-            ),
+            database_url=runtime.database_url,
             market_config_path=args.market_config,
             data_config_path=args.data_config,
             eodhd_api_token=token,
@@ -111,8 +113,10 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     try:
-        summary = asyncio.run(_run(args, parser))
-    except (ConnectionError, RuntimeError, TimeoutError) as exc:
+        runtime = load_market_radar_runtime(PROJECT_ROOT, os.environ)
+        with market_radar_writer_lock(runtime):
+            summary = asyncio.run(_run(args, parser))
+    except (ValueError, OSError, RuntimeError) as exc:
         print(f"Market earnings sync failed: {type(exc).__name__}")
         return 1
     _print_summary(summary)

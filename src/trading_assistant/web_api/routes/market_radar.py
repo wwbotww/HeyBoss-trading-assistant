@@ -16,6 +16,7 @@ from trading_assistant.web_api.schemas import (
     MarketEventsResponse,
     MarketFundamentalsResponse,
     MarketRadarSummaryResponse,
+    MarketRadarSyncStatusResponse,
     SectorRadarListResponse,
     SectorRadarResponse,
     StockRadarPageResponse,
@@ -71,7 +72,7 @@ def get_earnings(
 def get_events(
     services: Annotated[ApplicationServices, Depends(get_services)],
 ) -> MarketEventsResponse:
-    """返回固定十四日事件轴, 两类已发布来源独立降级。"""
+    """返回未来十四日及最近七日经济事件, 两类已发布来源独立降级。"""
     return MarketEventsResponse.model_validate(services.market_radar.events())
 
 
@@ -153,3 +154,15 @@ def get_stock(
 ) -> StockRadarResponse:
     """返回完整快照白名单中的一个 watchlist 标的。"""
     return StockRadarResponse.model_validate(services.market_radar.stock(instrument_id))
+
+
+@router.get(
+    "/sync-status",
+    response_model=MarketRadarSyncStatusResponse,
+    operation_id="getMarketRadarSyncStatus",
+)
+def get_sync_status(
+    services: Annotated[ApplicationServices, Depends(get_services)],
+) -> MarketRadarSyncStatusResponse:
+    """只读采集进程和各来源事实, 不启动或重试采集。"""
+    return MarketRadarSyncStatusResponse.model_validate(services.market_radar.sync_status())

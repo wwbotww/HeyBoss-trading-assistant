@@ -155,8 +155,8 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 ### 市场雷达链路
 
 ```text
-六个 sync_market_*.py CLI（操作者显式选择, 无常驻调度）
-  ├─ 价格 / 当前宽度 / 宏观价格 → 共享 EODHD 适配与 NT Catalog
+sync_market_daily.py（固定六来源每日服务）+ 六个单源维护 CLI
+  ├─ 价格 / 当前宽度 / 宏观价格 → 共享 EODHD 适配 + 雷达专用 NT Catalog
   ├─ State Street 当前成员 / EODHD 行业分类 → 中立成员契约
   └─ FRED / EODHD 盈利、基本面、经济事件 → 规范输入
                               ↓
@@ -176,7 +176,7 @@ FacDigger 独立负责特征、冻结 scaler、模型和推理。它只向 HeyBo
 | `sync_market_fundamentals.py`    | 显式观察股当前财报 → 可复算的最小规范输入与基本面快照                 |
 | `sync_market_economic_events.py` | 美国固定 31 日请求 → 当前经济事件规范快照                             |
 
-成员权威来源在 CLI 装配，当前使用 State Street SPY 持仓代理；EODHD Components 只负责行业分类。更换来源不改变下游成员契约、指标、数据库和 API。当前成员不是历史指数成分，来源不足必须保留覆盖率和缺失状态，不能补成历史 PIT 数据。
+成员权威来源在 CLI/每日服务装配，当前使用 State Street SPY 持仓代理；EODHD Components 只负责行业分类。更换来源不改变下游成员契约、指标、数据库和 API。当前成员不是历史指数成分，来源不足必须保留覆盖率和缺失状态，不能补成历史 PIT 数据。
 
 快照查询不请求供应商、不扫描市场 Catalog、不现场计算金融指标，也不创建表；旧库补表只由显式同步复用 `create_schema()` 完成。市场库与 Catalog 不是跨存储事务：采集失败可能已留下合法 Catalog 增量和 FAILED 审计，不能承诺整站原子刷新。宏观当前修订、盈利、财报和事件均不得伪装为历史可用数据。详细指标、时间和缺失口径见 [市场雷达参考](market-radar.md)。
 
@@ -362,7 +362,7 @@ Vue 前端提供操作总览、账户与持仓、策略与因子、决策流、�
 
 Compose 的 `web` profile 将 API 与前端作为两个独立服务装配。`web-api` 不暴露宿主机端口、不继承完整 `.env`，只接收查询所需的路径、账户作用域和快照陈旧阈值；Catalog、数据库目录和报告目录均为只读挂载。`web-ui` 仅绑定本机回环地址，由 Nginx 提供静态资源、SPA 深链和同源 `/api` 代理。上游不可用时代理返回统一的 `application/problem+json`，不会把 Nginx HTML 错误混入前端契约。
 
-独立 `market-radar-sync` profile 复用根 Python 镜像，默认命令覆盖为价格 CLI 的 `--help`，不继承交易应用锚点、完整 `.env`、端口、依赖或重启策略。仅传入 `EODHD_API_TOKEN`、`FRED_API_KEY`、`CATALOG_PATH`、`MARKET_RADAR_DATABASE_URL`、`MARKET_RADAR_REPORT_ROOT` 和 `LOG_LEVEL`；API 仅接收八项查询变量，UI 不获得供应商凭据。同步服务的三个挂载目录可写，因此依靠显式独立库路径与业务写入边界，不能声称操作系统已经逐文件隔离交易数据库。共享 Catalog 的写入必须串行。
+独立 `market-radar-sync` profile 默认只显示维护帮助，`market-radar` profile 的 `market-radar-daily` 为固定六来源常驻采集。两者仅接收 EODHD/FRED、`MARKET_RADAR_CATALOG_PATH`、市场库/报告路径与日志设置，只挂载 `runtime/market-radar` 三类目录，不挂载交易存储、不继承交易凭据或依赖。API 额外只读挂载雷达 data，UI 不获得供应商凭据。按实际 Catalog/数据库两项资源持进程锁，并以首次独占创建的 `.platform` 绑定拒绝 macOS/Docker 跨平台写同一目录；普通 Catalog 文件锁继续保护发布区间。运行状态的两张附加表由写端初始化，GET 不迁移。
 
 市场三视图及个股两维度分别披露各源日期、覆盖和新鲜度；基本面与价格互不遮蔽。未来事件只读已发布经济批次与同批财报，在查询 UTC 日起的 14 日窗口中独立降级。重新读取只有 GET，不采集或下单；同路径保留滚动、跨页回顶，键盘标签、宽表和详情焦点由共用组件实现。
 

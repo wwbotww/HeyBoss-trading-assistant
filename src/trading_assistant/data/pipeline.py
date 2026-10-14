@@ -16,6 +16,7 @@ from nautilus_trader.model.data import Bar, BarType
 from trading_assistant.data.catalog import CatalogRepository
 from trading_assistant.data.config import DataPipelineConfig, InstrumentSpec
 from trading_assistant.data.corporate_actions import CorporateActionRepository, CorporateActions
+from trading_assistant.data.eodhd_http import EodhdTemporaryHttpError
 from trading_assistant.data.quality import (
     DataQualityReport,
     QualityIssue,
@@ -40,6 +41,7 @@ class PipelineSummary:
     instrument_reports: tuple[DataQualityReport, ...]
     issues: tuple[QualityIssue, ...]
     report_path: Path
+    failure_kinds: tuple[Literal["temporary", "rate_limited", "permanent"], ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -310,6 +312,7 @@ class HistoricalDataPipeline:
         bars_written = 0
         corporate_actions_written = 0
         processed = 0
+        failure_kinds: list[Literal["temporary", "rate_limited", "permanent"]] = []
         now_ns = self._clock_ns()
 
         await self._source.connect()
@@ -379,6 +382,17 @@ class HistoricalDataPipeline:
                     context = result.context
                     spec = context.spec
                     if result.error is not None:
+                        failure_kinds.append(
+                            "rate_limited"
+                            if isinstance(result.error, EodhdTemporaryHttpError)
+                            and result.error.status_code == 429
+                            else "temporary"
+                            if isinstance(
+                                result.error,
+                                (ConnectionError, TimeoutError, EodhdTemporaryHttpError),
+                            )
+                            else "permanent"
+                        )
                         issues.append(
                             QualityIssue(
                                 code="fetch_failed",
@@ -516,6 +530,7 @@ class HistoricalDataPipeline:
             instrument_reports=tuple(reports),
             issues=tuple(issues),
             report_path=report_path,
+            failure_kinds=tuple(failure_kinds),
         )
 
     def validate_catalog(self, instruments: Sequence[InstrumentSpec]) -> PipelineSummary:

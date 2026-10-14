@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 from typing import Any, cast
 
@@ -326,4 +326,50 @@ def load_market_radar_config(path: Path) -> MarketRadarConfig:
         monitor_instruments=monitors,
         calendar_symbols=calendar_symbols,
         fundamentals_symbols=fundamentals_symbols,
+    )
+
+
+@dataclass(frozen=True)
+class MarketRadarDailyConfig:
+    """六条固定同步任务的非敏感每日运行参数。"""
+
+    run_at_utc: time
+    poll_interval_seconds: int = 60
+    retry_interval_seconds: int = 3600
+    max_attempts_per_day: int = 4
+
+    def __post_init__(self) -> None:
+        if (
+            self.run_at_utc.tzinfo is not None
+            or self.run_at_utc.second
+            or self.run_at_utc.microsecond
+        ):
+            raise ValueError("Radar run_at_utc must be a plain hour and minute")
+        if not 1 <= self.poll_interval_seconds <= 60:
+            raise ValueError("Radar poll interval must be between 1 and 60 seconds")
+        if self.retry_interval_seconds < self.poll_interval_seconds:
+            raise ValueError("Radar retry interval must not be shorter than polling")
+        if not 1 <= self.max_attempts_per_day <= 24:
+            raise ValueError("Radar attempt budget must be between 1 and 24")
+
+
+def load_market_radar_daily_config(path: Path) -> MarketRadarDailyConfig:
+    """严格读取每日配置, 禁止未知字段和隐式布尔数字。"""
+    root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), name="daily")
+    _exact_keys(
+        root,
+        {"run_at_utc", "poll_interval_seconds", "retry_interval_seconds", "max_attempts_per_day"},
+        name="daily",
+    )
+    text = root["run_at_utc"]
+    if not isinstance(text, str) or not re.fullmatch(r"\d{2}:\d{2}", text):
+        raise ValueError("Radar run_at_utc must use HH:MM")
+    for key in ("poll_interval_seconds", "retry_interval_seconds", "max_attempts_per_day"):
+        if type(root[key]) is not int:
+            raise ValueError("Radar daily intervals and budget must be integers")
+    return MarketRadarDailyConfig(
+        time.fromisoformat(text),
+        root["poll_interval_seconds"],
+        root["retry_interval_seconds"],
+        root["max_attempts_per_day"],
     )

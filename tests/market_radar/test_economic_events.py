@@ -161,7 +161,8 @@ def test_snapshot_accepts_empty_and_normalizes_only_capture_timezone() -> None:
     [
         {"captured_at_utc": ECONOMIC_AT.replace(tzinfo=None)},
         {"captured_at_utc": ECONOMIC_AT + timedelta(days=1)},
-        {"window_start": date(2026, 9, 4)},
+        {"window_start": date(2026, 8, 28)},
+        {"window_start": date(2026, 9, 6)},
         {"window_end": date(2026, 10, 4)},
         {"source": "another_source"},
         {"country": "GB"},
@@ -189,6 +190,30 @@ def test_snapshot_rejects_wrong_capture_window_or_unterminated_page(
 ) -> None:
     with pytest.raises(ValidationError):
         economic_snapshot(**changes)
+
+
+@pytest.mark.parametrize("lookback", [0, 1, 7])
+def test_snapshot_preserves_actual_window_including_existing_batches(lookback: int) -> None:
+    start = ECONOMIC_AT.date() - timedelta(days=lookback)
+    event = economic_event(event_date=start)
+    snapshot = economic_snapshot(
+        window_start=start,
+        batch=EconomicEventBatch(
+            events=(event,), request_count=1, raw_record_count=1, duplicate_count=0
+        ),
+    )
+    assert EconomicEventSnapshot.from_payload(snapshot.to_payload()) == snapshot
+    assert snapshot.window_start == start
+    with pytest.raises(ValidationError, match="out-of-range"):
+        economic_snapshot(
+            window_start=start,
+            batch=EconomicEventBatch(
+                events=(economic_event(event_date=start - timedelta(days=1)),),
+                request_count=1,
+                raw_record_count=1,
+                duplicate_count=0,
+            ),
+        )
 
 
 @pytest.mark.parametrize("case", ["extra", "number", "count", "date", "null", "nan"])

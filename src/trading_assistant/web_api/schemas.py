@@ -379,9 +379,39 @@ class RadarCoverageResponse(ApiSchema):
     ratio: float
 
 
+class RadarPriceFreshnessResponse(ApiSchema):
+    expected_as_of_date: date
+    actual_as_of_date: date | None
+    lag_sessions: int | None
+    state: Literal["fresh", "stale", "unavailable"]
+
+
+class RadarSyncJobResponse(ApiSchema):
+    job: str
+    target_date: date
+    state: str
+    last_attempt_at_utc: datetime | None
+    last_success_at_utc: datetime | None
+    published_as_of_date: date | None
+    attempts_used: int
+    next_retry_at_utc: datetime | None
+    error_code: str | None
+    target_satisfied: bool
+    data_validity: str | None
+
+
+class MarketRadarSyncStatusResponse(ApiSchema):
+    observed_at_utc: datetime
+    worker_state: Literal["not_configured", "running", "idle", "stopped", "stale"]
+    last_heartbeat_at_utc: datetime | None
+    next_scheduled_at_utc: datetime | None
+    jobs: list[RadarSyncJobResponse]
+
+
 class RadarFreshnessResponse(ApiSchema):
     membership_age_days: int
     stale_after_days: int
+    price: RadarPriceFreshnessResponse | None = None
 
 
 class BreadthMetricResponse(ApiSchema):
@@ -575,6 +605,13 @@ class MarketEventDayResponse(ApiSchema):
     earnings_events: list[EarningsEventResponse]
 
 
+class RecentEconomicEventsResponse(ApiSchema):
+    window_start: date
+    window_end: date
+    source: EventSourceResponse
+    days: list[MarketEventDayResponse]
+
+
 class MarketEventsResponse(ApiSchema):
     observed_at_utc: datetime
     window_start: date
@@ -582,6 +619,7 @@ class MarketEventsResponse(ApiSchema):
     economic_source: EventSourceResponse
     earnings_source: EventSourceResponse
     days: list[MarketEventDayResponse]
+    recent_economic: RecentEconomicEventsResponse
 
 
 class FundamentalFreshnessResponse(ApiSchema):
@@ -644,6 +682,8 @@ class MarketRadarSummaryResponse(ApiSchema):
     market: RadarMarketResponse | None
     modules: list[RadarModuleResponse]
 
+    price_freshness: RadarPriceFreshnessResponse | None = None
+
 
 class SectorRadarResponse(ApiSchema):
     sector_id: str
@@ -658,6 +698,8 @@ class SectorRadarListResponse(ApiSchema):
     as_of_date: date | None
     calculated_at_utc: datetime | None
     items: list[SectorRadarResponse]
+
+    price_freshness: RadarPriceFreshnessResponse | None = None
 
 
 class StockRadarResponse(ApiSchema):
@@ -681,6 +723,8 @@ class StockRadarPageResponse(ApiSchema):
     offset: int
     limit: int
     has_more: bool
+
+    price_freshness: RadarPriceFreshnessResponse | None = None
 
 
 class SourceStatusResponse(ApiSchema):

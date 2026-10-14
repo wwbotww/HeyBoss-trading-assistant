@@ -8,12 +8,97 @@ import { marketEventsFixture } from './fixtures'
 function mountPanel(data: MarketEvents = structuredClone(marketEventsFixture)) {
   return mount(MarketEventsPanel, {
     attachTo: document.body,
-    props: { data, loading: false, refreshing: false, error: undefined, kind: 'all', date: '' },
+    props: {
+      data,
+      loading: false,
+      refreshing: false,
+      error: undefined,
+      kind: 'all',
+      date: '',
+      window: 'upcoming',
+    },
     global: { stubs: { Teleport: true } },
   })
 }
 
 describe('未来事件面板', () => {
+  it('最近窗口独立展示覆盖、原始实际值与缺失含义', async () => {
+    const wrapper = mountPanel()
+    await wrapper.get('[aria-label="事件窗口筛选"] button:last-child').trigger('click')
+    expect(wrapper.emitted('update:window')).toEqual([['recent']])
+    await wrapper.setProps({ window: 'recent', kind: 'earnings' })
+    expect(wrapper.text()).toContain('最近七日经济事件结果')
+    expect(wrapper.text()).toContain('窗口 2026-08-29 — 2026-09-04')
+    expect(wrapper.text()).toContain('日期覆盖 7 / 7 日')
+    expect(wrapper.findAll('.event-source')).toHaveLength(1)
+    expect(wrapper.findAll('.event-dates button')).toHaveLength(7)
+    expect(wrapper.findAll('.event-row')).toHaveLength(3)
+    expect(wrapper.text()).toContain('实际值 0 · 预期 1.5 · 前值 —')
+    expect(wrapper.text()).toContain('实际值 -2')
+    expect(wrapper.text()).toContain('未取得实际值')
+    expect(wrapper.find('[aria-label="事件来源筛选"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="查看经济事件 Synthetic Recent 1"]').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('未取得实际值')
+    await wrapper.setProps({ window: 'upcoming', kind: 'all' })
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.findAll('.event-dates button')).toHaveLength(14)
+    expect(wrapper.findAll('.event-source')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it.each(['uncovered', 'partial'] as const)(
+    '最近窗口 %s 不复用未来窗口的完整覆盖',
+    async (state) => {
+      const data = structuredClone(marketEventsFixture)
+      const source = data.recent_economic.source
+      source.coverage = {
+        state,
+        covered_start: state === 'partial' ? '2026-09-04' : null,
+        covered_end: state === 'partial' ? '2026-09-04' : null,
+        covered_days: state === 'partial' ? 1 : 0,
+      }
+      source.window_start = state === 'partial' ? '2026-09-04' : '2026-09-05'
+      source.window_event_count = state === 'partial' ? 0 : null
+      data.recent_economic.days.forEach((day) => {
+        day.economic_events = []
+      })
+      const wrapper = mountPanel(data)
+      await wrapper.setProps({ window: 'recent' })
+      expect(wrapper.text()).toContain(
+        state === 'partial' ? '日期覆盖 1 / 7 日' : '日期覆盖 0 / 7 日',
+      )
+      expect(wrapper.get('.event-source-count strong').text()).toBe(state === 'partial' ? '0' : '—')
+      expect(wrapper.get('[aria-label="筛选 2026-08-29"]').text()).toContain('数据有缺口')
+      await wrapper.setProps({ window: 'upcoming' })
+      expect(wrapper.text()).toContain('日期覆盖 14 / 14 日')
+      wrapper.unmount()
+    },
+  )
+
+  it('最近事件刷新实际值、撤回及查询跨日后关闭失效详情', async () => {
+    const data = structuredClone(marketEventsFixture)
+    const wrapper = mountPanel(data)
+    await wrapper.setProps({ window: 'recent' })
+    await wrapper.get('[aria-label="查看经济事件 Synthetic Recent 0"]').trigger('click')
+    const updated = structuredClone(data)
+    const event = updated.recent_economic.days[0]?.economic_events[0]
+    if (!event) throw new Error('缺少合成最近事件')
+    event.actual = 2.123456789
+    await wrapper.setProps({ data: updated })
+    expect(wrapper.get('[role="dialog"]').text()).toContain('2.123456789')
+    const moved = structuredClone(updated)
+    moved.recent_economic.days.shift()
+    moved.recent_economic.days.push({ day: '2026-09-05', economic_events: [], earnings_events: [] })
+    moved.recent_economic.window_start = '2026-08-30'
+    moved.recent_economic.window_end = '2026-09-05'
+    await wrapper.setProps({ data: moved })
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('可能已改期、撤回或超出窗口')
+    expect(wrapper.find('[aria-label="筛选 2026-08-29"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
   it('显示独立来源范围、十四日与原始时间语义', () => {
     const wrapper = mountPanel()
     expect(wrapper.findAll('.event-source')).toHaveLength(2)

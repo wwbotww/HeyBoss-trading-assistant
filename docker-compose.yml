@@ -88,21 +88,36 @@ services:
   market-radar-sync:
     build:
       context: .
-    # 只在操作者明确覆盖命令时采集, 不继承交易服务的完整环境与默认连接检查。
     command: ["python", "scripts/sync_market_radar.py", "--help"]
-    environment:
+    environment: &radar-environment
       EODHD_API_TOKEN: ${EODHD_API_TOKEN:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
-      CATALOG_PATH: /app/catalog/eodhd
-      MARKET_RADAR_DATABASE_URL: sqlite:////app/data/market-radar.db
-      MARKET_RADAR_REPORT_ROOT: /app/reports/market-radar
+      MARKET_RADAR_CATALOG_PATH: /app/market-radar/catalog/eodhd
+      MARKET_RADAR_DATABASE_URL: sqlite:////app/market-radar/data/market-radar.db
+      MARKET_RADAR_REPORT_ROOT: /app/market-radar/reports
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    # 目录级写权限; CLI 只写市场库, 所有共享 Catalog 写入必须串行。
-    volumes:
-      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog
-      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data
-      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports
+    # 雷达只有本域目录写权限, 不挂载任何交易存储。
+    volumes: &radar-volumes
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/catalog:/app/market-radar/catalog
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/data:/app/market-radar/data
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/reports:/app/market-radar/reports
     profiles: [market-radar-sync]
+
+  market-radar-daily:
+    build:
+      context: .
+    command: ["python", "scripts/sync_market_daily.py", "--serve"]
+    environment: *radar-environment
+    volumes: *radar-volumes
+    profiles: [market-radar]
+    restart: unless-stopped
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "python", "scripts/sync_market_daily.py", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   web-api:
     build:
@@ -119,7 +134,7 @@ services:
       CATALOG_PATH: /app/catalog/eodhd
       DATA_QUALITY_REPORT_ROOT: /app/reports/data-quality
       LIVE_DATABASE_URL: sqlite:////app/data/live.db
-      MARKET_RADAR_DATABASE_URL: sqlite:////app/data/market-radar.db
+      MARKET_RADAR_DATABASE_URL: sqlite:////app/market-radar/data/market-radar.db
       PORTFOLIO_SNAPSHOT_STALE_SECONDS: ${PORTFOLIO_SNAPSHOT_STALE_SECONDS:-90}
       REPORT_ROOT: /app/reports/backtests
       TWS_ACCOUNT: ${TWS_ACCOUNT:-}
@@ -127,6 +142,7 @@ services:
       - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/catalog:/app/catalog:ro
       - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/data:/app/data:ro
       - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/reports:/app/reports:ro
+      - ${HEYBOSS_RUNTIME_ROOT:-./runtime}/market-radar/data:/app/market-radar/data:ro
     expose:
       - "8000"
     healthcheck:

@@ -8,6 +8,9 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+ECONOMIC_EVENT_LOOKBACK_DAYS = 7
+ECONOMIC_EVENT_FORWARD_DAYS = 30
+
 
 class _EconomicModel(BaseModel):
     """拒绝隐式转换、多余字段、非有限值及绕过验证的嵌套实例。"""
@@ -110,11 +113,14 @@ class EconomicEventSnapshot(_EconomicModel):
 
     @model_validator(mode="after")
     def validate_snapshot(self) -> Self:
-        """只发布固定 31 日闭区间且已到达分页末尾的批次。"""
+        """核对有限回看与未来范围, 已存批次保留实际覆盖且必须分页完整。"""
         if self.as_of_date != self.captured_at_utc.date():
             raise ValueError("economic event snapshot must use its UTC capture date")
-        if self.window_start != self.as_of_date or (self.window_end - self.window_start).days != 30:
-            raise ValueError("economic event snapshot requires its 31-date capture window")
+        if (
+            not 0 <= (self.as_of_date - self.window_start).days <= ECONOMIC_EVENT_LOOKBACK_DAYS
+            or (self.window_end - self.as_of_date).days != ECONOMIC_EVENT_FORWARD_DAYS
+        ):
+            raise ValueError("economic event snapshot has an invalid capture window")
         if self.batch.request_count == 1 and self.batch.raw_record_count == 1000:
             raise ValueError("economic event snapshot has an unterminated first page")
         if any(
